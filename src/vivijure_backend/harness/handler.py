@@ -88,7 +88,7 @@ def run_job(
         bundle = Bundle.extract(Path(tar), workdir / "project")
 
         # --- validate + plan (CPU) ---
-        errs = validate(req, bundle.storyboard)
+        errs = validate(req, bundle.storyboard, cast=bundle.cast)
         if errs:
             raise HarnessError("invalid render job: " + "; ".join(errs))
         plan = make_plan(
@@ -96,6 +96,15 @@ def run_job(
             trained_slots=set(trained_slots) | set(req.pretrained_loras),
             existing_keyframes=existing_keyframes,
         )
+        # Post-plan ref check: validate can't know which slots actually need training (that
+        # depends on prior trained_slots from R2), so check refs here where the plan is settled.
+        ref_errs = [
+            f"character slot {s!r} has no reference images; LoRA training will fail"
+            for s in plan.lora.train
+            if not bundle.cast.characters.get(s) or not bundle.cast.characters[s].ref_paths
+        ]
+        if ref_errs:
+            raise HarnessError("invalid render job: " + "; ".join(ref_errs))
 
         # --- stage reused LoRAs from R2 (the harness owns R2; the GPU layer never touches it) ---
         # The plan skipped training for these slots; their adapters live as R2 keys, so pull each

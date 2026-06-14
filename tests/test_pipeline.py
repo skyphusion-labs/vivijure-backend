@@ -130,6 +130,8 @@ def _extract_bundle(tmp_path: Path) -> Bundle:
         "characters/registry.json": json.dumps({"characters": {
             "A": {"name": "Vesper", "prompt": "teal"}, "B": {"name": "Rhode", "prompt": "orange"}}}).encode(),
         "injected/shot_03.png": b"PNG-ish",   # the authored start_image for the INJECT shot
+        "characters/refs/A/ref_01.png": b"PNG-ish",
+        "characters/refs/B/ref_01.png": b"PNG-ish",
     }
     with tarfile.open(tarp, "w:gz") as tf:
         for name, data in members.items():
@@ -171,6 +173,25 @@ class StubPipeline(GpuPipeline):
         self.finished.append(shot_id)
         out_path = Path(out_path); out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(b"x"); return out_path
+
+
+# --------------------------------------------------------------------- cast-missing guard
+
+def test_execute_raises_on_cast_missing_trained_slot(tmp_path):
+    # If the plan lists a slot for training but the cast registry has no character for it,
+    # execute must raise HarnessError immediately rather than silently skipping and producing
+    # a keyframe with no identity (the old behaviour was a silent continue).
+    from vivijure_backend.contract import Bundle, Cast, Storyboard
+    from vivijure_backend.harness.handler import HarnessError
+    bundle = _extract_bundle(tmp_path)
+    # Remove B from the cast so the plan's "train B" slot has no character backing it.
+    bundle.cast.characters.pop("B")
+    req = RenderRequest.from_dict({"action": "render", "project": "neon",
+                                   "bundle_key": "x", "quality_tier": "draft"})
+    plan = make_plan(req, bundle.storyboard)
+    assert "B" in plan.lora.train
+    with pytest.raises(HarnessError, match="slot 'B'"):
+        StubPipeline(req.config).execute(plan, bundle, tmp_path / "work")
 
 
 # --------------------------------------------------------------------- execute orchestration
