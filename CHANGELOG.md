@@ -5,6 +5,24 @@ pre-1.0: PATCH for fixes and backend-only tweaks, MINOR for new features). Entri
 newest-first. History before this file was introduced lives in the git tags; the recent
 releases are summarized below from that history.
 
+## [0.2.16] -- 2026-06-14
+
+**fix(harness): worker hygiene -- Sprint 1 batch (#24, #25, #26, #46)**
+
+- **Workdir disk leak** (`handler.py`): `mkdtemp` job workdir is now cleaned up in a `try/finally` on all exit paths; previously leaked GBs of keyframes/clips/bundles per job on warm workers.
+- **Checkpoint orphans** (`lora_train.py`): `save_every` checkpoint subdirs are removed after the final adapter saves; no longer accumulate per training slot.
+- **R2 truncation detection** (`r2.py`): `get_file` now calls `head_object` before download and verifies `stat().st_size == ContentLength`; a truncated `.safetensors` now raises immediately instead of loading silently.
+- **Sentinel versioning** (`models_mirror.py`): both sentinels write `VJ_MODEL_VERSION` (default `"1"`) instead of `"ok"`; a version mismatch forces a re-mirror; no-creds skip warns loudly when the HF cache looks empty.
+- **ffprobe error surfacing** (`assemble.py`): `probe_duration` and `probe_has_audio` now log ffprobe's stderr and returncode on failure instead of returning silent `None`/`False`.
+- **Stray-clip warning** (`assemble.py`): `order_for_storyboard` logs dropped clip IDs when a shot_id is absent from the storyboard.
+- **Additive i2v negative prompt** (`pipeline.py`): a config `negative_prompt` is now prepended to the engine's base anti-static guard rather than replacing it.
+- **ip_adapter_scale forwarding** (`pipeline.py`): `keyframe_params_from` now uses `kc.ip_adapter_scale` (the top-level single-char field, default 0.65) instead of `mc.ip_adapter_scale_per_slot` (0.7 multi-char default). Closes the KEYFRAME_UNMAPPED note in the completeness guard.
+- **Empty-prompt validation** (`orchestrator.py`): scenes with blank/whitespace prompts are flagged at validate time.
+- **Cast membership validation** (`orchestrator.py` + `handler.py`): `validate()` accepts an optional `cast` and checks every `use_characters` slot exists in the cast registry; post-plan ref check in `run_job` ensures slots the plan will train have at least one reference image.
+- **Cast-missing HarnessError** (`pipeline.py`): `execute()` raises `HarnessError` instead of silently skipping a slot whose character is absent from the cast.
+- **i2v_tier mismatch warning** (`pipeline.py`): emits a `tier_mismatch` progress event when the running GPU card doesn't match the planned i2v tier.
+- Test bundles updated to include fake ref images; 5 new tests. 324 tests total.
+
 ## Unreleased
 
 **perf(mirror): lazy-load the heavy i2v weights to cut cold-start startup ~5x.** The cold-start

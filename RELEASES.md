@@ -11,6 +11,8 @@ tag drops the `backend-v` prefix).
 
 | git tag | GHCR image | source commit | built | notes |
 |---|---|---|---|---|
+| backend-v0.2.16 | 0.2.16 | 0ea8679 | (pending) | fix: Sprint 1 batch -- worker hygiene (#26, PR #69): mkdtemp workdir disk leak, save_every checkpoint orphans, R2 download truncation detection, sentinel versioning; assemble robustness + ip_adapter_scale forwarding (#25/#46, PR #70): ffprobe stderr surfacing, stray-clip warning, additive i2v negative prompt, ip_adapter_scale forwarding fix; planner accuracy + validation (#24, PR #71): empty-prompt validate, cast membership + refs checks, cast-missing HarnessError, i2v_tier mismatch warning, cost model comment. 324 tests. |
+|---|---|---|---|---|
 | backend-v0.2.15 | 0.2.15 | 58bf277 | (pending) | feat+fix: standalone finish_clip action for the finish-rife module (aaa2e51); fix reused/inject keyframes now reported in render result -- callers no longer get keyframes:[] on re-runs (Closes #67, 632f2ca). 25 pipeline tests. |
 |---|---|---|---|---|
 | backend-v0.2.14 | 0.2.14 | 82874fa | (pending) | fix(worker): rewrite job-done content-type patch -- drop aiohttp_retry dep, use client_session.post(json=...) so aiohttp sets Content-Type: application/json natively; replace silent except-pass with @event patch_applied / patch_failed logging. Closes #65. 319 tests. |
