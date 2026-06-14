@@ -304,6 +304,76 @@ def _restore_prior_state(store, project: str, workdir: Path) -> tuple[set[str], 
     return trained_slots, existing_keyframes
 
 
+def run_finish_job(
+    job: dict,
+    *,
+    store,
+    workdir: Path,
+    job_id: str = "local",
+    on_progress=None,
+) -> dict:
+    """Standalone finish pass: download a clip from R2, run RIFE interpolation and/or face restore,
+    upload the result, return the output key. No bundle, no pipeline, no Wan needed.
+
+    Input shape (the `input` dict from the RunPod job):
+      { action, project, shot_id, clip_key, config: { interpolate, interpolation_factor,
+        face_restore, face_fidelity, only_faces } }
+    """
+    from ..finish import FinishParams, finish_clip
+    from ..models import ModelServer
+
+    project = str(job.get("project") or "untitled")
+    shot_id = str(job.get("shot_id") or "shot")
+    clip_key_in = str(job.get("clip_key") or "")
+    cfg = job.get("config") or {}
+
+    progress = ProgressEmitter(store, project, job_id, on_progress=on_progress)
+    progress.emit("started", action="finish_clip", project=project)
+
+    if not clip_key_in:
+        raise HarnessError("finish_clip: clip_key is required")
+
+    params = FinishParams(
+        interpolate=bool(cfg.get("interpolate", True)),
+        factor=int(cfg.get("interpolation_factor", 2)),
+        target_fps=int(cfg.get("target_fps", 0)),
+        face_restore=bool(cfg.get("face_restore") not in (None, False, "none", "")),
+        face_restore_backend=str(cfg.get("face_restore") or "gfpgan") if cfg.get("face_restore") not in (None, False, "none", "") else "gfpgan",
+        face_fidelity=float(cfg.get("face_fidelity", 0.7)),
+        only_faces=bool(cfg.get("only_faces", True)),
+    )
+
+    local_in = workdir / "input.mp4"
+    local_out = workdir / "output.mp4"
+
+    try:
+        store.get_file(clip_key_in, local_in)
+    except Exception as e:
+        raise HarnessError(f"finish_clip: could not fetch clip {clip_key_in!r}: {e}")
+
+    server = ModelServer()
+    result = finish_clip(shot_id, local_in, local_out, server, params=params)
+
+    safe = lambda s: (s or "x").replace("/", "_").replace(" ", "_")
+    clip_key_out = f"renders/{safe(project)}/clips/{safe(shot_id)}_finished.mp4"
+    store.put_file(local_out, clip_key_out)
+
+    applied: list[str] = []
+    if result.interpolated:
+        applied.append(f"interpolate:{params.factor}x")
+    if result.face_restored:
+        applied.append(f"face_restore:{params.face_restore_backend}")
+
+    progress.complete(output_key=clip_key_out)
+    return {
+        "shot_id": shot_id,
+        "clip_key": clip_key_out,
+        "out_fps": result.out_fps,
+        "frames": result.frames_out,
+        "applied": applied,
+    }
+
+
 def handler(job: dict) -> dict:
     """RunPod serverless entry point. Mirrors models on a cold worker, builds the live R2
     client, runs the job through the deployed GPU pipeline, returns the response. RunPod passes
@@ -343,6 +413,11 @@ def handler(job: dict) -> dict:
     start_i2v_prefetch()
 
     workdir = Path(tempfile.mkdtemp(prefix="vj-job-"))
+
+    if str(payload.get("action", "render")) == "finish_clip":
+        return run_finish_job(payload, store=store, workdir=workdir,
+                              job_id=job_id, on_progress=on_progress)
+
     trained_slots, existing_keyframes = _restore_prior_state(store, project, workdir)
     return run_job(payload, pipeline=get_pipeline(), store=store, workdir=workdir,
                    job_id=job_id, mirrored=bool(mirrored), on_progress=on_progress,
