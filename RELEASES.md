@@ -11,6 +11,8 @@ tag drops the `backend-v` prefix).
 
 | git tag | GHCR image | source commit | built | notes |
 |---|---|---|---|---|
+| backend-v0.2.15 | 0.2.15 | 58bf277 | (pending) | feat+fix: standalone finish_clip action for the finish-rife module (aaa2e51); fix reused/inject keyframes now reported in render result -- callers no longer get keyframes:[] on re-runs (Closes #67, 632f2ca). 25 pipeline tests. |
+|---|---|---|---|---|
 | backend-v0.2.14 | 0.2.14 | 82874fa | (pending) | fix(worker): rewrite job-done content-type patch -- drop aiohttp_retry dep, use client_session.post(json=...) so aiohttp sets Content-Type: application/json natively; replace silent except-pass with @event patch_applied / patch_failed logging. Closes #65. 319 tests. |
 |---|---|---|---|---|
 | backend-v0.2.13 | 0.2.13 | da6b6c8 | 2026-06-14 (fleet) | fix(offline,worker): local_files_only=True on all remaining from_pretrained render-pipeline + lora_train calls (Closes #66); patch RunPod SDK _transmit to send application/json instead of x-www-form-urlencoded so job-done callback no longer 400s (Closes #65). 319 tests. Verified: v0213-verify-00 standard render, LoRA training (2 slots) + 6 keyframes + i2v (all 6 shots) + assemble + upload clean. #66 CONFIRMED fixed (zero offline probe warnings). #65 patch did NOT take effect (SDK still 400s on job-done; output available via streaming channel, not callback -- see issue for follow-up). |
