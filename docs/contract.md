@@ -126,6 +126,11 @@ routing flags it still reads off it (e.g. `finish_offloaded`).
 | `finalize` | no | reuse | yes | Animate over existing keyframes; zero training. |
 | `regen_shot` | no | as needed | no | Redraw specific keyframes (with `process_shot_ids`), no motion. |
 | `train_lora` | yes | no | no | Train character adapters only. |
+| `finish_clip` | no | no | no | Standalone finishing pass on one existing clip. Separate job shape (no bundle); see [the `finish_clip` job](#the-finish_clip-job). |
+
+The first five actions ride the `RenderRequest` shape above and the render pipeline. `finish_clip`
+is a sibling job type: the harness routes it directly to a standalone finishing pass that needs no
+bundle, planner, or Wan, so it carries its own input/output shape, documented below.
 
 ## Render result (response)
 
@@ -143,6 +148,71 @@ restores on the next render of this project.
 | `clips` | list[{shot_id, key, target_seconds?}] | Per-shot clip keys (present when shots were animated). |
 | `lora` | dict[slot, {lora_id}] | Trained and passed-through adapters by slot. |
 | `state_key` | str \| null | R2 key of the project state tarball for incremental re-render. |
+
+## The `finish_clip` job
+
+A standalone finishing pass on a single, already-rendered clip: RIFE frame interpolation and/or
+blind face restoration, nothing else. It bypasses the bundle, the planner, and Wan entirely, so it
+does not use the `RenderRequest` / `RenderResult` shapes above. The harness routes `action ==
+"finish_clip"` straight to `run_finish_job` (`harness/handler.py`), which fetches one clip from R2,
+finishes it, and uploads the result. The studio's `finish-rife` module dispatches this action to the
+same RunPod endpoint.
+
+**Input** (the job `input` dict):
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `action` | str | -- | Must be `"finish_clip"`. |
+| `project` | str | `"untitled"` | Keys the output clip. |
+| `shot_id` | str | `"shot"` | Identifies the clip; part of the output key. |
+| `clip_key` | str | (required) | R2 key of the clip to finish. |
+| `config` | object | `{}` | The finishing knobs (below). |
+
+`config` fields (a flat subset of [`FinishConfig`](configuration.md#finishconfig)):
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `interpolate` | bool | `true` | Run RIFE interpolation. |
+| `interpolation_factor` | int | `2` | Recursive 2x factor (1/2/4/8). |
+| `target_fps` | int | `0` | 0 = `src*factor`; else a hard fps cap. |
+| `face_restore` | str \| false | `false` | Restorer backend (`"gfpgan"` / `"codeformer"`); falsy or `"none"` disables it. |
+| `face_fidelity` | float | `0.7` | Restoration / fidelity balance. |
+| `only_faces` | bool | `true` | Restore detected faces only. |
+
+**Output:**
+
+| Field | Type | Notes |
+|---|---|---|
+| `shot_id` | str | Echoed shot id. |
+| `clip_key` | str | R2 key of the finished clip (`renders/<project>/clips/<shot_id>_finished.mp4`). |
+| `out_fps` | int | Realized fps of the finished clip. |
+| `frames` | int | Output frame count. |
+| `applied` | list[str] | What ran, e.g. `["interpolate:2x", "face_restore:gfpgan"]`. |
+
+When both passes are off (`interpolate` false and `face_restore` disabled) the stage is a no-op:
+`finish_clip` does no GPU work and the clip is returned unchanged (`FinishConfig.enabled` is the gate).
+
+**Example** input and result:
+
+```json
+{
+  "action": "finish_clip",
+  "project": "the-long-walk-home",
+  "shot_id": "shot_02",
+  "clip_key": "renders/the-long-walk-home/clips/shot_02.mp4",
+  "config": { "interpolate": true, "interpolation_factor": 2, "face_restore": "gfpgan" }
+}
+```
+
+```json
+{
+  "shot_id": "shot_02",
+  "clip_key": "renders/the-long-walk-home/clips/shot_02_finished.mp4",
+  "out_fps": 32,
+  "frames": 161,
+  "applied": ["interpolate:2x", "face_restore:gfpgan"]
+}
+```
 
 ## Worked example
 
