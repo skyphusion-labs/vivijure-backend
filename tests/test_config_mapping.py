@@ -98,8 +98,8 @@ def test_keyframe_multi_char_lora_scale_reaches_params():
     assert p.lora_scale == pytest.approx(0.5)
 
 
-def test_keyframe_multi_char_ip_adapter_scale_reaches_params():
-    p = keyframe_params_from(_rcfg(kf={"multi_char": {"ip_adapter_scale_per_slot": 0.4}}))
+def test_keyframe_ip_adapter_scale_reaches_params():
+    p = keyframe_params_from(_rcfg(kf={"ip_adapter_scale": 0.4}))
     assert p.ip_adapter_scale == pytest.approx(0.4)
 
 
@@ -159,7 +159,9 @@ def test_i2v_feature_cache_reaches_params():
 def test_i2v_negative_prompt_reaches_params():
     cfg = _rcfg(i2v={"negative_prompt": "blurry, watermark"})
     p = i2v_params_from(cfg, _scene())
-    assert p.negative_prompt == "blurry, watermark"
+    # Custom prompt is prepended and the anti-static base guard is appended (additive, not replace).
+    assert p.negative_prompt.startswith("blurry, watermark")
+    assert "static, still, frozen" in p.negative_prompt
 
 
 def test_i2v_num_frames_from_scene_duration():
@@ -234,16 +236,13 @@ KEYFRAME_ASSERTED = {
     "steps", "distill_steps", "guidance_scale", "width", "height", "seed",
     "distill", "scheduler", "identity_method",
     "instantid_controlnet_scale", "instantid_ip_adapter_scale",
+    "ip_adapter_scale",
     "multi_char",
 }
 
 KEYFRAME_UNMAPPED = {
     "base_model",      # deploy-time model repo; wired to ModelServer.specs at pod startup
     "distill_model",   # deploy-time model repo
-    # ip_adapter_scale exists for the single-subject path but keyframe_params_from routes
-    # all paths through mc.ip_adapter_scale_per_slot instead. The field is parsed but
-    # not forwarded -- a known discrepancy. See issue for the follow-up fix.
-    "ip_adapter_scale",
 }
 
 I2V_ASSERTED = {

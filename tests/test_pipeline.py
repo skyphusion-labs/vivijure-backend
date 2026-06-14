@@ -7,6 +7,7 @@ import shutil
 import tarfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 from vivijure_backend.config import RenderConfig
@@ -53,7 +54,9 @@ def test_keyframe_params_pull_multichar_scales():
         "max_slots": 2, "pose_conditioning": False}}})
     p = keyframe_params_from(cfg)
     assert p.lora_scale == 0.25
-    assert p.ip_adapter_scale == 0.6
+    # ip_adapter_scale comes from kc.ip_adapter_scale (top-level), not mc.ip_adapter_scale_per_slot;
+    # mc's per-slot value is consumed by the regional blending engine, not this params field.
+    assert p.ip_adapter_scale == pytest.approx(0.65)  # KeyframeConfig default
     assert p.pose_conditioning is False
     assert p.max_slots == 2
 

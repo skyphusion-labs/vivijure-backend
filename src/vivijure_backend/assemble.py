@@ -20,10 +20,13 @@ only the thin `assemble`/`probe_*` wrappers actually shell out, validated where 
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 from .contract import Clip, Storyboard
 
@@ -61,7 +64,11 @@ def order_for_storyboard(clips: list[ClipInput], storyboard: Storyboard) -> list
     """Put the clips in storyboard scene order. Clips whose shot_id is not in the storyboard
     are dropped (a stray clip must not wander into the cut); scenes with no clip are simply
     absent. Order follows the storyboard, never the clip list's incidental order."""
+    scene_ids = {s.id for s in storyboard.scenes}
     by_id = {c.shot_id: c for c in clips}
+    stray = [c.shot_id for c in clips if c.shot_id not in scene_ids]
+    if stray:
+        log.warning("order_for_storyboard: dropping %d clip(s) not in storyboard: %s", len(stray), stray)
     return [by_id[s.id] for s in storyboard.scenes if s.id in by_id]
 
 
@@ -142,6 +149,9 @@ def ffprobe_has_audio_cmd(path: Path) -> list[str]:
 
 def probe_duration(path: Path) -> float | None:
     out = subprocess.run(ffprobe_duration_cmd(path), capture_output=True, text=True)
+    if out.returncode != 0:
+        log.warning("ffprobe duration failed for %s (rc=%d): %s", path, out.returncode, out.stderr.strip()[-500:])
+        return None
     try:
         return round(float(out.stdout.strip()), 3)
     except (ValueError, AttributeError):
@@ -150,6 +160,9 @@ def probe_duration(path: Path) -> float | None:
 
 def probe_has_audio(path: Path) -> bool:
     out = subprocess.run(ffprobe_has_audio_cmd(path), capture_output=True, text=True)
+    if out.returncode != 0:
+        log.warning("ffprobe audio check failed for %s (rc=%d): %s", path, out.returncode, out.stderr.strip()[-500:])
+        return False
     return bool(out.stdout.strip())
 
 
