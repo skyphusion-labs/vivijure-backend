@@ -55,7 +55,7 @@ def keyframe_params_from(config: RenderConfig) -> KeyframeParams:
         few_step=kc.distill,
         scheduler=kc.scheduler.value,              # ddim_trailing on the few-step path, a solver on final
         lora_scale=mc.lora_scale_per_slot,
-        ip_adapter_scale=mc.ip_adapter_scale_per_slot,
+        ip_adapter_scale=kc.ip_adapter_scale,      # single-char field; multi-char path uses mc.ip_adapter_scale_per_slot via region override
         identity_method=kc.identity_method.value,  # single-char path: ip_adapter (default) or instantid
         instantid_controlnet_scale=kc.instantid_controlnet_scale,
         instantid_ip_adapter_scale=kc.instantid_ip_adapter_scale,
@@ -87,7 +87,7 @@ def i2v_params_from(config: RenderConfig, scene) -> I2VParams:
         feature_cache=ic.feature_cache,
     )
     if ic.negative_prompt:
-        p.negative_prompt = ic.negative_prompt
+        p.negative_prompt = ic.negative_prompt + ", " + I2VParams.negative_prompt
     return p
 
 
