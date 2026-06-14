@@ -200,16 +200,25 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
 
     # Keyframes: upload whatever the stage drew; also persist into the project tree so the
     # next incremental render's state restore can derive existing_keyframes without an R2 list.
+    reported_shots: set[str] = set()
     for shot_id, path in outputs.keyframes.items():
         key = store.put_file(Path(path), keys.keyframe_key(project, shot_id),
                              content_type="image/png", metadata=owner_meta)
         result.keyframes.append(Keyframe(shot_id=shot_id, key=key))
+        reported_shots.add(shot_id)
         state_kf = bundle.root / "keyframes" / f"{shot_id}.png"
         state_kf.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, state_kf)
         hash_src = Path(path).with_suffix(".hash")
         if hash_src.is_file():
             shutil.copy2(hash_src, state_kf.with_suffix(".hash"))
+
+    # Reused keyframes: already in R2 from a prior run, not re-uploaded, but the caller needs
+    # their keys to animate them. Report every REUSE/INJECT shot that wasn't freshly generated.
+    from ..orchestrator import KeyframeMode
+    for sc in plan.scenes:
+        if sc.shot_id not in reported_shots and sc.keyframe_mode in (KeyframeMode.REUSE, KeyframeMode.INJECT):
+            result.keyframes.append(Keyframe(shot_id=sc.shot_id, key=keys.keyframe_key(project, sc.shot_id)))
 
     # Clips ordered by the storyboard (never the stage's incidental order).
     ordered = order_for_storyboard(

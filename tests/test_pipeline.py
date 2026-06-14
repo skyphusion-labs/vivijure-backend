@@ -281,7 +281,7 @@ def test_run_job_drives_gpu_pipeline_offloaded(tmp_path):
 
     assert res["lora"]["A"]["lora_id"].endswith("A/pytorch_lora_weights.safetensors")
     assert [c["shot_id"] for c in res["clips"]] == ["shot_01", "shot_02", "shot_03"]
-    assert {k["shot_id"] for k in res["keyframes"]} == {"shot_01", "shot_02"}
+    assert {k["shot_id"] for k in res["keyframes"]} == {"shot_01", "shot_02", "shot_03"}
     assert any(k.endswith("manifest.json") for k in store.puts)
     assert res["state_key"] == "projects/neon/state.tar.gz"
 
