@@ -21,12 +21,14 @@ from enum import Enum
 
 
 class Arch(str, Enum):
+    """GPU microarchitecture, the axis that decides the fast path (precision + attention)."""
     BLACKWELL = "blackwell"
     HOPPER = "hopper"
     OTHER = "other"
 
 
 class Tier(str, Enum):
+    """A fleet GPU tier the worker can land on (or UNKNOWN off-GPU)."""
     B200 = "b200"
     H200 = "h200"
     RTX_PRO_6000 = "rtx_pro_6000"
@@ -34,12 +36,14 @@ class Tier(str, Enum):
 
 
 class Quant(str, Enum):
+    """A weight precision the card can accelerate."""
     NVFP4 = "nvfp4"  # 4-bit float, Blackwell only
     FP8 = "fp8"      # Hopper + Blackwell
     BF16 = "bf16"    # universal fallback
 
 
 class Attention(str, Enum):
+    """The attention backend to use on this card."""
     FLASH3 = "flash_attn_3"  # Hopper + Blackwell
     SDPA = "sdpa"            # torch built-in fallback
 
@@ -51,6 +55,8 @@ _BW_TBS = {Tier.B200: 8.0, Tier.H200: 4.8, Tier.RTX_PRO_6000: 1.79}
 
 @dataclass(frozen=True)
 class Device:
+    """A fingerprinted GPU (or a CPU fallback): its identity plus the precision and attention
+    backend it can accelerate. Pure given (capability, name), so it builds and tests off-GPU."""
     name: str
     capability: tuple[int, int]  # (major, minor); B200 = (10, 0), RTX PRO 6000 = (12, 0), H200 = (9, 0)
     arch: Arch
@@ -143,6 +149,7 @@ _CURRENT: "Device | None" = None
 
 
 def current() -> Device:
+    """The process-wide detected device, fingerprinted once and cached."""
     global _CURRENT
     if _CURRENT is None:
         _CURRENT = Device.detect()

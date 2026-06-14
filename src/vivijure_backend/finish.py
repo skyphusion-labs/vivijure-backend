@@ -109,6 +109,8 @@ class FinishParams:
 
 @dataclass
 class FinishResult:
+    """The outcome of finishing one clip: where the re-encoded clip landed, the source and output
+    fps / frame counts, and which passes (interpolation, face restore) actually ran."""
     shot_id: str
     path: Path
     src_fps: int

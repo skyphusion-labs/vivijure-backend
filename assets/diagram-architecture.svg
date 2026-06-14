@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 560" role="img" aria-labelledby="vjTitle vjDesc" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif">
+  <title id="vjTitle">vivijure-backend architecture</title>
+  <desc id="vjDesc">The control plane writes a bundle to R2 and submits a render job. A RunPod serverless GPU worker plans the render on the CPU, then trains character LoRAs, draws SDXL keyframes, animates them with Wan image-to-video, finishes the clips, and assembles the final film off-GPU, writing all artifacts and progress back to R2.</desc>
+
+  <defs>
+    <radialGradient id="vjBg" cx="50%" cy="30%" r="80%">
+      <stop offset="0%" stop-color="#17243d"/>
+      <stop offset="100%" stop-color="#0a0f1e"/>
+    </radialGradient>
+    <linearGradient id="vjSky" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0%" stop-color="#1d4ed8"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <marker id="vjArrow" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0 0L9 4.5L0 9Z" fill="#7c93b3"/>
+    </marker>
+    <marker id="vjArrowC" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0 0L9 4.5L0 9Z" fill="#22d3ee"/>
+    </marker>
+  </defs>
+
+  <rect width="1240" height="560" fill="url(#vjBg)"/>
+
+  <!-- header: brand mark + wordmark + legend -->
+  <rect x="28" y="20" width="34" height="34" rx="8" fill="#0a0f1e"/>
+  <g transform="translate(28,20) scale(0.531)">
+    <path d="M9 52L22.4 52L32 22L32 12Z" fill="url(#vjSky)"/>
+    <path d="M25.6 52L38.4 52L32 22Z" fill="url(#vjSky)"/>
+    <path d="M41.6 52L55 52L32 12L32 22Z" fill="url(#vjSky)"/>
+  </g>
+  <text x="74" y="36" fill="#e2e8f0" font-size="19" font-weight="700">vivijure-backend</text>
+  <text x="74" y="53" fill="#94a3b8" font-size="12">clean-room GPU render backend &#183; RunPod serverless</text>
+
+  <!-- legend -->
+  <circle cx="1010" cy="34" r="6" fill="#122038" stroke="#22d3ee" stroke-width="2"/>
+  <text x="1022" y="38" fill="#94a3b8" font-size="12">GPU stage</text>
+  <circle cx="1110" cy="34" r="6" fill="#122038" stroke="#64748b" stroke-width="2"/>
+  <text x="1122" y="38" fill="#94a3b8" font-size="12">CPU stage</text>
+
+  <!-- ============ left column: control plane + R2 ============ -->
+  <rect x="36" y="150" width="214" height="92" rx="12" fill="#122038" stroke="#1d4ed8" stroke-width="2"/>
+  <text x="143" y="190" fill="#e2e8f0" font-size="16" font-weight="600" text-anchor="middle">Control plane</text>
+  <text x="143" y="212" fill="#94a3b8" font-size="12" text-anchor="middle">Vivijure (Cloudflare)</text>
+  <text x="143" y="229" fill="#94a3b8" font-size="12" text-anchor="middle">Access-gated submit</text>
+
+  <rect x="36" y="332" width="214" height="118" rx="12" fill="#122038" stroke="#06b6d4" stroke-width="2"/>
+  <text x="143" y="368" fill="#e2e8f0" font-size="16" font-weight="600" text-anchor="middle">R2 object store</text>
+  <text x="143" y="392" fill="#94a3b8" font-size="12" text-anchor="middle">bundle in</text>
+  <text x="143" y="410" fill="#94a3b8" font-size="12" text-anchor="middle">keyframes &#183; clips &#183; full.mp4</text>
+  <text x="143" y="428" fill="#94a3b8" font-size="12" text-anchor="middle">state &#183; progress &#183; models</text>
+
+  <!-- control plane <-> worker -->
+  <line x1="250" y1="178" x2="312" y2="178" stroke="#7c93b3" stroke-width="2" marker-end="url(#vjArrow)"/>
+  <text x="281" y="171" fill="#cbd5e1" font-size="11" text-anchor="middle">submit job</text>
+  <line x1="312" y1="214" x2="252" y2="214" stroke="#7c93b3" stroke-width="2" marker-end="url(#vjArrow)"/>
+  <text x="281" y="229" fill="#94a3b8" font-size="11" text-anchor="middle">result</text>
+
+  <!-- R2 <-> worker -->
+  <line x1="250" y1="368" x2="312" y2="368" stroke="#22d3ee" stroke-width="2" marker-end="url(#vjArrowC)"/>
+  <text x="281" y="361" fill="#cbd5e1" font-size="11" text-anchor="middle">bundle, refs, state</text>
+  <line x1="312" y1="418" x2="252" y2="418" stroke="#22d3ee" stroke-width="2" marker-end="url(#vjArrowC)"/>
+  <text x="281" y="433" fill="#94a3b8" font-size="11" text-anchor="middle">artifacts, progress</text>
+
+  <!-- ============ worker panel ============ -->
+  <rect x="312" y="92" width="900" height="430" rx="16" fill="#0e1830" stroke="#1d4ed8" stroke-width="2"/>
+  <text x="334" y="124" fill="#e2e8f0" font-size="16" font-weight="700">RunPod serverless GPU worker</text>
+  <text x="334" y="143" fill="#94a3b8" font-size="12">cold-start model mirror &#183; warm model cache &#183; offline render</text>
+
+  <!-- plan box (CPU) -->
+  <rect x="350" y="162" width="190" height="62" rx="10" fill="#122038" stroke="#64748b" stroke-width="2"/>
+  <text x="445" y="190" fill="#e2e8f0" font-size="14" font-weight="600" text-anchor="middle">Plan (CPU)</text>
+  <text x="445" y="210" fill="#94a3b8" font-size="11" text-anchor="middle">validate &#183; plan &#183; reuse</text>
+
+  <!-- plan -> pipeline -->
+  <line x1="445" y1="224" x2="445" y2="262" stroke="#7c93b3" stroke-width="2" marker-end="url(#vjArrow)"/>
+
+  <!-- pipeline stages -->
+  <!-- Train LoRA (GPU) -->
+  <rect x="350" y="264" width="150" height="92" rx="10" fill="#122038" stroke="#22d3ee" stroke-width="2"/>
+  <text x="425" y="298" fill="#e2e8f0" font-size="14" font-weight="600" text-anchor="middle">Train LoRA</text>
+  <text x="425" y="318" fill="#94a3b8" font-size="11" text-anchor="middle">SDXL UNet</text>
+  <text x="425" y="334" fill="#94a3b8" font-size="11" text-anchor="middle">per character</text>
+
+  <!-- Keyframe (GPU) -->
+  <rect x="522" y="264" width="150" height="92" rx="10" fill="#122038" stroke="#22d3ee" stroke-width="2"/>
+  <text x="597" y="298" fill="#e2e8f0" font-size="14" font-weight="600" text-anchor="middle">Keyframe</text>
+  <text x="597" y="318" fill="#94a3b8" font-size="11" text-anchor="middle">SDXL + identity</text>
+  <text x="597" y="334" fill="#94a3b8" font-size="11" text-anchor="middle">per shot</text>
+
+  <!-- i2v (GPU) -->
+  <rect x="694" y="264" width="150" height="92" rx="10" fill="#122038" stroke="#22d3ee" stroke-width="2"/>
+  <text x="769" y="298" fill="#e2e8f0" font-size="14" font-weight="600" text-anchor="middle">Image-to-video</text>
+  <text x="769" y="318" fill="#94a3b8" font-size="11" text-anchor="middle">Wan 2.2</text>
+  <text x="769" y="334" fill="#94a3b8" font-size="11" text-anchor="middle">keyframe to clip</text>
+
+  <!-- finish (GPU) -->
+  <rect x="866" y="264" width="150" height="92" rx="10" fill="#122038" stroke="#22d3ee" stroke-width="2"/>
+  <text x="941" y="298" fill="#e2e8f0" font-size="14" font-weight="600" text-anchor="middle">Finish</text>
+  <text x="941" y="318" fill="#94a3b8" font-size="11" text-anchor="middle">RIFE interp</text>
+  <text x="941" y="334" fill="#94a3b8" font-size="11" text-anchor="middle">face restore</text>
+
+  <!-- assemble (CPU) -->
+  <rect x="1038" y="264" width="150" height="92" rx="10" fill="#122038" stroke="#64748b" stroke-width="2"/>
+  <text x="1113" y="298" fill="#e2e8f0" font-size="14" font-weight="600" text-anchor="middle">Assemble</text>
+  <text x="1113" y="318" fill="#94a3b8" font-size="11" text-anchor="middle">ffmpeg concat</text>
+  <text x="1113" y="334" fill="#94a3b8" font-size="11" text-anchor="middle">CPU, off-GPU</text>
+
+  <!-- stage arrows -->
+  <line x1="500" y1="310" x2="520" y2="310" stroke="#22d3ee" stroke-width="2" marker-end="url(#vjArrowC)"/>
+  <line x1="672" y1="310" x2="692" y2="310" stroke="#22d3ee" stroke-width="2" marker-end="url(#vjArrowC)"/>
+  <line x1="844" y1="310" x2="864" y2="310" stroke="#22d3ee" stroke-width="2" marker-end="url(#vjArrowC)"/>
+  <line x1="1016" y1="310" x2="1036" y2="310" stroke="#7c93b3" stroke-width="2" marker-end="url(#vjArrow)"/>
+
+  <!-- ModelServer shared bar under GPU stages -->
+  <rect x="350" y="372" width="666" height="36" rx="9" fill="#0a0f1e" stroke="#1d4ed8" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="683" y="395" fill="#94a3b8" font-size="12" text-anchor="middle">ModelServer -- models loaded once, shared across GPU stages (warm worker)</text>
+
+  <!-- capability / routing footnote inside panel -->
+  <text x="334" y="448" fill="#cbd5e1" font-size="12" font-weight="600">Capability-aware:</text>
+  <text x="442" y="448" fill="#94a3b8" font-size="12">Blackwell NVFP4/fp8 &#183; Hopper fp8 &#183; bf16 fallback &#183; FlashAttention-3</text>
+  <text x="334" y="470" fill="#cbd5e1" font-size="12" font-weight="600">i2v routing:</text>
+  <text x="422" y="470" fill="#94a3b8" font-size="12">draft &#8594; RTX PRO 6000 &#183; standard &#8594; H200 &#183; final &#8594; B200</text>
+  <text x="334" y="492" fill="#cbd5e1" font-size="12" font-weight="600">Incremental:</text>
+  <text x="424" y="492" fill="#94a3b8" font-size="12">project state reused per render &#183; only changed shots retrain / redraw</text>
+</svg>

@@ -14,11 +14,14 @@ _PIPELINE: Pipeline | None = None
 
 
 def register_pipeline(pipeline: Pipeline) -> None:
+    """Bind the concrete GPU `Pipeline` the harness will run. The worker image's entry module
+    calls this once, before the first job is handled."""
     global _PIPELINE
     _PIPELINE = pipeline
 
 
 def get_pipeline() -> Pipeline:
+    """Return the registered GPU `Pipeline`; raise if none was registered (a deploy error)."""
     if _PIPELINE is None:
         raise RuntimeError(
             "no GPU Pipeline registered; the worker image's entry module must call "

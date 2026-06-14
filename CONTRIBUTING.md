@@ -66,6 +66,9 @@ maintainer on real hardware**, gated and tagged; it is not exercised in CI and P
 blind-merged on it. Keep new logic CPU-testable where you can, and call out clearly in the
 PR anything that needs a GPU-validation pass, so it can be scheduled rather than assumed.
 
+Before you start, [docs/development.md](docs/development.md) explains the CPU/GPU split and the
+test layout, and [docs/architecture.md](docs/architecture.md) maps how the pieces interface.
+
 ## Pull requests
 
 - Branch from `main`; CI (tests) must pass.

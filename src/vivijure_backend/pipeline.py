@@ -182,6 +182,10 @@ class GpuPipeline:
     # --- orchestration (CPU; the stages above are the only GPU touch points) ---
 
     def execute(self, plan: RenderPlan, bundle: Bundle, workdir: Path) -> Outputs:
+        """Run the plan on the GPU over the shared `ModelServer`: train the kept LoRAs, then per
+        shot draw / reuse / inject the keyframe, animate it, and finish the clip. Returns the
+        `Outputs` (LoRA paths, keyframes, clips) the harness uploads; assembly happens off-GPU in
+        the harness, not here."""
         out = Outputs()
         workdir = Path(workdir)
         cast, storyboard = bundle.cast, bundle.storyboard

@@ -67,6 +67,8 @@ class KeyframeParams:
 
 @dataclass
 class KeyframeResult:
+    """The outcome of rendering one shot's keyframe: where the PNG landed, which slots and engine
+    path it used, and the prompt and seed that produced it."""
     shot_id: str
     path: Path
     slots: list[str]
