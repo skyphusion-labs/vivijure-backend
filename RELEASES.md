@@ -11,7 +11,7 @@ tag drops the `backend-v` prefix).
 
 | git tag | GHCR image | source commit | built | notes |
 |---|---|---|---|---|
-| backend-v0.2.12 | 0.2.12 | (pending) | 2026-06-14 (fleet) | fix(models): Lightning distill probes 6+7 -- add weight_name to I2V_DISTILL ModelSpec (confirmed from R2); pass it to load_lora_weights (probe 6: offline scan) and hf_hub_download (probe 7: wrong placeholder filename). Closes #64. 319 tests. |
+| backend-v0.2.12 | 0.2.12 | e8bf45b | 2026-06-14 (fleet) | fix(models): Lightning distill probes 6+7 -- add weight_name to I2V_DISTILL ModelSpec (confirmed from R2); pass it to load_lora_weights (probe 6: offline scan) and hf_hub_download (probe 7: wrong placeholder filename). Closes #64. 319 tests. Verified: v0212-00 6-shot standard render, zero offline probe failures end-to-end. |
 |---|---|---|---|---|
 | backend-v0.2.11 | 0.2.11 | 49c0dbc | 2026-06-14 (fleet) | fix(lora_train): UNet + DDPMScheduler from_pretrained model_info probe under HF_HUB_OFFLINE=1 -- add local_files_only=True; 5th offline probe, root cause of the failed verify render. 319 tests. |
 |---|---|---|---|---|
