@@ -11,6 +11,8 @@ tag drops the `backend-v` prefix).
 
 | git tag | GHCR image | source commit | built | notes |
 |---|---|---|---|---|
+| backend-v0.2.14 | 0.2.14 | 82874fa | (pending) | fix(worker): rewrite job-done content-type patch -- drop aiohttp_retry dep, use client_session.post(json=...) so aiohttp sets Content-Type: application/json natively; replace silent except-pass with @event patch_applied / patch_failed logging. Closes #65. 319 tests. |
+|---|---|---|---|---|
 | backend-v0.2.13 | 0.2.13 | da6b6c8 | 2026-06-14 (fleet) | fix(offline,worker): local_files_only=True on all remaining from_pretrained render-pipeline + lora_train calls (Closes #66); patch RunPod SDK _transmit to send application/json instead of x-www-form-urlencoded so job-done callback no longer 400s (Closes #65). 319 tests. Verified: v0213-verify-00 standard render, LoRA training (2 slots) + 6 keyframes + i2v (all 6 shots) + assemble + upload clean. #66 CONFIRMED fixed (zero offline probe warnings). #65 patch did NOT take effect (SDK still 400s on job-done; output available via streaming channel, not callback -- see issue for follow-up). |
 |---|---|---|---|---|
 | backend-v0.2.12 | 0.2.12 | e8bf45b | 2026-06-14 (fleet) | fix(models): Lightning distill probes 6+7 -- add weight_name to I2V_DISTILL ModelSpec (confirmed from R2); pass it to load_lora_weights (probe 6: offline scan) and hf_hub_download (probe 7: wrong placeholder filename). Closes #64. 319 tests. Verified: v0212-00 6-shot standard render, zero offline probe failures end-to-end. |
