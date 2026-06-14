@@ -159,9 +159,10 @@ class ModelServer:
         # hands it a blank control image at conditioning_scale 0.0, which makes the ControlNet inert
         # (zero residual), so single-subject renders behave exactly like plain SDXL. Sharing one pipe
         # keeps the dynamic per-scene LoRA + IP-Adapter attach points identical across both paths.
-        controlnet = ControlNetModel.from_pretrained(cn_spec.repo_id, torch_dtype=torch.bfloat16)
+        controlnet = ControlNetModel.from_pretrained(
+            cn_spec.repo_id, torch_dtype=torch.bfloat16, local_files_only=True)
         pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
-            spec.repo_id, controlnet=controlnet, torch_dtype=torch.bfloat16)
+            spec.repo_id, controlnet=controlnet, torch_dtype=torch.bfloat16, local_files_only=True)
         pipe.to("cuda")
         _set_attention(pipe, self.device)
 
@@ -239,7 +240,8 @@ class ModelServer:
 
         base = self.specs[ModelRole.KEYFRAME_BASE]
         id_spec = self.specs[ModelRole.INSTANTID]
-        pipe = StableDiffusionXLPipeline.from_pretrained(base.repo_id, torch_dtype=torch.bfloat16)
+        pipe = StableDiffusionXLPipeline.from_pretrained(
+            base.repo_id, torch_dtype=torch.bfloat16, local_files_only=True)
         pipe.to("cuda")
         _set_attention(pipe, self.device)
         pipe._vj_default_scheduler = pipe.scheduler
@@ -289,7 +291,8 @@ class ModelServer:
         # variant. Wan 2.2 A14B is a ~28B two-expert MoE, too large to hold resident on the tighter
         # cards (and an 80GB H100, where it OOMs), so CPU-offload the inactive expert below the
         # big-VRAM tiers; the H200/B200 keep it resident and quantize to fp8 for full speed.
-        pipe = WanImageToVideoPipeline.from_pretrained(spec.repo_id, torch_dtype=torch.bfloat16)
+        pipe = WanImageToVideoPipeline.from_pretrained(
+            spec.repo_id, torch_dtype=torch.bfloat16, local_files_only=True)
         offload = bool(self.device.vram_gb) and self.device.vram_gb < 120
         if not offload:
             pipe.to("cuda")

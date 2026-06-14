@@ -109,8 +109,37 @@ def main() -> None:
     `runpod` SDK import is deferred so this module stays CPU/dep-light for tests; the worker
     image installs it. `python -m vivijure_backend.worker` runs this."""
     import runpod  # the worker image's serverless SDK
-
+    _patch_runpod_content_type()
     runpod.serverless.start({"handler": handler})
+
+
+def _patch_runpod_content_type() -> None:
+    """Patch the RunPod SDK to send job-done callbacks as application/json.
+
+    The SDK's _transmit() hardcodes Content-Type: application/x-www-form-urlencoded while
+    sending a JSON body, and RunPod's job-done endpoint now rejects this with 400. The patch
+    swaps in application/json so the callback succeeds and /runsync callers get a usable result.
+    No-ops silently if the SDK internals change so it never breaks the worker startup."""
+    try:
+        import runpod.serverless.modules.rp_http as _rp_http
+        from aiohttp_retry import FibonacciRetry, RetryClient
+
+        async def _patched_transmit(client_session, url, job_data):
+            retry_options = FibonacciRetry(attempts=3)
+            retry_client = RetryClient(
+                client_session=client_session, retry_options=retry_options
+            )
+            kwargs = {
+                "data": job_data,
+                "headers": {"charset": "utf-8", "Content-Type": "application/json"},
+                "raise_for_status": True,
+            }
+            async with retry_client.post(url, **kwargs) as resp:
+                await resp.text()
+
+        _rp_http._transmit = _patched_transmit
+    except Exception:
+        pass  # never let a startup patch abort the worker
 
 
 if __name__ == "__main__":

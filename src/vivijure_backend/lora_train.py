@@ -140,7 +140,8 @@ def train_slot(
     # --- frozen backbone: VAE (fp32 for stable latents), both text encoders, the UNet ---
     # The VAE stays fp32 because SDXL's VAE produces NaNs under fp16/bf16 encode; everything
     # else lives in bf16. Only the UNet gets a trainable LoRA; the rest is inference-only.
-    vae = AutoencoderKL.from_pretrained(base, subfolder="vae", torch_dtype=torch.float32).to(device)
+    vae = AutoencoderKL.from_pretrained(
+        base, subfolder="vae", torch_dtype=torch.float32, local_files_only=True).to(device)
     # CLIPTokenizer, not AutoTokenizer: Auto* probes AutoConfig for a config.json the CLIP
     # tokenizer subfolders do not have, which is a graceful 404 online but a FATAL
     # LocalEntryNotFoundError under HF_HUB_OFFLINE=1 on the deployed worker. CLIPTokenizer loads
