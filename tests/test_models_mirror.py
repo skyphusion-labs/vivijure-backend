@@ -8,6 +8,7 @@ from vivijure_backend.harness.models_mirror import (
     HF_OFFLINE_STUBS,
     I2V_LAZY_REPOS,
     I2V_SENTINEL,
+    _DEFAULT_MODEL_VERSION,
     _reconstruct_symlinks,
     ensure_i2v_models,
     mirror_cmd,
@@ -39,7 +40,7 @@ def test_every_lazy_repo_is_cold_start_skipped():
 
 
 def test_ensure_i2v_skips_when_sentinel_present(tmp_path):
-    (tmp_path / I2V_SENTINEL).write_text("ok\n")
+    (tmp_path / I2V_SENTINEL).write_text(_DEFAULT_MODEL_VERSION + "\n")
     env = {"VJ_MODELS_ROOT": str(tmp_path), "R2_ACCESS_KEY_ID": "x"}
     assert ensure_i2v_models(env=env, log=lambda *_: None) is False  # warm: no pull
 
@@ -81,7 +82,7 @@ def test_ensure_i2v_joins_prefetch_thread(tmp_path, monkeypatch):
         def is_alive(self): return True
         def join(self):
             joined.append(True)
-            sentinel.write_text("ok\n")
+            sentinel.write_text(_DEFAULT_MODEL_VERSION + "\n")
 
     monkeypatch.setattr(models_mirror, "_i2v_prefetch_thread", _FakeThread())
     env = {"VJ_MODELS_ROOT": str(tmp_path)}

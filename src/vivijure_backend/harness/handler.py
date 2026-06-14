@@ -422,15 +422,17 @@ def handler(job: dict) -> dict:
     start_i2v_prefetch()
 
     workdir = Path(tempfile.mkdtemp(prefix="vj-job-"))
+    try:
+        if str(payload.get("action", "render")) == "finish_clip":
+            return run_finish_job(payload, store=store, workdir=workdir,
+                                  job_id=job_id, on_progress=on_progress)
 
-    if str(payload.get("action", "render")) == "finish_clip":
-        return run_finish_job(payload, store=store, workdir=workdir,
-                              job_id=job_id, on_progress=on_progress)
-
-    trained_slots, existing_keyframes = _restore_prior_state(store, project, workdir)
-    return run_job(payload, pipeline=get_pipeline(), store=store, workdir=workdir,
-                   job_id=job_id, mirrored=bool(mirrored), on_progress=on_progress,
-                   trained_slots=trained_slots, existing_keyframes=existing_keyframes)
+        trained_slots, existing_keyframes = _restore_prior_state(store, project, workdir)
+        return run_job(payload, pipeline=get_pipeline(), store=store, workdir=workdir,
+                       job_id=job_id, mirrored=bool(mirrored), on_progress=on_progress,
+                       trained_slots=trained_slots, existing_keyframes=existing_keyframes)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def _runpod_progress_hook(job: dict):

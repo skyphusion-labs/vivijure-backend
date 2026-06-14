@@ -55,6 +55,10 @@ _INCOMPLETE_GLOB = "**/*.incomplete"
 # Written under the models root only after the pull fully succeeds (see module docstring).
 SENTINEL = ".vj-mirror-complete"
 
+# Bump this constant (or set VJ_MODEL_VERSION in the worker env) whenever the model set
+# in R2 changes so warm workers re-pull instead of silently using a stale cache.
+_DEFAULT_MODEL_VERSION = "1"
+
 
 def rclone_conf(env: dict, conf_dir: Path) -> Path:
     """Write an rclone.conf for the R2 store from the worker's R2_* env. Raises if creds are
@@ -101,11 +105,19 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     bucket = e.get("R2_BUCKET", "vivijure")
     sentinel = models_root / SENTINEL
 
+    model_version = e.get("VJ_MODEL_VERSION") or _DEFAULT_MODEL_VERSION
     if sentinel.exists():
-        log("models_mirror: warm worker (sentinel present); skipping R2 pull.")
-        return False
+        if sentinel.read_text().strip() == model_version:
+            log("models_mirror: warm worker (sentinel present); skipping R2 pull.")
+            return False
+        log(f"models_mirror: sentinel version mismatch (want {model_version!r}); re-mirroring.")
     if not e.get("R2_ACCESS_KEY_ID"):
-        log("models_mirror: no R2 creds; assuming weights are pre-provisioned.")
+        hub = hf_home / "hub"
+        if not hub.is_dir() or not any(hub.iterdir()):
+            log("models_mirror: WARNING: no R2 creds and HF cache appears empty -- "
+                "model loads will fail; set R2_ACCESS_KEY_ID or pre-provision weights")
+        else:
+            log("models_mirror: no R2 creds; assuming weights are pre-provisioned.")
         return False
     if shutil.which("rclone") is None:
         raise RuntimeError("models_mirror: rclone is not installed in the image")
@@ -141,7 +153,7 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     write_no_exist_stubs(hf_home / "hub", HF_OFFLINE_STUBS, log)
 
     models_root.mkdir(parents=True, exist_ok=True)
-    sentinel.write_text("ok\n")
+    sentinel.write_text(model_version + "\n")
     log("models_mirror: model mirror from R2 complete.")
     return True
 
@@ -172,9 +184,12 @@ def ensure_i2v_models(*, env: dict | None = None, log: Callable[[str], None] = p
         log("models_mirror: i2v prefetch in progress; waiting...")
         _i2v_prefetch_thread.join()
 
+    model_version = e.get("VJ_MODEL_VERSION") or _DEFAULT_MODEL_VERSION
     if sentinel.exists():
-        log("models_mirror: i2v models already mirrored (sentinel present); skipping.")
-        return False
+        if sentinel.read_text().strip() == model_version:
+            log("models_mirror: i2v models already mirrored (sentinel present); skipping.")
+            return False
+        log(f"models_mirror: i2v sentinel version mismatch (want {model_version!r}); re-mirroring.")
     if not e.get("R2_ACCESS_KEY_ID"):
         log("models_mirror: no R2 creds; i2v weights assumed pre-provisioned.")
         return False
@@ -188,7 +203,7 @@ def ensure_i2v_models(*, env: dict | None = None, log: Callable[[str], None] = p
         log(f"models_mirror: lazy i2v pull -> mirroring {repo} from R2...")
         subprocess.run(mirror_cmd(conf, f"r2:{bucket}/models/hf-cache/hub/{repo}", hub / repo), check=True)
     _reconstruct_symlinks(hf_home, log)
-    sentinel.write_text("ok\n")
+    sentinel.write_text(model_version + "\n")
     log("models_mirror: i2v model mirror from R2 complete.")
     return True
 
