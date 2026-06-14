@@ -21,6 +21,7 @@ module imports and unit-tests on a CPU box, the same convention `models.py` uses
 """
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -248,6 +249,11 @@ def train_slot(
     _save_adapter(unet, out_dir, StableDiffusionXLPipeline,
                   get_peft_model_state_dict, convert_state_dict_to_diffusers)
     saved = out_dir / "pytorch_lora_weights.safetensors"
+
+    # Remove intermediate checkpoint dirs written by save_every; only the final adapter matters.
+    for ckpt in out_dir.glob("checkpoint-*"):
+        if ckpt.is_dir():
+            shutil.rmtree(ckpt, ignore_errors=True)
 
     return TrainedLora(
         slot=char.slot,

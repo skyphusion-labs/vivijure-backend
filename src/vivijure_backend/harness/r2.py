@@ -61,7 +61,14 @@ class R2:
     def get_file(self, key: str, dest: Path) -> Path:
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
+        head = self._client().head_object(Bucket=self.config.bucket, Key=key)
+        expected = head.get("ContentLength")
         self._client().download_file(self.config.bucket, key, str(dest))
+        actual = dest.stat().st_size
+        if expected is not None and actual != expected:
+            dest.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"R2 download truncated: {key!r} expected {expected} bytes, got {actual}")
         return dest
 
     def put_file(self, path: Path, key: str, *, content_type: str | None = None,
