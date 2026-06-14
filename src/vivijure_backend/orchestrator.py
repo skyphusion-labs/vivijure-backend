@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
-from .contract import RenderRequest, Scene, Storyboard
+from .contract import Cast, RenderRequest, Scene, Storyboard
 from .routing import QualityTier, Stage, Tier, gpu_for
 import hashlib
 import json
@@ -143,15 +143,22 @@ def kf_hash(kc) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def validate(request: RenderRequest, storyboard: Storyboard) -> list[str]:
+def validate(request: RenderRequest, storyboard: Storyboard, *, cast: Cast | None = None) -> list[str]:
     """Cheap preflight. Catch on the CPU what would otherwise fail minutes into a GPU job."""
     errs: list[str] = []
     if not storyboard.scenes:
         errs.append("storyboard has no scenes")
+    for sc in storyboard.scenes:
+        if not sc.prompt or not sc.prompt.strip():
+            errs.append(f"scene {sc.id!r} has an empty prompt")
     slots_used = {sl for sc in storyboard.scenes for sl in sc.character_slots}
     unknown = slots_used - set(storyboard.use_characters)
     if unknown:
         errs.append(f"scenes reference slots not in use_characters: {sorted(unknown)}")
+    if cast is not None:
+        for slot in storyboard.use_characters:
+            if slot not in cast.characters:
+                errs.append(f"use_characters slot {slot!r} has no entry in the cast registry")
     if request.process_shot_ids:
         known = {sc.id for sc in storyboard.scenes}
         missing = [s for s in request.process_shot_ids if s not in known]
@@ -256,6 +263,10 @@ def _keyframe_mode(
 
 
 def _estimate_cost(p: RenderPlan) -> float:
+    # These per-second constants reflect uncached, full-step timing. EASYCACHE (standard tier)
+    # and MIXCACHE (final tier) reduce actual i2v GPU-seconds by 30-50%; the estimate is
+    # therefore conservative (high) for those tiers and is intended only as an order-of-magnitude
+    # pre-flight check, not a billing figure.
     secs = len(p.lora.train) * _COST["lora_train_per_slot"]
     secs += p.keyframes_to_generate * _COST["keyframe_generate"]
     per_sec = _COST["i2v_per_target_second"][p.quality]
