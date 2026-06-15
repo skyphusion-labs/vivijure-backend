@@ -190,6 +190,14 @@ def test_run_job_without_user_email_leaves_artifacts_untagged(tmp_path):
     assert store.puts and all(store.meta[k] is None for k in store.puts)
 
 
+def test_run_job_rejects_empty_bundle_key(tmp_path):
+    # A render with no bundle_key must fail with a clear HarnessError, not a botocore
+    # ParamValidationError from a head_object on an empty Key.
+    with pytest.raises(HarnessError, match="bundle_key is required"):
+        run_job(_job(bundle_key=""), pipeline=FakePipeline(), store=FakeStore(tmp_path / "x.tar.gz"),
+                workdir=tmp_path / "w")
+
+
 def test_run_job_rejects_invalid_storyboard(tmp_path):
     bad = dict(STORYBOARD, use_characters=["A"])  # shot_02 references B, not in use_characters
     tarp = tmp_path / "bad.tar.gz"
