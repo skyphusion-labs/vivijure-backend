@@ -102,6 +102,7 @@ Build and deploy the worker image: [docs/operations.md](docs/operations.md) (and
 - [docs/configuration.md](docs/configuration.md) -- `RenderConfig`: every knob, default, range, and quality-tier baseline.
 - [docs/operations.md](docs/operations.md) -- build, deploy, the model mirror, the R2 key map, the progress channel, failure modes.
 - [docs/development.md](docs/development.md) -- the CPU/GPU split, the test suite, running stages locally.
+- [docs/cold-start-design.md](docs/cold-start-design.md) -- issue #55 Phase B: the cold-start cost model (from telemetry) and the bake/pre-warm/stage decision.
 - [CONTRIBUTING](CONTRIBUTING.md) -- clean-room rules, house style, PR process.
 - [SECURITY](SECURITY.md) -- the security boundary (one R2 credential, control-plane-trusted input).
 - [CHANGELOG](CHANGELOG.md) / [RELEASES](RELEASES.md) -- per-release notes and the release ledger.
