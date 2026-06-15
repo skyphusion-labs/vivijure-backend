@@ -119,7 +119,8 @@ def main() -> None:
 
 
 def _patch_runpod_content_type() -> None:
-    """Patch the RunPod SDK to send job-done callbacks as application/json.
+    """Patch the RunPod SDK to send job-done callbacks as application/json and capture the
+    response body on failure so we can diagnose 4xx rejections.
 
     The SDK's _transmit() hardcodes Content-Type: application/x-www-form-urlencoded while
     sending a JSON body, and RunPod's job-done endpoint rejects this with 400. Using aiohttp's
@@ -130,12 +131,23 @@ def _patch_runpod_content_type() -> None:
         import runpod.serverless.modules.rp_http as _rp_http
 
         async def _patched_transmit(client_session, url, job_data):
+            import aiohttp as _aiohttp
             async with client_session.post(
                 url,
                 json=_json.loads(job_data),
-                raise_for_status=True,
             ) as resp:
-                await resp.text()
+                body = await resp.text()
+                if resp.status >= 400:
+                    import json as _j
+                    print("@event job_done_error " + _j.dumps({
+                        "status": resp.status,
+                        "body": body[:500],
+                        "content_type": resp.content_type,
+                    }), flush=True)
+                    raise _aiohttp.ClientResponseError(
+                        resp.request_info, resp.history,
+                        status=resp.status, message=body[:200],
+                    )
 
         _rp_http._transmit = _patched_transmit
         print("@event patch_applied {\"patch\": \"job_done_content_type\"}", flush=True)
