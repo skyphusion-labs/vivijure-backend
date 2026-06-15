@@ -1,20 +1,15 @@
 """InstantID single-character face identity for the keyframe stage.
 
-InstantID raises single-subject face fidelity above the plain IP-Adapter path by combining two
-signals from a reference face, both produced by the public InstantID model (`InstantX/InstantID`):
-
-  1. a face EMBEDDING from insightface (antelopev2), injected through an image-projection
-     (a Resampler) as extra cross-attention tokens, like an IP-Adapter but keyed on identity
-     rather than a CLIP image embed; and
-  2. a face-KEYPOINTS ControlNet, conditioned on the 5 landmarks drawn onto a black canvas, which
-     pins the face's structure/pose.
+InstantID raises single-subject face fidelity above the plain IP-Adapter path by injecting a face
+EMBEDDING from insightface (antelopev2) through an image-projection (a Resampler) as extra
+cross-attention tokens -- like an IP-Adapter but keyed on identity rather than a CLIP image embed.
 
 This module is a clean-room reimplementation built from the published InstantID architecture and
-the diffusers ControlNet / attention-processor interfaces. It shares NOTHING with any prior render
-pipeline. The Resampler dims and the keypoint colour scheme are InstantID's documented public spec.
+the diffusers IP-Adapter attention-processor interface. It shares NOTHING with any prior render
+pipeline. The Resampler dims are InstantID's documented public spec.
 
-Only the drawing geometry (`draw_kps`) and the format helpers are pure and CPU-tested; the model
-construction and the per-render call defer torch/diffusers/insightface and are validated on a pod.
+The face-KEYPOINTS ControlNet (IdentityNet) is a planned future enhancement; the IP-Adapter face
+embedding path here is the live implementation.
 """
 from __future__ import annotations
 
@@ -24,46 +19,6 @@ from __future__ import annotations
 FACE_EMBED_DIM = 512
 NUM_ID_TOKENS = 16
 CROSS_ATTENTION_DIM = 2048
-
-# The 5 antelopev2 landmarks, in order: right eye, left eye, nose, right mouth, left mouth. InstantID
-# draws each as a filled circle and connects them with thin lines on a black canvas; the ControlNet
-# was trained on exactly this colour scheme, so the colours are fixed, not styling.
-KPS_COLORS = [
-    (255, 0, 0),    # right eye
-    (0, 255, 0),    # left eye
-    (0, 0, 255),    # nose
-    (255, 255, 0),  # right mouth corner
-    (255, 0, 255),  # left mouth corner
-]
-
-
-def draw_kps(width: int, height: int, kps, *, dot_radius: int = 0, line_width: int = 0):
-    """Render the 5-point face-keypoints control image InstantID's ControlNet expects: each landmark
-    as a filled circle on black, the eye/nose/mouth points joined by faint limb lines, sized to the
-    canvas. `kps` is a sequence of 5 (x, y) pixel coordinates (insightface order). Pure geometry;
-    PIL is imported lazily so this stays CPU-importable for the unit tests that assert the layout.
-
-    Returns a PIL RGB image. Radii default to a canvas-proportional size when left at 0.
-    """
-    from PIL import Image, ImageDraw
-
-    r = dot_radius or max(2, round(min(width, height) / 128))
-    lw = line_width or max(1, round(min(width, height) / 256))
-    canvas = Image.new("RGB", (width, height), (0, 0, 0))
-    draw = ImageDraw.Draw(canvas)
-    pts = [(float(x), float(y)) for x, y in kps][:5]
-
-    # Limbs: connect the landmarks in the standard InstantID order (eyes joined, each eye to nose,
-    # nose to its mouth corner, mouth corners joined) so the ControlNet sees a face-shaped skeleton.
-    limbs = [(0, 1), (0, 2), (1, 2), (2, 3), (2, 4), (3, 4)]
-    for a, b in limbs:
-        if a < len(pts) and b < len(pts):
-            draw.line([pts[a], pts[b]], fill=(255, 255, 255), width=lw)
-    for i, (x, y) in enumerate(pts):
-        color = KPS_COLORS[i % len(KPS_COLORS)]
-        draw.ellipse([x - r, y - r, x + r, y + r], fill=color)
-    return canvas
-
 
 def largest_face(faces):
     """Pick the dominant face from an insightface detection list: the one with the largest bounding
@@ -83,7 +38,7 @@ def analyze_face(analyzer, image):
     """Run insightface on a reference and return (normed_embedding, kps, (width, height)) for its
     largest face, or None if no face is found. `image` may be a PIL Image (what keyframe._ref_images
     hands us) or a path/str. The embedding feeds the image-projection; kps (in the reference's pixel
-    coords, hence the size, so the caller can scale them onto the output canvas) feed `draw_kps`.
+    coords, hence the size) from the reference face.
     GPU/onnxruntime path: deferred imports, validated on a pod."""
     import numpy as np
     from PIL import Image

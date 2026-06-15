@@ -183,7 +183,6 @@ class KeyframeConfig:
     # Identity stack (all shots). InstantID stays single-char; regional multi-char is masked IP-Adapter.
     identity_method: IdentityMethod = IdentityMethod.IP_ADAPTER
     ip_adapter_scale: float = 0.65   # 0..1; single-subject IP-Adapter identity pull (face_lock default)
-    instantid_controlnet_scale: float = 0.8  # 0..1.5; InstantID face-ControlNet (single-char upgrade)
     instantid_ip_adapter_scale: float = 0.8  # 0..1.5; InstantID IP-Adapter (single-char upgrade)
     multi_char: MultiCharConfig = field(default_factory=MultiCharConfig)
 
@@ -228,7 +227,6 @@ class KeyframeConfig:
             seed=_clamp_int(d.get("seed"), 0, 2**31 - 1, base.seed),
             identity_method=_enum_or(IdentityMethod, d.get("identity_method"), base.identity_method),
             ip_adapter_scale=_clamp(d.get("ip_adapter_scale"), 0.0, 1.0, base.ip_adapter_scale),
-            instantid_controlnet_scale=_clamp(d.get("instantid_controlnet_scale"), 0.0, 1.5, base.instantid_controlnet_scale),
             instantid_ip_adapter_scale=_clamp(d.get("instantid_ip_adapter_scale"), 0.0, 1.5, base.instantid_ip_adapter_scale),
             multi_char=MultiCharConfig.from_dict(d.get("multi_char")),
         )
