@@ -8,7 +8,7 @@ def test_b200_is_blackwell_fp4():
     assert d.arch is Arch.BLACKWELL
     assert d.tier is Tier.B200
     assert d.supports_fp4 and d.supports_fp8
-    assert d.image_quant() is Quant.NVFP4
+    assert d.dit_quant() is Quant.NVFP4
     assert d.video_quant() is Quant.FP8  # video stays fp8 even on a fp4-capable card
     assert d.attention() is Attention.FLASH3
 
@@ -18,7 +18,7 @@ def test_h200_is_hopper_fp8_only():
     assert d.arch is Arch.HOPPER
     assert d.tier is Tier.H200
     assert d.supports_fp8 and not d.supports_fp4
-    assert d.image_quant() is Quant.FP8  # no fp4 engine on Hopper
+    assert d.dit_quant() is Quant.FP8  # no fp4 engine on Hopper
     assert d.attention() is Attention.FLASH3
 
 
@@ -40,7 +40,7 @@ def test_unknown_arch_drops_to_bf16_and_sdpa():
     d = Device.classify((7, 0), "Tesla V100S")  # Volta: no fp8/fp4, no FA3
     assert d.arch is Arch.OTHER
     assert not d.supports_fp8 and not d.supports_fp4
-    assert d.image_quant() is Quant.BF16
+    assert d.dit_quant() is Quant.BF16
     assert d.video_quant() is Quant.BF16
     assert d.attention() is Attention.SDPA
 
@@ -56,4 +56,4 @@ def test_detect_falls_back_to_cpu_without_gpu():
     d = Device.detect()
     assert d.tier is Tier.UNKNOWN
     assert d.name == "cpu"
-    assert d.image_quant() is Quant.BF16
+    assert d.dit_quant() is Quant.BF16

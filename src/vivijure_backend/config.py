@@ -130,7 +130,6 @@ class MultiCharConfig:
 
     Defaults mirror `orchestrator.MULTI_CHAR_DEFAULTS` (engine=regional, pose_conditioning=True,
     lora_scale_per_slot=0.7, ip_adapter_scale_per_slot=0.7, max_slots=2)."""
-    regional: bool = True                     # use the regional no-bleed engine for multi-char shots
     pose_conditioning: bool = True            # OpenPose ControlNet to separate bodies
     lora_scale_per_slot: float = 0.7          # 0..2; per-character LoRA strength in a shared frame
     ip_adapter_scale_per_slot: float = 0.7    # 0..1; per-region masked IP-Adapter identity pull
@@ -143,7 +142,6 @@ class MultiCharConfig:
         d = d if isinstance(d, dict) else {}
         base = cls()
         return cls(
-            regional=bool(d.get("regional", base.regional)),
             pose_conditioning=bool(d.get("pose_conditioning", base.pose_conditioning)),
             lora_scale_per_slot=_clamp(d.get("lora_scale_per_slot"), 0.0, 2.0, base.lora_scale_per_slot),
             ip_adapter_scale_per_slot=_clamp(d.get("ip_adapter_scale_per_slot"), 0.0, 1.0, base.ip_adapter_scale_per_slot),
@@ -467,6 +465,18 @@ class RenderConfig:
         sets every baseline; the (forgiving) overrides layer explicit knobs over it."""
         tier = QualityTier.parse(quality_tier)
         d = overrides if isinstance(overrides, dict) else {}
+        return cls(
+            quality=tier,
+            keyframe=KeyframeConfig.from_dict(d.get("keyframe"), tier=tier),
+            i2v=I2VConfig.from_dict(d.get("i2v"), tier=tier),
+            finish=FinishConfig.from_dict(d.get("finish"), tier=tier),
+            lora=_lora_from_dict(d.get("lora")),
+        )
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "RenderConfig":
+        """Reconstruct from a dict produced by `to_dict`, completing the round-trip."""
+        tier = QualityTier.parse(d.get("quality", "final"))
         return cls(
             quality=tier,
             keyframe=KeyframeConfig.from_dict(d.get("keyframe"), tier=tier),

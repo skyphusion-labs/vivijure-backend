@@ -51,13 +51,18 @@ class Scene:
     @classmethod
     def from_dict(cls, d: dict[str, Any], index: int) -> "Scene":
         slots = [s for s in (d.get("character_slots") or []) if s in SLOT_IDS]
+        start = _num(d.get("start"))
+        end = _num(d.get("end"))
+        target_seconds = _num(d.get("target_seconds"))
+        if target_seconds is None and start is not None and end is not None and end > start:
+            target_seconds = end - start
         return cls(
             prompt=_str(d.get("prompt")),
             id=_str(d.get("id")) or f"shot_{index + 1:02d}",
             character_slots=slots,
-            start=_num(d.get("start")),
-            end=_num(d.get("end")),
-            target_seconds=_num(d.get("target_seconds")),
+            start=start,
+            end=end,
+            target_seconds=target_seconds,
             act=(_str(d["act"]) or None) if "act" in d else None,
             start_image=(_str(d["start_image"]) or None) if "start_image" in d else None,
         )
@@ -88,6 +93,13 @@ class Storyboard:
         scenes = [Scene.from_dict(s, i) for i, s in enumerate(d.get("scenes") or []) if isinstance(s, dict)]
         if not scenes:
             raise ValueError("storyboard.json has no scenes")
+        seen: dict[str, int] = {}
+        for scene in scenes:
+            if scene.id in seen:
+                seen[scene.id] += 1
+                scene.id = f"{scene.id}_{seen[scene.id]}"
+            else:
+                seen[scene.id] = 1
         use_chars = [s for s in (d.get("use_characters") or []) if s in SLOT_IDS]
         # style_category / style_preset normalize to the literal "None" when absent, so a
         # downstream "is it None?" check tests the string, never a null.
