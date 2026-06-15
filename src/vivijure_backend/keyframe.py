@@ -57,7 +57,6 @@ class KeyframeParams:
     # regional path.
     identity_method: str = "ip_adapter"
     instantid_ip_adapter_scale: float = 0.8  # InstantID face-embedding (image-proj) scale
-    instantid_controlnet_scale: float = 0.8  # reserved for the future InstantID IdentityNet (unused)
     pose_conditioning: bool = True   # ControlNet-OpenPose to separate bodies in multi-char shots
     controlnet_pose_scale: float = 0.55  # OpenPose ControlNet conditioning scale (regional path)
     region_gutter: int = 64          # px dead band between regional masks so they do not seam-blend

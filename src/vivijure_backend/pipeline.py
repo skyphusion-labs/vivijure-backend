@@ -58,7 +58,6 @@ def keyframe_params_from(config: RenderConfig) -> KeyframeParams:
         lora_scale=mc.lora_scale_per_slot,
         ip_adapter_scale=kc.ip_adapter_scale,      # single-char field; multi-char path uses mc.ip_adapter_scale_per_slot via region override
         identity_method=kc.identity_method.value,  # single-char path: ip_adapter (default) or instantid
-        instantid_controlnet_scale=kc.instantid_controlnet_scale,
         instantid_ip_adapter_scale=kc.instantid_ip_adapter_scale,
         pose_conditioning=mc.pose_conditioning,
         controlnet_pose_scale=mc.controlnet_pose_scale,
