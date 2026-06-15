@@ -218,9 +218,15 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
 
     models_root.mkdir(parents=True, exist_ok=True)
     sentinel.write_text(model_version + "\n")
-    total_bytes = (_dir_bytes(hf_home) + _dir_bytes(antelope)
-                   + _dir_bytes(models_root / "rife") + _dir_bytes(models_root / "GFPGANv1.4"))
-    log(_mirror_event(legs, total_bytes, cold=True, model_version=model_version))
+    # Telemetry is best-effort: a traversal error in _dir_bytes (e.g. rglob hitting a
+    # PermissionError mid-walk, which the per-entry guard does not catch) must never fail an
+    # otherwise-successful cold mirror -- the exact path we are trying to stabilize.
+    try:
+        total_bytes = (_dir_bytes(hf_home) + _dir_bytes(antelope)
+                       + _dir_bytes(models_root / "rife") + _dir_bytes(models_root / "GFPGANv1.4"))
+        log(_mirror_event(legs, total_bytes, cold=True, model_version=model_version))
+    except Exception as exc:
+        log(f"models_mirror: mirror telemetry skipped ({exc})")
     log("models_mirror: model mirror from R2 complete.")
     return True
 
@@ -276,9 +282,13 @@ def ensure_i2v_models(*, env: dict | None = None, log: Callable[[str], None] = p
             mirror_cmd(conf, f"r2:{bucket}/models/hf-cache/hub/{repo}", hub / repo), check=True)))
     _reconstruct_symlinks(hf_home, log)
     sentinel.write_text(model_version + "\n")
-    total_bytes = sum(_dir_bytes(hub / repo) for repo in repos)
-    log(_mirror_event(legs, total_bytes, cold=True, model_version=model_version,
-                      event="i2v_mirror_complete"))
+    # Best-effort telemetry (see ensure_models): never fail a good lazy pull on a _dir_bytes walk.
+    try:
+        total_bytes = sum(_dir_bytes(hub / repo) for repo in repos)
+        log(_mirror_event(legs, total_bytes, cold=True, model_version=model_version,
+                          event="i2v_mirror_complete"))
+    except Exception as exc:
+        log(f"models_mirror: i2v mirror telemetry skipped ({exc})")
     log("models_mirror: i2v model mirror from R2 complete.")
     return True
 
