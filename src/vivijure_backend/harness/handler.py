@@ -390,7 +390,6 @@ def run_finish_job(
         "out_fps": result.out_fps,
         "frames": result.frames_out,
         "applied": applied,
-        "status": "complete",
     }
 
 
