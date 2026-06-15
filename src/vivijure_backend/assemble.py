@@ -90,6 +90,7 @@ def build_manifest(clips: list[ClipInput], *, output_name: str, audio: str | Non
 
 
 def write_manifest(manifest: dict, path: Path) -> Path:
+    """Write a finish-handoff manifest to disk as JSON; returns the path."""
     path = Path(path)
     path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return path
@@ -136,11 +137,13 @@ def ffmpeg_concat_cmd(list_file: Path, out_path: Path, *,
 
 
 def ffprobe_duration_cmd(path: Path) -> list[str]:
+    """argv for ffprobe to print a file's duration in seconds."""
     return ["ffprobe", "-v", "error", "-show_entries", "format=duration",
             "-of", "default=nokey=1:noprint_wrappers=1", str(path)]
 
 
 def ffprobe_has_audio_cmd(path: Path) -> list[str]:
+    """argv for ffprobe to list any audio-stream indices (empty output means no audio)."""
     return ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
             "stream=index", "-of", "csv=p=0", str(path)]
 
@@ -148,6 +151,7 @@ def ffprobe_has_audio_cmd(path: Path) -> list[str]:
 # ---------------------------------------------------------------------------- run (ffmpeg)
 
 def probe_duration(path: Path) -> float | None:
+    """The file's duration in seconds, or None if ffprobe fails (it logs the stderr)."""
     out = subprocess.run(ffprobe_duration_cmd(path), capture_output=True, text=True)
     if out.returncode != 0:
         log.warning("ffprobe duration failed for %s (rc=%d): %s", path, out.returncode, out.stderr.strip()[-500:])
@@ -159,6 +163,7 @@ def probe_duration(path: Path) -> float | None:
 
 
 def probe_has_audio(path: Path) -> bool:
+    """Whether the file has an audio stream (False if ffprobe fails; it logs the stderr)."""
     out = subprocess.run(ffprobe_has_audio_cmd(path), capture_output=True, text=True)
     if out.returncode != 0:
         log.warning("ffprobe audio check failed for %s (rc=%d): %s", path, out.returncode, out.stderr.strip()[-500:])

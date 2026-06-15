@@ -29,6 +29,7 @@ from .device import Device, Quant, current
 
 
 class ModelRole(str, Enum):
+    """A role a model plays in the pipeline; the key into the spec table and the load cache."""
     KEYFRAME_BASE = "keyframe_base"      # SDXL checkpoint that draws the still
     KEYFRAME_FEWSTEP = "keyframe_fewstep"  # distill LoRA/unet (Hyper-SD / DMD2) for 4-8 step
     I2V = "i2v"                          # Wan 2.2 image-to-video
@@ -41,6 +42,7 @@ class ModelRole(str, Enum):
 
 
 class ModelFamily(str, Enum):
+    """The model's architecture class, which decides the precision it can be loaded at."""
     SDXL_UNET = "sdxl_unet"  # fp8 ceiling (no 4-bit engine)
     DIT = "dit"              # FLUX/Qwen/SANA: NVFP4-capable on Blackwell
     VIDEO_DIT = "video_dit"  # Wan: fp8 on both archs
@@ -53,6 +55,7 @@ class ModelFamily(str, Enum):
 
 @dataclass(frozen=True)
 class ModelSpec:
+    """Where a model role's weights live (HF repo, optional subfolder / weight file) and its family."""
     role: ModelRole
     repo_id: str
     family: ModelFamily
