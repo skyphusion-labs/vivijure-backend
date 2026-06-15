@@ -11,15 +11,82 @@ from vivijure_backend.harness.models_mirror import (
     I2V_LAZY_REPOS,
     I2V_SENTINEL,
     _DEFAULT_MODEL_VERSION,
+    SENTINEL,
     _dir_bytes,
+    _jitter_seconds,
     _mirror_event,
     _reconstruct_symlinks,
+    _resolve_volume,
     _skip_event,
     ensure_i2v_models,
     mirror_cmd,
     start_i2v_prefetch,
     write_no_exist_stubs,
 )
+
+
+# --------------------------------------------------- preloaded network volume (#55 Phase C)
+
+def _seed_volume(root: Path, version: str) -> Path:
+    """A minimal preloaded-volume layout: the sentinel at `version` + an hf-cache dir."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "hf-cache").mkdir(parents=True, exist_ok=True)
+    (root / SENTINEL).write_text(version + "\n")
+    return root
+
+
+def test_resolve_volume_repoints_and_skips_on_a_current_preloaded_volume(tmp_path):
+    vol = _seed_volume(tmp_path / "vol", _DEFAULT_MODEL_VERSION)
+    e = {"VJ_VOLUME_ROOT": str(vol)}
+    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is True
+    # repointed at the volume so the deferred torch/diffusers loads read from it
+    assert e["VJ_MODELS_ROOT"] == str(vol)
+    assert e["HF_HOME"] == str(vol / "hf-cache")
+
+
+def test_resolve_volume_noop_when_unset(tmp_path):
+    e = {}
+    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is False
+    assert "VJ_MODELS_ROOT" not in e and "HF_HOME" not in e  # untouched -> R2 fallback runs
+
+
+def test_resolve_volume_falls_back_on_version_mismatch(tmp_path):
+    vol = _seed_volume(tmp_path / "vol", "1")
+    e = {"VJ_VOLUME_ROOT": str(vol)}
+    # want v2 but the volume carries v1 (e.g. mid-refresh): do NOT use it, do NOT repoint
+    assert _resolve_volume(e, "2", log=lambda *_: None) is False
+    assert "HF_HOME" not in e
+
+
+def test_resolve_volume_falls_back_when_sentinel_absent(tmp_path):
+    vol = tmp_path / "vol"
+    (vol / "hf-cache").mkdir(parents=True)            # mounted but never preloaded (no sentinel)
+    e = {"VJ_VOLUME_ROOT": str(vol)}
+    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is False
+    assert "HF_HOME" not in e
+
+
+def test_resolve_volume_emits_volume_skip_event(tmp_path):
+    vol = _seed_volume(tmp_path / "vol", _DEFAULT_MODEL_VERSION)
+    msgs: list[str] = []
+    _resolve_volume({"VJ_VOLUME_ROOT": str(vol)}, _DEFAULT_MODEL_VERSION, log=msgs.append)
+    assert any('"reason": "volume"' in m for m in msgs)
+
+
+# --------------------------------------------------- R2-egress jitter knob (#55 Phase C)
+
+def test_jitter_off_by_default():
+    assert _jitter_seconds({}) == 0.0
+    assert _jitter_seconds({"VJ_MIRROR_JITTER_SEC": "0"}) == 0.0
+
+
+def test_jitter_within_ceiling():
+    for _ in range(50):
+        assert 0.0 <= _jitter_seconds({"VJ_MIRROR_JITTER_SEC": "10"}) <= 10.0
+
+
+def test_jitter_ignores_garbage():
+    assert _jitter_seconds({"VJ_MIRROR_JITTER_SEC": "not-a-number"}) == 0.0
 
 
 # ------------------------------------------------------ lazy i2v split (cold-start weight trim)
