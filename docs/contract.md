@@ -126,11 +126,12 @@ routing flags it still reads off it (e.g. `finish_offloaded`).
 | `finalize` | no | reuse | yes | Animate over existing keyframes; zero training. |
 | `regen_shot` | no | as needed | no | Redraw specific keyframes (with `process_shot_ids`), no motion. |
 | `train_lora` | yes | no | no | Train character adapters only. |
+| `i2v_clip` | no | no | yes | Standalone image-to-video on one keyframe. Separate job shape (no bundle); see [the `i2v_clip` job](#the-i2v_clip-job). |
 | `finish_clip` | no | no | no | Standalone finishing pass on one existing clip. Separate job shape (no bundle); see [the `finish_clip` job](#the-finish_clip-job). |
 
-The first five actions ride the `RenderRequest` shape above and the render pipeline. `finish_clip`
-is a sibling job type: the harness routes it directly to a standalone finishing pass that needs no
-bundle, planner, or Wan, so it carries its own input/output shape, documented below.
+The first five actions ride the `RenderRequest` shape above and the render pipeline. `i2v_clip` and
+`finish_clip` are sibling job types: the harness routes each directly to a standalone pass that needs
+no bundle or planner, so each carries its own input/output shape, documented below.
 
 ## Render result (response)
 
@@ -148,6 +149,79 @@ restores on the next render of this project.
 | `clips` | list[{shot_id, key, target_seconds?}] | Per-shot clip keys (present when shots were animated). |
 | `lora` | dict[slot, {lora_id}] | Trained and passed-through adapters by slot. |
 | `state_key` | str \| null | R2 key of the project state tarball for incremental re-render. |
+
+## The `i2v_clip` job
+
+A standalone image-to-video pass on a single keyframe: Wan2.2-I2V animates one still into one clip,
+nothing else. It bypasses the bundle and the planner, so it does not use the `RenderRequest` /
+`RenderResult` shapes above. The harness routes `action == "i2v_clip"` straight to
+`run_i2v_clip_job` (`harness/handler.py`), which fetches the keyframe from R2, animates it, and
+uploads the clip. Unlike `finish_clip`, it DOES load the Wan models, so the worker keeps the
+cold-start i2v prefetch for it. The studio's `motion` module (vivijure #81) dispatches this action
+per shot: keyframe -> **i2v_clip** -> finish_clip -> assemble.
+
+**Input** (the job `input` dict):
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `action` | str | -- | Must be `"i2v_clip"`. |
+| `project` | str | `"untitled"` | Keys the output clip. |
+| `shot_id` | str | `"shot"` | Identifies the shot; part of the output key. |
+| `prompt` | str | (required) | The motion description fed to Wan. |
+| `keyframe_key` | str | `renders/<project>/keyframes/<shot_id>.png` | R2 key of the keyframe still to animate. |
+| `config` | object | `{}` | The i2v knobs (below). |
+
+`config` fields (a subset of [`I2VConfig`](configuration.md#i2vconfig), over the `quality` tier
+baseline):
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `quality` | str | `"final"` | `draft` \| `standard` \| `final`. Drives steps / guidance / distill / feature-cache via `I2VConfig.for_tier`. |
+| `num_frames` | int | `81` | Snapped to the temporal-VAE-valid `4k+1` (e.g. 50 -> 53), clamped 1..256. |
+| `fps` | int | `16` | Export fps, clamped 1..120. |
+| `seed` | int | `0` | i2v RNG seed (independent of the keyframe seed). |
+| `flow_shift` | float | `5.0` | FlowMatch scheduler shift; lower = faster motion. |
+| `height` | int \| null | `null` | `null`/`0` = follow the keyframe's native dims. |
+| `width` | int \| null | `null` | `null`/`0` = follow the keyframe's native dims. |
+| `negative_prompt` | str \| null | `null` | Additive over the engine's anti-static guard, never a replacement. |
+
+Caching can never combine with the 4-step distill path: when the tier (or an override) selects
+`distill`, `feature_cache` is forced to `NONE` (nothing to cache at 4 steps), matching the full
+render path.
+
+**Output:**
+
+| Field | Type | Notes |
+|---|---|---|
+| `clip_key` | str | R2 key of the clip (`renders/<project>/clips/<shot_id>_i2v.mp4`). |
+| `shot_id` | str | Echoed shot id. |
+| `num_frames` | int | Realized (snapped) frame count. |
+| `fps` | int | Realized fps. |
+| `seconds` | float | Clip length (`num_frames / fps`). |
+| `distilled` | bool | Whether the 4-step Lightning distill path produced it. |
+
+**Example** input and result:
+
+```json
+{
+  "action": "i2v_clip",
+  "project": "the-long-walk-home",
+  "shot_id": "shot_02",
+  "prompt": "slow dolly in as she turns toward the window",
+  "config": { "quality": "final", "num_frames": 81, "flow_shift": 5.0 }
+}
+```
+
+```json
+{
+  "clip_key": "renders/the-long-walk-home/clips/shot_02_i2v.mp4",
+  "shot_id": "shot_02",
+  "num_frames": 81,
+  "fps": 16,
+  "seconds": 5.062,
+  "distilled": false
+}
+```
 
 ## The `finish_clip` job
 

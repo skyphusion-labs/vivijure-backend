@@ -393,6 +393,95 @@ def run_finish_job(
     }
 
 
+def run_i2v_clip_job(
+    job: dict,
+    *,
+    store,
+    workdir: Path,
+    job_id: str = "local",
+    on_progress=None,
+) -> dict:
+    """Standalone per-shot image-to-video pass: fetch a keyframe from R2, animate it into one clip
+    with Wan2.2-I2V, upload the clip, return its key. No bundle, no render pipeline -- just the
+    ModelServer's i2v pipeline (the backend half of studio #81). Mirrors `run_finish_job`.
+
+    Input shape (the `input` dict from the RunPod job):
+      { action, project, shot_id, prompt, keyframe_key?,
+        config: { quality, num_frames?, fps?, seed?, flow_shift?, height?, width?, negative_prompt? } }
+
+    The keyframe defaults to the project/shot convention `renders/<project>/keyframes/<shot>.png`
+    when `keyframe_key` is omitted. The clip lands at `renders/<project>/clips/<shot>_i2v.mp4`.
+    """
+    from .. import i2v as i2v_mod
+    from ..config import I2VConfig
+    from ..contract import Scene
+    from ..models import ModelServer
+    from ..routing import QualityTier
+
+    project = str(job.get("project") or "untitled")
+    shot_id = str(job.get("shot_id") or "shot")
+    prompt = str(job.get("prompt") or "")
+    cfg = job.get("config") or {}
+
+    progress = ProgressEmitter(store, project, job_id, on_progress=on_progress)
+    progress.emit("started", action="i2v_clip", project=project, shot_id=shot_id)
+
+    if not prompt:
+        raise HarnessError("i2v_clip: prompt is required (the motion description)")
+
+    keyframe_key = str(job.get("keyframe_key") or "") or keys.keyframe_key(project, shot_id)
+    local_kf = workdir / "keyframe.png"
+    try:
+        store.get_file(keyframe_key, local_kf)
+    except Exception as e:
+        raise HarnessError(f"i2v_clip: could not fetch keyframe {keyframe_key!r}: {e}")
+
+    # Build the engine params from the tier baseline + the job's overrides, reusing the typed
+    # I2VConfig so clamping AND the distill<->feature-cache invariant (no caching a 4-step render)
+    # are enforced exactly as in the full render path. height/width live only on the engine
+    # I2VParams (I2VConfig follows the keyframe's native dims), so they are read from cfg directly;
+    # a falsy value (null/0/"") means "follow the keyframe".
+    tier = QualityTier.parse(cfg.get("quality"))
+    ic = I2VConfig.from_dict(cfg, tier=tier)
+    params = i2v_mod.I2VParams(
+        num_frames=i2v_mod.snap_frames(ic.num_frames),  # temporal VAE wants 4k+1
+        fps=ic.fps,
+        steps=ic.distill_steps if ic.distill else ic.steps,
+        guidance_scale=ic.guidance_scale,
+        distill=ic.distill,
+        seed=ic.seed,
+        height=int(cfg["height"]) if cfg.get("height") else None,
+        width=int(cfg["width"]) if cfg.get("width") else None,
+        feature_cache=ic.feature_cache,
+        flow_shift=ic.flow_shift,
+    )
+    # Custom negative is additive over the engine's anti-static guard (the #25 fix), never a
+    # replacement -- a bare custom negative would drop the anti-freeze default and risk a still clip.
+    if ic.negative_prompt:
+        params.negative_prompt = ic.negative_prompt + ", " + i2v_mod.I2VParams.negative_prompt
+
+    out_path = workdir / "out.mp4"
+    result = i2v_mod.animate(
+        Scene(id=shot_id, prompt=prompt), local_kf, prompt, ModelServer(), out_path,
+        params=params, progress_cb=progress.i2v_step_cb(shot_id),
+    )
+
+    safe = lambda s: (s or "x").replace("/", "_").replace(" ", "_")
+    clip_key_out = f"renders/{safe(project)}/clips/{safe(shot_id)}_i2v.mp4"
+    store.put_file(result.path, clip_key_out, content_type="video/mp4")
+
+    progress.complete(output_key=clip_key_out)
+    # Pointer-only return (same rationale as run_finish_job): small job-done payload; R2 holds state.
+    return {
+        "clip_key": clip_key_out,
+        "shot_id": shot_id,
+        "num_frames": result.num_frames,
+        "fps": result.fps,
+        "seconds": result.seconds,
+        "distilled": result.distilled,
+    }
+
+
 def handler(job: dict) -> dict:
     """RunPod serverless entry point. Mirrors models on a cold worker, builds the live R2
     client, runs the job through the deployed GPU pipeline, returns the response. RunPod passes
@@ -435,9 +524,13 @@ def handler(job: dict) -> dict:
 
     workdir = Path(tempfile.mkdtemp(prefix="vj-job-"))
     try:
-        if str(payload.get("action", "render")) == "finish_clip":
+        action = str(payload.get("action", "render"))
+        if action == "finish_clip":
             return run_finish_job(payload, store=store, workdir=workdir,
                                   job_id=job_id, on_progress=on_progress)
+        if action == "i2v_clip":
+            return run_i2v_clip_job(payload, store=store, workdir=workdir,
+                                    job_id=job_id, on_progress=on_progress)
 
         trained_slots, existing_keyframes = _restore_prior_state(store, project, workdir)
         return run_job(payload, pipeline=get_pipeline(), store=store, workdir=workdir,

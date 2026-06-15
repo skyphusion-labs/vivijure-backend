@@ -89,6 +89,28 @@ def test_build_pipeline_shares_one_model_server_across_jobs():
     assert a.config is not b.config          # but each carries its own job config
 
 
+def test_handler_skips_pipeline_build_for_finish_and_i2v_clip(monkeypatch):
+    """finish_clip and i2v_clip use the ModelServer directly, so the worker entry must NOT build
+    or register a render pipeline for them (build_pipeline touches RenderRequest fields they don't
+    carry). render still builds + registers."""
+    import vivijure_backend.harness.handler as hh
+    calls: list = []
+    monkeypatch.setattr(worker, "build_pipeline", lambda req: calls.append("build") or "PIPE")
+    monkeypatch.setattr(worker, "register_pipeline", lambda p: calls.append(("register", p)))
+    monkeypatch.setattr(hh, "handler", lambda job: {"action": job.get("input", job).get("action")})
+
+    for action in ("finish_clip", "i2v_clip"):
+        calls.clear()
+        out = worker.handler({"input": {"action": action, "project": "p"}})
+        assert out == {"action": action}
+        assert calls == [], f"{action} must not build/register a pipeline"
+
+    calls.clear()
+    worker.handler({"input": {"action": "render", "project": "p", "bundle_key": "x",
+                              "quality_tier": "draft"}})
+    assert ("register", "PIPE") in calls and "build" in calls
+
+
 def test_model_server_uses_job_config_specs(monkeypatch):
     """Cold-start: the first job's model fields must reach ModelServer.specs."""
     from vivijure_backend.models import ModelRole, DEFAULT_SPECS
