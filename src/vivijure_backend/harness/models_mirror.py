@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import shutil
 import subprocess
 import tempfile
@@ -147,6 +148,67 @@ def _skip_event(reason: str, *, event: str = "mirror_skipped") -> str:
     return "@event " + event + " " + json.dumps({"reason": reason}, sort_keys=True)
 
 
+def _jitter_seconds(e: dict) -> float:
+    """A bounded random pre-mirror delay (seconds) to de-stagger R2 egress when many cold workers
+    fall back to the mirror at once (issue #55: the 8-way fan-out contention killer). Tunable via
+    `VJ_MIRROR_JITTER_SEC` (the ceiling; default 0 = off). Factored out from the sleep so the draw
+    is testable; returns 0 when off or misconfigured. Cheap insurance for the fallback path -- the
+    preloaded volume is the real fix, so this defaults off."""
+    try:
+        ceiling = float(e.get("VJ_MIRROR_JITTER_SEC") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return random.uniform(0, ceiling) if ceiling > 0 else 0.0
+
+
+def _volume_sentinel_ok(path: Path, model_version: str) -> bool:
+    """True iff the sentinel file at `path` exists and matches `model_version`. Raises only OSError,
+    which the caller treats as a miss."""
+    return path.exists() and path.read_text().strip() == model_version
+
+
+def _resolve_volume(e: dict, model_version: str, log: Callable[[str], None]) -> bool:
+    """If a fully preloaded RunPod network volume is mounted (`VJ_VOLUME_ROOT`) and carries BOTH the
+    base AND the i2v sentinel at the wanted `model_version`, repoint `HF_HOME` + `VJ_MODELS_ROOT` at
+    it so the worker reads the weights straight off the local-datacenter volume -- no 223 GB R2 copy
+    -- and return True. Else return False so the caller falls back to the R2 mirror on writable
+    local disk (issue #55 Phase C: per-datacenter preloaded volumes, R2 mirror as the universal
+    fallback).
+
+    BOTH sentinels are required, not just the base one: after the repoint, a standalone `i2v_clip`
+    calls `ensure_i2v_models` against the volume root, and if the volume held the base set but NOT
+    the i2v set (a partial preload that still wrote the base sentinel, or a base-only volume), that
+    would try to mirror Wan ONTO the read-only volume and fail instead of falling back. So an
+    incompletely preloaded volume degrades wholesale to the R2 mirror rather than throwing
+    mysterious i2v failures in that datacenter. (One full volume per DC is the design.)
+
+    The volume is READ-ONLY for workers: RunPod warns that concurrent writes from multiple workers
+    corrupt a volume, and the preloader is the sole writer. So this never writes to the volume; on
+    any miss (unset, missing/sentinel-mismatch, probe error) it leaves `e` untouched and the R2
+    mirror runs against the writable local path exactly as before. Mutating `e` (os.environ in
+    production) is how the repoint reaches the deferred torch/diffusers loads, which read `HF_HOME`
+    at call time."""
+    vol = e.get("VJ_VOLUME_ROOT")
+    if not vol:
+        return False
+    base_ok = i2v_ok = False
+    try:
+        base_ok = _volume_sentinel_ok(Path(vol) / SENTINEL, model_version)
+        i2v_ok = _volume_sentinel_ok(Path(vol) / I2V_SENTINEL, model_version)
+        if base_ok and i2v_ok:
+            e["VJ_MODELS_ROOT"] = str(vol)
+            e["HF_HOME"] = str(Path(vol) / "hf-cache")
+            log(f"models_mirror: fully preloaded network volume at {vol} (v{model_version}); "
+                "reading weights from it, skipping the R2 mirror.")
+            log(_skip_event("volume"))
+            return True
+        log(f"models_mirror: volume at {vol} not fully preloaded for v{model_version} "
+            f"(base={base_ok}, i2v={i2v_ok}); falling back to R2 mirror.")
+    except OSError as exc:  # noqa: BLE001 -- a volume probe failure must never abort the job
+        log(f"models_mirror: volume probe at {vol} failed ({exc}); falling back to R2 mirror.")
+    return False
+
+
 def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print,
                   skip_repos: tuple[str, ...] = DEFAULT_SKIP_REPOS) -> bool:
     """Mirror the kept model set from R2 into the local HF cache + antelopev2 dir.
@@ -155,12 +217,19 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     are assumed pre-provisioned). Raises on a hard failure (missing rclone, failed pull).
     """
     e = env if env is not None else os.environ
+    model_version = e.get("VJ_MODEL_VERSION") or _DEFAULT_MODEL_VERSION
+
+    # Preloaded per-datacenter network volume (issue #55 Phase C): if one is mounted and current,
+    # read weights straight off it and skip the R2 copy entirely. Falls through to the mirror below
+    # on any miss, so the R2 path stays the universal fallback. Repoints HF_HOME/VJ_MODELS_ROOT.
+    if _resolve_volume(e, model_version, log):
+        return False
+
     hf_home = Path(e.get("HF_HOME", "/opt/models/hf-cache"))
     models_root = Path(e.get("VJ_MODELS_ROOT", "/opt/models"))
     bucket = e.get("R2_BUCKET", "vivijure")
     sentinel = models_root / SENTINEL
 
-    model_version = e.get("VJ_MODEL_VERSION") or _DEFAULT_MODEL_VERSION
     if sentinel.exists():
         if sentinel.read_text().strip() == model_version:
             log("models_mirror: warm worker (sentinel present); skipping R2 pull.")
@@ -184,6 +253,10 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     hf_home.mkdir(parents=True, exist_ok=True)
     log(f"models_mirror: cold worker -> mirroring r2:{bucket}/models to {hf_home} "
         f"(skipping {len(skip_repos)} lazy repos)...")
+    jitter = _jitter_seconds(e)
+    if jitter:
+        log(f"models_mirror: jitter {jitter:.1f}s before R2 pull (de-stagger concurrent egress).")
+        time.sleep(jitter)
     legs: list[tuple[str, float]] = []
     legs.append(("hf-cache", _timed(
         subprocess.run,
@@ -387,3 +460,34 @@ def _reconstruct_symlinks(root: Path, log: Callable[[str], None]) -> int:
     if n:
         log(f"models_mirror: rebuilt {n} HF-cache symlinks from .rclonelink markers")
     return n
+
+
+def _preload_main() -> None:
+    """Preload a RunPod network volume from R2 (issue #55 Phase C). Run this INSIDE a one-shot pod
+    that has the volume mounted and the R2_* creds set, with VJ_MODELS_ROOT pointed at the mount:
+
+        VJ_MODELS_ROOT=/runpod-volume python -m vivijure_backend.harness.models_mirror --preload
+
+    It runs the SAME ensure_models + ensure_i2v_models the worker uses, so the on-volume layout
+    (hf-cache/, antelopev2/, rife/, GFPGANv1.4/, both sentinels) is byte-for-byte what a worker
+    reads via VJ_VOLUME_ROOT -- no separate copy logic to drift. VJ_VOLUME_ROOT must NOT be set
+    here (that is the read-only worker path); the preloader is the volume's sole writer. The full
+    set is pulled (base + the lazy i2v repos) by calling ensure_i2v_models explicitly, since one
+    full volume per datacenter is the design (no base/i2v split)."""
+    import sys
+    print("models_mirror: preloading volume (base + i2v) from R2...", flush=True)
+    ensure_models()                       # base set -> writes .vj-mirror-complete
+    ensure_i2v_models()                   # Wan I2V + Lightning -> writes .vj-i2v-mirror-complete
+    root = Path(os.environ.get("VJ_MODELS_ROOT", "/opt/models"))
+    ok = (root / SENTINEL).exists() and (root / I2V_SENTINEL).exists()
+    print(f"models_mirror: preload {'complete' if ok else 'INCOMPLETE'} at {root} "
+          f"(base={ (root / SENTINEL).exists() }, i2v={ (root / I2V_SENTINEL).exists() })", flush=True)
+    sys.exit(0 if ok else 1)
+
+
+if __name__ == "__main__":
+    import sys
+    if "--preload" in sys.argv:
+        _preload_main()
+    else:
+        print("usage: python -m vivijure_backend.harness.models_mirror --preload", flush=True)
