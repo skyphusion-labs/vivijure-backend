@@ -11,13 +11,17 @@ from vivijure_backend.harness.models_mirror import (
     I2V_LAZY_REPOS,
     I2V_SENTINEL,
     _DEFAULT_MODEL_VERSION,
+    _PRELOAD_LOCK,
     SENTINEL,
+    _acquire_volume_lock,
     _dir_bytes,
     _jitter_seconds,
     _mirror_event,
     _reconstruct_symlinks,
     _resolve_volume,
+    _self_preload_volume,
     _skip_event,
+    _truthy,
     ensure_i2v_models,
     mirror_cmd,
     start_i2v_prefetch,
@@ -91,6 +95,83 @@ def test_resolve_volume_emits_volume_skip_event(tmp_path):
     msgs: list[str] = []
     _resolve_volume({"VJ_VOLUME_ROOT": str(vol)}, _DEFAULT_MODEL_VERSION, log=msgs.append)
     assert any('"reason": "volume"' in m for m in msgs)
+
+
+# --------------------------------------------------- self-preloading volumes (#55 Phase D)
+
+def test_truthy():
+    for v in ("1", "true", "TRUE", "Yes", "on"):
+        assert _truthy(v)
+    for v in ("0", "false", "", "no", "off", None):
+        assert not _truthy(v)
+
+
+def test_acquire_lock_basic_and_contention(tmp_path):
+    lk = tmp_path / _PRELOAD_LOCK
+    assert _acquire_volume_lock(lk, log=lambda *_: None) is True   # first wins
+    assert lk.exists()
+    assert _acquire_volume_lock(lk, log=lambda *_: None) is False  # fresh lock held -> loser
+
+
+def test_acquire_lock_takes_over_stale(tmp_path):
+    import os, time
+    lk = tmp_path / _PRELOAD_LOCK
+    lk.write_text("old")
+    old = time.time() - 7200  # 2h, well past the 1h TTL
+    os.utime(lk, (old, old))
+    assert _acquire_volume_lock(lk, log=lambda *_: None) is True   # stale -> taken over
+
+
+def test_resolve_volume_no_self_preload_when_flag_unset(tmp_path, monkeypatch):
+    called = []
+    monkeypatch.setattr(models_mirror, "_self_preload_volume", lambda *a: called.append(1) or True)
+    vol = _seed_volume(tmp_path / "vol", _DEFAULT_MODEL_VERSION, base=False, i2v=False)
+    e = {"VJ_VOLUME_ROOT": str(vol)}                # flag NOT set
+    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is False
+    assert not called                              # default stays read-only, no self-preload
+
+
+def test_resolve_volume_routes_to_self_preload_when_enabled(tmp_path, monkeypatch):
+    called = []
+    monkeypatch.setattr(models_mirror, "_self_preload_volume",
+                        lambda e, v, l: called.append(1) or True)
+    vol = _seed_volume(tmp_path / "vol", _DEFAULT_MODEL_VERSION, base=False, i2v=False)
+    e = {"VJ_VOLUME_ROOT": str(vol), "VJ_VOLUME_SELF_PRELOAD": "1"}
+    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is True
+    assert called                                  # routed to self-preload
+
+
+def test_self_preload_lock_loser_falls_back_without_mirroring(tmp_path, monkeypatch):
+    import time
+    vol = tmp_path / "vol"
+    vol.mkdir()
+    (vol / _PRELOAD_LOCK).write_text(str(time.time()))  # a live writer already holds the lock
+    def boom(**k):
+        raise AssertionError("lock loser must not mirror")
+    monkeypatch.setattr(models_mirror, "ensure_models", boom)
+    monkeypatch.setattr(models_mirror, "ensure_i2v_models", boom)
+    e = {"VJ_VOLUME_ROOT": str(vol)}
+    assert _self_preload_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is False
+    assert "HF_HOME" not in e
+
+
+def test_self_preload_winner_fills_repoints_and_releases_lock(tmp_path, monkeypatch):
+    vol = tmp_path / "vol"
+    (vol / "hf-cache").mkdir(parents=True)
+    def fake_base(env=None, log=None, **k):
+        (Path(env["VJ_MODELS_ROOT"]) / SENTINEL).write_text(_DEFAULT_MODEL_VERSION + "\n")
+        return True
+    def fake_i2v(env=None, log=None, **k):
+        (Path(env["VJ_MODELS_ROOT"]) / I2V_SENTINEL).write_text(_DEFAULT_MODEL_VERSION + "\n")
+        return True
+    monkeypatch.setattr(models_mirror, "ensure_models", fake_base)
+    monkeypatch.setattr(models_mirror, "ensure_i2v_models", fake_i2v)
+    e = {"VJ_VOLUME_ROOT": str(vol)}
+    assert _self_preload_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is True
+    assert e["VJ_MODELS_ROOT"] == str(vol)
+    assert e["HF_HOME"] == str(vol / "hf-cache")
+    assert (vol / SENTINEL).exists() and (vol / I2V_SENTINEL).exists()
+    assert not (vol / _PRELOAD_LOCK).exists()      # lock released after fill
 
 
 # --------------------------------------------------- R2-egress jitter knob (#55 Phase C)

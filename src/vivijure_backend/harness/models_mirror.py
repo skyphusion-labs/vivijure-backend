@@ -167,6 +167,91 @@ def _volume_sentinel_ok(path: Path, model_version: str) -> bool:
     return path.exists() and path.read_text().strip() == model_version
 
 
+def _truthy(v) -> bool:
+    """Env-flag truthiness: '1'/'true'/'yes'/'on' (any case) are on; everything else is off."""
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+# Single-writer preload lock + how long before a held lock is presumed abandoned. A full fill takes
+# ~6 min; 60 min means a lock older than that = a dead writer we can take over (see #55 Phase D).
+_PRELOAD_LOCK = ".vj-preload.lock"
+_LOCK_TTL_S = 3600
+
+
+def _acquire_volume_lock(lockpath: Path, log: Callable[[str], None], ttl_s: int = _LOCK_TTL_S) -> bool:
+    """Atomically claim the single-writer self-preload lock on the volume. `O_CREAT|O_EXCL` makes the
+    create race-free across workers, so exactly one wins; a simultaneous cold fan-out cannot all
+    start mirroring at once (RunPod warns concurrent writes corrupt a volume). If the lock already
+    exists but is older than `ttl_s`, the prior writer is presumed dead and we take it over (unlink +
+    retry). Returns True iff we now own it."""
+    for _ in range(2):  # normal attempt + one retry after a stale take-over
+        try:
+            fd = os.open(str(lockpath), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            os.write(fd, str(time.time()).encode())
+            os.close(fd)
+            return True
+        except FileExistsError:
+            try:
+                age = time.time() - lockpath.stat().st_mtime
+            except OSError:
+                return False
+            if age <= ttl_s:
+                return False  # fresh lock held by a live writer
+            log(f"models_mirror: stale preload lock at {lockpath} ({age:.0f}s > {ttl_s}s); taking over.")
+            try:
+                lockpath.unlink()
+            except OSError:
+                return False
+    return False
+
+
+def _self_preload_volume(e: dict, model_version: str, log: Callable[[str], None]) -> bool:
+    """First-worker self-preload (opt-in via `VJ_VOLUME_SELF_PRELOAD`): when the mounted volume is
+    empty/partial, win the single-writer lock and mirror R2 -> the volume (base + i2v) so every
+    later worker in this datacenter is hot -- no manual preload pod, and version bumps self-heal.
+    The easiest scale-out: attach an empty volume to a DC and the first worker primes it.
+
+    Returns True (and repoints `HF_HOME`/`VJ_MODELS_ROOT` at the now-filled volume) iff WE filled it;
+    False to fall back to the local-disk R2 mirror for this job. Only the lock winner writes; the
+    losers fall back (correct, just not hot), which is what prevents concurrent-write corruption.
+    The fill runs the standard mirror against a sub-env with the volume-read path disabled, so it
+    does not recurse back into `_resolve_volume`."""
+    vol = Path(e["VJ_VOLUME_ROOT"])
+    lock = vol / _PRELOAD_LOCK
+    if not _acquire_volume_lock(lock, log):
+        log(f"models_mirror: another worker is preloading {vol}; this job uses the R2 mirror.")
+        return False
+    log(f"models_mirror: self-preloading volume {vol} from R2 (sole writer)...")
+    try:
+        sub = dict(e)
+        sub["VJ_MODELS_ROOT"] = str(vol)
+        sub["HF_HOME"] = str(vol / "hf-cache")
+        sub.pop("VJ_VOLUME_ROOT", None)          # disable the volume-read path in the nested calls
+        sub.pop("VJ_VOLUME_SELF_PRELOAD", None)
+        ensure_models(env=sub, log=log)          # base set + base sentinel -> volume
+        ensure_i2v_models(env=sub, log=log)      # Wan set + i2v sentinel  -> volume
+    except Exception as exc:  # noqa: BLE001 -- a failed fill must never abort the job; fall back
+        log(f"models_mirror: self-preload of {vol} failed ({exc}); this job uses the R2 mirror.")
+        return False
+    finally:
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+    try:
+        if (_volume_sentinel_ok(vol / SENTINEL, model_version)
+                and _volume_sentinel_ok(vol / I2V_SENTINEL, model_version)):
+            e["VJ_MODELS_ROOT"] = str(vol)
+            e["HF_HOME"] = str(vol / "hf-cache")
+            log(f"models_mirror: self-preload complete; reading weights from {vol}.")
+            log(_skip_event("volume_self_preload"))
+            return True
+    except OSError:
+        pass
+    log(f"models_mirror: self-preload of {vol} did not complete both sentinels; using R2 mirror.")
+    return False
+
+
 def _resolve_volume(e: dict, model_version: str, log: Callable[[str], None]) -> bool:
     """If a fully preloaded RunPod network volume is mounted (`VJ_VOLUME_ROOT`) and carries BOTH the
     base AND the i2v sentinel at the wanted `model_version`, repoint `HF_HOME` + `VJ_MODELS_ROOT` at
@@ -178,34 +263,37 @@ def _resolve_volume(e: dict, model_version: str, log: Callable[[str], None]) -> 
     BOTH sentinels are required, not just the base one: after the repoint, a standalone `i2v_clip`
     calls `ensure_i2v_models` against the volume root, and if the volume held the base set but NOT
     the i2v set (a partial preload that still wrote the base sentinel, or a base-only volume), that
-    would try to mirror Wan ONTO the read-only volume and fail instead of falling back. So an
-    incompletely preloaded volume degrades wholesale to the R2 mirror rather than throwing
-    mysterious i2v failures in that datacenter. (One full volume per DC is the design.)
+    would try to mirror Wan ONTO the volume and fail instead of falling back. So an incompletely
+    preloaded volume degrades wholesale rather than throwing mysterious i2v failures in that DC.
+    (One full volume per DC is the design.)
 
-    The volume is READ-ONLY for workers: RunPod warns that concurrent writes from multiple workers
-    corrupt a volume, and the preloader is the sole writer. So this never writes to the volume; on
-    any miss (unset, missing/sentinel-mismatch, probe error) it leaves `e` untouched and the R2
-    mirror runs against the writable local path exactly as before. Mutating `e` (os.environ in
-    production) is how the repoint reaches the deferred torch/diffusers loads, which read `HF_HOME`
-    at call time."""
+    READ-ONLY by default: RunPod warns that concurrent writes from multiple workers corrupt a
+    volume, so a worker normally never writes it. The exception is opt-in self-preload
+    (`VJ_VOLUME_SELF_PRELOAD`, #55 Phase D): on an empty/partial volume, the FIRST worker wins a
+    single-writer lock and fills it for the rest, so scale-out is just "attach an empty volume."
+    Mutating `e` (os.environ in production) is how the repoint reaches the deferred torch/diffusers
+    loads, which read `HF_HOME` at call time."""
     vol = e.get("VJ_VOLUME_ROOT")
     if not vol:
         return False
-    base_ok = i2v_ok = False
     try:
         base_ok = _volume_sentinel_ok(Path(vol) / SENTINEL, model_version)
         i2v_ok = _volume_sentinel_ok(Path(vol) / I2V_SENTINEL, model_version)
-        if base_ok and i2v_ok:
-            e["VJ_MODELS_ROOT"] = str(vol)
-            e["HF_HOME"] = str(Path(vol) / "hf-cache")
-            log(f"models_mirror: fully preloaded network volume at {vol} (v{model_version}); "
-                "reading weights from it, skipping the R2 mirror.")
-            log(_skip_event("volume"))
-            return True
-        log(f"models_mirror: volume at {vol} not fully preloaded for v{model_version} "
-            f"(base={base_ok}, i2v={i2v_ok}); falling back to R2 mirror.")
     except OSError as exc:  # noqa: BLE001 -- a volume probe failure must never abort the job
         log(f"models_mirror: volume probe at {vol} failed ({exc}); falling back to R2 mirror.")
+        return False
+    if base_ok and i2v_ok:
+        e["VJ_MODELS_ROOT"] = str(vol)
+        e["HF_HOME"] = str(Path(vol) / "hf-cache")
+        log(f"models_mirror: fully preloaded network volume at {vol} (v{model_version}); "
+            "reading weights from it, skipping the R2 mirror.")
+        log(_skip_event("volume"))
+        return True
+    log(f"models_mirror: volume at {vol} not fully preloaded for v{model_version} "
+        f"(base={base_ok}, i2v={i2v_ok}).")
+    if _truthy(e.get("VJ_VOLUME_SELF_PRELOAD")):
+        return _self_preload_volume(e, model_version, log)
+    log("models_mirror: falling back to R2 mirror.")
     return False
 
 
