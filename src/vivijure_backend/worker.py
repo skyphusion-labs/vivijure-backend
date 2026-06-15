@@ -96,11 +96,16 @@ def _warn_model_divergence(req: RenderRequest, server) -> None:
 
 def handler(job: dict) -> dict:
     """RunPod serverless entry. Build the per-job pipeline from the request's RenderConfig,
-    register it, and hand off to the harness (which owns model mirror, R2, plan, finish)."""
+    register it, and hand off to the harness (which owns model mirror, R2, plan, finish).
+
+    finish_clip actions skip pipeline registration: they only need the ModelServer for RIFE
+    and face-restore, which run_finish_job creates directly, so there is no render pipeline
+    to register."""
     from .harness.handler import handler as harness_handler
 
     payload = job.get("input", job)
-    register_pipeline(build_pipeline(RenderRequest.from_dict(payload)))
+    if str(payload.get("action", "render")) != "finish_clip":
+        register_pipeline(build_pipeline(RenderRequest.from_dict(payload)))
     return harness_handler(job)
 
 

@@ -383,12 +383,14 @@ def run_finish_job(
         applied.append(f"face_restore:{params.face_restore_backend}")
 
     progress.complete(output_key=clip_key_out)
+    # Pointer-only return: keep the job-done payload small so RunPod's job-done endpoint
+    # does not reject it. All state lives in R2; the caller only needs the output key.
     return {
-        "shot_id": shot_id,
         "clip_key": clip_key_out,
         "out_fps": result.out_fps,
         "frames": result.frames_out,
         "applied": applied,
+        "status": "complete",
     }
 
 
