@@ -84,6 +84,11 @@ def run_job(
     progress.emit("mirror_done", pulled=bool(mirrored))
     try:
         # --- bundle in ---
+        # Validate the required input up front (like finish_clip/i2v_clip do for their keys), so a
+        # malformed job -- e.g. action=render with no bundle_key -- fails with a clear message
+        # instead of a botocore ParamValidationError ("Invalid length for parameter Key") deep in R2.
+        if not req.bundle_key:
+            raise HarnessError(f"{req.action}: bundle_key is required (no project bundle to fetch)")
         tar = store.get_file(req.bundle_key, workdir / "bundle.tar.gz")
         bundle = Bundle.extract(Path(tar), workdir / "project")
 
