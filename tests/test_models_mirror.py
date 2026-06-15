@@ -2,6 +2,8 @@
 leaves `<name>.rclonelink` marker files on download; the HF cache needs real symlinks."""
 from pathlib import Path
 
+import json
+
 from vivijure_backend.harness import models_mirror
 from vivijure_backend.harness.models_mirror import (
     DEFAULT_SKIP_REPOS,
@@ -9,7 +11,10 @@ from vivijure_backend.harness.models_mirror import (
     I2V_LAZY_REPOS,
     I2V_SENTINEL,
     _DEFAULT_MODEL_VERSION,
+    _dir_bytes,
+    _mirror_event,
     _reconstruct_symlinks,
+    _skip_event,
     ensure_i2v_models,
     mirror_cmd,
     start_i2v_prefetch,
@@ -125,6 +130,61 @@ def test_reconstructs_symlink_from_marker(tmp_path):
 def test_idempotent_and_quiet_when_no_markers(tmp_path):
     (tmp_path / "f.json").write_text("{}")
     assert _reconstruct_symlinks(tmp_path, log=lambda *_: None) == 0
+
+
+# --------------------------------------------------------- cold-start telemetry (issue #55)
+
+def _parse_event(line):
+    # "@event <name> <json>" -> (name, payload dict)
+    assert line.startswith("@event ")
+    _, name, blob = line.split(" ", 2)
+    return name, json.loads(blob)
+
+
+def test_mirror_event_reports_per_leg_and_total_timing():
+    legs = [("hf-cache", 120.0), ("antelopev2", 8.0), ("rife", 1.0), ("GFPGANv1.4", 3.0)]
+    name, p = _parse_event(_mirror_event(legs, total_bytes=50_000_000_000, cold=True, model_version="1"))
+    assert name == "mirror_complete"
+    assert p["cold"] is True
+    assert p["model_version"] == "1"
+    assert p["total_seconds"] == 132.0          # sum of legs
+    assert p["total_bytes"] == 50_000_000_000
+    assert p["legs"]["hf-cache"] == 120.0
+    # throughput = bytes / 1e6 / total_seconds (MB/s), derived not assumed
+    assert p["throughput_mbps"] == round(50_000_000_000 / 1e6 / 132.0, 1)
+
+
+def test_mirror_event_custom_name_for_i2v():
+    name, p = _parse_event(_mirror_event([("wan", 600.0)], 120_000_000_000, cold=True,
+                                         model_version="1", event="i2v_mirror_complete"))
+    assert name == "i2v_mirror_complete"
+    assert p["legs"]["wan"] == 600.0
+
+
+def test_mirror_event_zero_time_no_divide_by_zero():
+    name, p = _parse_event(_mirror_event([], total_bytes=0, cold=True, model_version="1"))
+    assert p["total_seconds"] == 0.0
+    assert p["throughput_mbps"] == 0.0          # guarded, not a ZeroDivisionError
+
+
+def test_skip_event_carries_reason():
+    name, p = _parse_event(_skip_event("warm"))
+    assert name == "mirror_skipped"
+    assert p["reason"] == "warm"
+    name, p = _parse_event(_skip_event("no_creds", event="i2v_mirror_skipped"))
+    assert name == "i2v_mirror_skipped"
+    assert p["reason"] == "no_creds"
+
+
+def test_dir_bytes_counts_real_files_not_symlinks(tmp_path):
+    # one real blob + a snapshot symlink pointing at it: the blob counts once, the symlink never.
+    (tmp_path / "blobs").mkdir()
+    blob = tmp_path / "blobs" / "deadbeef"
+    blob.write_bytes(b"x" * 1000)
+    snap = tmp_path / "snapshots" / "rev"
+    snap.mkdir(parents=True)
+    (snap / "model.safetensors").symlink_to(blob)
+    assert _dir_bytes(tmp_path) == 1000          # symlink not double-counted
 
 
 # --------------------------------------------------------- HF offline .no_exist stub writer

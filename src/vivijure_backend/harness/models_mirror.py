@@ -13,11 +13,13 @@ The rclone command is built by a pure helper so it tests without spawning anythi
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -92,6 +94,59 @@ def mirror_cmd(conf: Path, src: str, dst: Path, *, skip_repos: tuple[str, ...] =
     return cmd
 
 
+# ----------------------------------------------------------- cold-start telemetry (issue #55)
+# Cold-start staging cost was only ever measured by SSHing into live pods (the 2026-06-13 load
+# test). These helpers emit it as structured @event lines so the staging-time distribution
+# across workers/deploys is readable from logs, which is the foundation for choosing a
+# structural fix (bake vs pre-warm vs stage). Pure/best-effort: never abort a pull.
+
+def _timed(fn: Callable, *args, **kwargs) -> float:
+    """Run fn(*args, **kwargs) and return its wall-clock seconds (monotonic)."""
+    t0 = time.monotonic()
+    fn(*args, **kwargs)
+    return time.monotonic() - t0
+
+
+def _dir_bytes(path: Path) -> int:
+    """Sum sizes of real files (not symlinks) under path. After symlink reconstruction the HF
+    cache holds each weight once as a blob (snapshots are symlinks), so this counts true bytes
+    pulled without double-counting. Best-effort: a stat error on one entry never raises."""
+    total = 0
+    for p in path.rglob("*"):
+        try:
+            if p.is_file() and not p.is_symlink():
+                total += p.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
+def _mirror_event(legs: list[tuple[str, float]], total_bytes: int, *, cold: bool,
+                  model_version: str, event: str = "mirror_complete") -> str:
+    """Build an @event telemetry line for a completed mirror run (pure; no disk/rclone).
+
+    `legs` is a list of (leg_name, seconds). Emits per-leg + total timing, byte count, and
+    derived throughput so a slow node (the 2026-06-13 Blackwell that took ~35 min) stands out
+    against the H200 pack in the logs."""
+    total_s = sum(s for _, s in legs)
+    mbps = (total_bytes / 1e6 / total_s) if total_s > 0 else 0.0
+    payload = {
+        "cold": cold,
+        "model_version": model_version,
+        "total_seconds": round(total_s, 1),
+        "total_bytes": total_bytes,
+        "throughput_mbps": round(mbps, 1),
+        "legs": {name: round(s, 1) for name, s in legs},
+    }
+    return "@event " + event + " " + json.dumps(payload, sort_keys=True)
+
+
+def _skip_event(reason: str, *, event: str = "mirror_skipped") -> str:
+    """Build an @event line for a skipped mirror (warm sentinel / no R2 creds). Counting these
+    against mirror_complete across a deploy shows how often the per-deploy cold-start tax hits."""
+    return "@event " + event + " " + json.dumps({"reason": reason}, sort_keys=True)
+
+
 def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print,
                   skip_repos: tuple[str, ...] = DEFAULT_SKIP_REPOS) -> bool:
     """Mirror the kept model set from R2 into the local HF cache + antelopev2 dir.
@@ -109,6 +164,7 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     if sentinel.exists():
         if sentinel.read_text().strip() == model_version:
             log("models_mirror: warm worker (sentinel present); skipping R2 pull.")
+            log(_skip_event("warm"))
             return False
         log(f"models_mirror: sentinel version mismatch (want {model_version!r}); re-mirroring.")
     if not e.get("R2_ACCESS_KEY_ID"):
@@ -116,8 +172,10 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
         if not hub.is_dir() or not any(hub.iterdir()):
             log("models_mirror: WARNING: no R2 creds and HF cache appears empty -- "
                 "model loads will fail; set R2_ACCESS_KEY_ID or pre-provision weights")
+            log(_skip_event("no_creds_empty_cache"))
         else:
             log("models_mirror: no R2 creds; assuming weights are pre-provisioned.")
+            log(_skip_event("no_creds"))
         return False
     if shutil.which("rclone") is None:
         raise RuntimeError("models_mirror: rclone is not installed in the image")
@@ -126,11 +184,16 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     hf_home.mkdir(parents=True, exist_ok=True)
     log(f"models_mirror: cold worker -> mirroring r2:{bucket}/models to {hf_home} "
         f"(skipping {len(skip_repos)} lazy repos)...")
-    subprocess.run(mirror_cmd(conf, f"r2:{bucket}/models/hf-cache", hf_home, skip_repos=skip_repos), check=True)
+    legs: list[tuple[str, float]] = []
+    legs.append(("hf-cache", _timed(
+        subprocess.run,
+        mirror_cmd(conf, f"r2:{bucket}/models/hf-cache", hf_home, skip_repos=skip_repos),
+        check=True)))
 
     antelope = models_root / "antelopev2"
     antelope.mkdir(parents=True, exist_ok=True)
-    subprocess.run(mirror_cmd(conf, f"r2:{bucket}/models/antelopev2", antelope), check=True)
+    legs.append(("antelopev2", _timed(
+        subprocess.run, mirror_cmd(conf, f"r2:{bucket}/models/antelopev2", antelope), check=True)))
 
     # Finishing-stage weights: stored at fixed paths under models_root (NOT in the HF cache).
     # ModelServer.frame_interpolator loads $VJ_MODELS_ROOT/rife/flownet.pkl and
@@ -139,7 +202,8 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     for subdir in ("rife", "GFPGANv1.4"):
         dst = models_root / subdir
         dst.mkdir(parents=True, exist_ok=True)
-        subprocess.run(mirror_cmd(conf, f"r2:{bucket}/models/{subdir}", dst), check=True)
+        legs.append((subdir, _timed(
+            subprocess.run, mirror_cmd(conf, f"r2:{bucket}/models/{subdir}", dst), check=True)))
 
     # rclone --links stores HF-cache symlinks as `<name>.rclonelink` text files (the link target),
     # and rclone >= 1.7x does NOT translate them back to real symlinks on download -- it leaves the
@@ -154,6 +218,9 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
 
     models_root.mkdir(parents=True, exist_ok=True)
     sentinel.write_text(model_version + "\n")
+    total_bytes = (_dir_bytes(hf_home) + _dir_bytes(antelope)
+                   + _dir_bytes(models_root / "rife") + _dir_bytes(models_root / "GFPGANv1.4"))
+    log(_mirror_event(legs, total_bytes, cold=True, model_version=model_version))
     log("models_mirror: model mirror from R2 complete.")
     return True
 
@@ -188,10 +255,12 @@ def ensure_i2v_models(*, env: dict | None = None, log: Callable[[str], None] = p
     if sentinel.exists():
         if sentinel.read_text().strip() == model_version:
             log("models_mirror: i2v models already mirrored (sentinel present); skipping.")
+            log(_skip_event("warm", event="i2v_mirror_skipped"))
             return False
         log(f"models_mirror: i2v sentinel version mismatch (want {model_version!r}); re-mirroring.")
     if not e.get("R2_ACCESS_KEY_ID"):
         log("models_mirror: no R2 creds; i2v weights assumed pre-provisioned.")
+        log(_skip_event("no_creds", event="i2v_mirror_skipped"))
         return False
     if shutil.which("rclone") is None:
         raise RuntimeError("models_mirror: rclone is not installed in the image")
@@ -199,11 +268,17 @@ def ensure_i2v_models(*, env: dict | None = None, log: Callable[[str], None] = p
     conf = rclone_conf(e, Path(tempfile.gettempdir()) / "vj-rclone")
     hub = hf_home / "hub"
     hub.mkdir(parents=True, exist_ok=True)
+    legs: list[tuple[str, float]] = []
     for repo in repos:
         log(f"models_mirror: lazy i2v pull -> mirroring {repo} from R2...")
-        subprocess.run(mirror_cmd(conf, f"r2:{bucket}/models/hf-cache/hub/{repo}", hub / repo), check=True)
+        legs.append((repo, _timed(
+            subprocess.run,
+            mirror_cmd(conf, f"r2:{bucket}/models/hf-cache/hub/{repo}", hub / repo), check=True)))
     _reconstruct_symlinks(hf_home, log)
     sentinel.write_text(model_version + "\n")
+    total_bytes = sum(_dir_bytes(hub / repo) for repo in repos)
+    log(_mirror_event(legs, total_bytes, cold=True, model_version=model_version,
+                      event="i2v_mirror_complete"))
     log("models_mirror: i2v model mirror from R2 complete.")
     return True
 
