@@ -428,8 +428,10 @@ def handler(job: dict) -> dict:
     # Eager-start the Wan I2V pull in the background so it overlaps LoRA training: training is
     # GPU-bound with the network idle, while the pull (~120GB from R2) is network-bound. The two
     # run concurrently; ensure_i2v_models() joins the thread before loading the Wan pipeline.
-    from .models_mirror import start_i2v_prefetch
-    start_i2v_prefetch()
+    # finish_clip never loads the Wan pipeline, so skip the prefetch for that action.
+    if str(payload.get("action", "render")) != "finish_clip":
+        from .models_mirror import start_i2v_prefetch
+        start_i2v_prefetch()
 
     workdir = Path(tempfile.mkdtemp(prefix="vj-job-"))
     try:
