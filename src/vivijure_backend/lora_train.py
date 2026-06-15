@@ -21,7 +21,6 @@ module imports and unit-tests on a CPU box, the same convention `models.py` uses
 """
 from __future__ import annotations
 
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -43,7 +42,7 @@ class LoraTrainConfig:
     rank: int = 16
     resolution: int = 1024
     learning_rate: float = 1e-4
-    max_steps: int = 1000
+    max_steps: int = 1000  # actual steps = max(50, max_steps * ref_count // 5)
     batch_size: int = 1
     gradient_accumulation_steps: int = 1
     seed: int = 0
@@ -53,6 +52,7 @@ class LoraTrainConfig:
     # slot's registry entry; the name is the trigger token the keyframe stage will prompt with.
     caption_template: str = "{name}, {prompt}"
     save_every: int = 0  # 0 = only the final adapter; >0 writes intermediate checkpoints
+    lora_alpha: int | None = None  # None = use rank (standard DreamBooth default)
 
 
 @dataclass
@@ -65,6 +65,7 @@ class TrainedLora:
     rank: int
     ref_count: int
     base_repo: str
+    checkpoint_dirs: list[Path] = field(default_factory=list)  # save_every dirs, caller handles cleanup
     meta: dict = field(default_factory=dict)
 
 
@@ -170,9 +171,10 @@ def train_slot(
         module.requires_grad_(False)
 
     # --- attach the trainable LoRA to the UNet only ---
+    lora_alpha = cfg.lora_alpha if cfg.lora_alpha is not None else cfg.rank
     unet.add_adapter(LoraConfig(
         r=cfg.rank,
-        lora_alpha=cfg.rank,
+        lora_alpha=lora_alpha,
         init_lora_weights="gaussian",
         target_modules=UNET_TARGET_MODULES,
     ))
@@ -193,6 +195,7 @@ def train_slot(
     target_size = (cfg.resolution, cfg.resolution)
     latents: list[torch.Tensor] = []
     time_ids: list[torch.Tensor] = []
+    flipped_time_ids: list[torch.Tensor] = []
     for ref in refs:
         pixels, original_size, crop_top_left = _load_image(ref, cfg.resolution)
         pixels = pixels.to(device, dtype=torch.float32).unsqueeze(0)
@@ -200,31 +203,49 @@ def train_slot(
             latent = vae.encode(pixels).latent_dist.sample() * vae.config.scaling_factor
         latents.append(latent.to(weight_dtype).squeeze(0))
         time_ids.append(_time_ids(original_size, crop_top_left, target_size, device, weight_dtype))
+        # Flipped time_ids: horizontal flip maps crop_left -> new_w - left - resolution.
+        scale = cfg.resolution / min(original_size[1], original_size[0])
+        new_w = round(original_size[1] * scale)
+        flipped_left = new_w - crop_top_left[1] - cfg.resolution
+        flipped_time_ids.append(_time_ids(original_size, (crop_top_left[0], flipped_left), target_size, device, weight_dtype))
 
     # --- training loop ---
     unet.train()
     generator = torch.Generator(device=device).manual_seed(cfg.seed)
     n = len(latents)
     add_text_embeds = pooled_prompt_embeds  # encoder-2 pooled output, the SDXL "text_embeds"
+    # Scale steps by ref count: calibrated at 5 refs = max_steps; fewer refs = fewer steps to
+    # reduce overfit risk; floor at 50 so very small sets still train something meaningful.
+    effective_steps = max(50, cfg.max_steps * n // 5)
     last_loss = 0.0
-    for step in range(cfg.max_steps):
-        idx = int(torch.randint(0, n, (1,), generator=generator, device=device).item())
-        latent = latents[idx].unsqueeze(0)
-        add_time = time_ids[idx]
-        if cfg.random_flip and torch.rand(1, generator=generator, device=device).item() < 0.5:
-            latent = torch.flip(latent, dims=[-1])  # horizontal flip in latent space
+    checkpoint_dirs: list[Path] = []
+    for step in range(effective_steps):
+        # Sample a batch of batch_size indices (with replacement; the ref set is tiny).
+        bs = min(cfg.batch_size, n)
+        idxs = [int(torch.randint(0, n, (1,), generator=generator, device=device).item())
+                for _ in range(bs)]
+        latent_b = torch.stack([latents[i].clone() for i in idxs])         # (B, C, H, W)
+        add_time = torch.cat([time_ids[i] for i in idxs], dim=0)            # (B, 6)
+        if cfg.random_flip:
+            for b_i, idx_i in enumerate(idxs):
+                if torch.rand(1, generator=generator, device=device).item() < 0.5:
+                    latent_b[b_i] = torch.flip(latent_b[b_i], dims=[-1])
+                    add_time[b_i] = flipped_time_ids[idx_i]
 
-        noise = torch.randn(latent.shape, generator=generator, device=device, dtype=weight_dtype)
+        noise = torch.randn(latent_b.shape, generator=generator, device=device, dtype=weight_dtype)
         timestep = torch.randint(
-            0, noise_scheduler.config.num_train_timesteps, (1,), generator=generator, device=device).long()
-        noisy = noise_scheduler.add_noise(latent, noise, timestep)
+            0, noise_scheduler.config.num_train_timesteps, (bs,), generator=generator, device=device).long()
+        noisy = noise_scheduler.add_noise(latent_b, noise, timestep)
 
         model_pred = unet(
-            noisy, timestep, prompt_embeds,
-            added_cond_kwargs={"text_embeds": add_text_embeds, "time_ids": add_time},
+            noisy, timestep, prompt_embeds.expand(bs, -1, -1),
+            added_cond_kwargs={
+                "text_embeds": add_text_embeds.expand(bs, -1),
+                "time_ids": add_time,
+            },
             return_dict=False,
         )[0]
-        target = _loss_target(noise_scheduler, latent, noise, timestep)
+        target = _loss_target(noise_scheduler, latent_b, noise, timestep)
         loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
         loss = loss / cfg.gradient_accumulation_steps
         loss.backward()
@@ -234,14 +255,16 @@ def train_slot(
             optimizer.zero_grad()
         last_loss = float(loss.item()) * cfg.gradient_accumulation_steps
 
-        if cfg.save_every and (step + 1) % cfg.save_every == 0 and (step + 1) < cfg.max_steps:
-            _save_adapter(unet, out_dir / f"checkpoint-{step + 1}",
+        if cfg.save_every and (step + 1) % cfg.save_every == 0 and (step + 1) < effective_steps:
+            ckpt_dir = out_dir / f"checkpoint-{step + 1}"
+            _save_adapter(unet, ckpt_dir,
                           StableDiffusionXLPipeline, get_peft_model_state_dict, convert_state_dict_to_diffusers)
+            checkpoint_dirs.append(ckpt_dir)
         if (step + 1) % 50 == 0 or step == 0:
-            print(f"[lora {char.slot}] step {step + 1}/{cfg.max_steps} loss={last_loss:.4f}", flush=True)
+            print(f"[lora {char.slot}] step {step + 1}/{effective_steps} loss={last_loss:.4f}", flush=True)
             if progress_cb is not None:
                 try:
-                    progress_cb(step + 1, cfg.max_steps, last_loss)  # throttled: only at the log cadence
+                    progress_cb(step + 1, effective_steps, last_loss)  # throttled: only at the log cadence
                 except Exception:
                     pass  # best-effort: a progress callback must never break training
 
@@ -250,19 +273,15 @@ def train_slot(
                   get_peft_model_state_dict, convert_state_dict_to_diffusers)
     saved = out_dir / "pytorch_lora_weights.safetensors"
 
-    # Remove intermediate checkpoint dirs written by save_every; only the final adapter matters.
-    for ckpt in out_dir.glob("checkpoint-*"):
-        if ckpt.is_dir():
-            shutil.rmtree(ckpt, ignore_errors=True)
-
     return TrainedLora(
         slot=char.slot,
         path=saved,
         trigger=char.name or char.slot,
-        steps=cfg.max_steps,
+        steps=effective_steps,
         rank=cfg.rank,
         ref_count=n,
         base_repo=base,
+        checkpoint_dirs=checkpoint_dirs,
         meta={"caption": caption, "final_loss": round(last_loss, 4),
               "device": current().tier.value},
     )

@@ -8,6 +8,8 @@ from vivijure_backend.contract import Character
 from vivijure_backend.lora_train import (
     LoraTrainConfig,
     TrainedLora,
+    _loss_target,
+    _time_ids,
     caption_for,
     default_base_repo,
     train_slot,
@@ -86,3 +88,81 @@ def test_caption_allows_plain_text_no_braces():
     # A template with no placeholders at all is fine (literal caption)
     result = caption_for(_char(), "a test caption")
     assert result == "a test caption"
+
+
+# ------------------------------------------------------------- new fields (issue #27)
+
+def test_lora_alpha_defaults_to_none():
+    assert LoraTrainConfig().lora_alpha is None
+
+
+def test_trained_lora_checkpoint_dirs_defaults_to_empty():
+    tl = TrainedLora(slot="A", path=Path("a.safetensors"), trigger="V",
+                     steps=100, rank=16, ref_count=3, base_repo="x")
+    assert tl.checkpoint_dirs == []
+
+
+# ----------------------------------------- effective_steps scaling
+
+def _effective_steps(max_steps: int, n: int) -> int:
+    return max(50, max_steps * n // 5)
+
+
+def test_effective_steps_at_five_refs_equals_max_steps():
+    assert _effective_steps(1000, 5) == 1000
+
+
+def test_effective_steps_scales_down_for_fewer_refs():
+    assert _effective_steps(1000, 2) == 400
+    assert _effective_steps(1000, 1) == 200
+
+
+def test_effective_steps_floors_at_fifty():
+    # A very small max_steps * few refs might compute below 50.
+    assert _effective_steps(100, 1) == 50
+
+
+def test_effective_steps_scales_up_for_more_refs():
+    assert _effective_steps(1000, 10) == 2000
+
+
+# ----------------------------------------- _time_ids shape
+
+def test_time_ids_returns_a_1x6_tensor():
+    torch = pytest.importorskip("torch")
+    t = _time_ids((1024, 768), (0, 128), (1024, 1024), "cpu", torch.float32)
+    assert t.shape == (1, 6)
+    vals = t[0].tolist()
+    # original_h, original_w, crop_top, crop_left, target_h, target_w
+    assert vals == [1024.0, 768.0, 0.0, 128.0, 1024.0, 1024.0]
+
+
+# ----------------------------------------- _loss_target prediction types
+
+class _FakeScheduler:
+    def __init__(self, prediction_type):
+        self.config = type("C", (), {"prediction_type": prediction_type})()
+
+    def get_velocity(self, latent, noise, timestep):
+        return latent - noise  # deterministic fake velocity
+
+
+def test_loss_target_returns_noise_for_epsilon_prediction():
+    torch = pytest.importorskip("torch")
+    latent = torch.ones(1, 4, 8, 8)
+    noise = torch.zeros(1, 4, 8, 8)
+    timestep = torch.tensor([0])
+    sched = _FakeScheduler("epsilon")
+    target = _loss_target(sched, latent, noise, timestep)
+    assert (target == noise).all()
+
+
+def test_loss_target_returns_velocity_for_v_prediction():
+    torch = pytest.importorskip("torch")
+    latent = torch.ones(1, 4, 8, 8)
+    noise = torch.zeros(1, 4, 8, 8)
+    timestep = torch.tensor([0])
+    sched = _FakeScheduler("v_prediction")
+    target = _loss_target(sched, latent, noise, timestep)
+    # fake velocity = latent - noise = 1 - 0 = 1
+    assert (target == latent - noise).all()

@@ -417,6 +417,8 @@ def _lora_from_dict(d: dict[str, Any] | None):
         gradient_checkpointing=bool(d.get("gradient_checkpointing", base.gradient_checkpointing)),
         caption_template=str(d.get("caption_template", base.caption_template)),
         save_every=_clamp_int(d.get("save_every"), 0, 5000, base.save_every),
+        lora_alpha=(_clamp_int(d["lora_alpha"], 1, 256, base.rank)
+                    if isinstance(d.get("lora_alpha"), (int, float)) else None),
     )
 
 
