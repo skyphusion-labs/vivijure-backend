@@ -69,6 +69,13 @@ The R2 token does double duty: the cold-start model mirror (`r2:<bucket>/models`
 ## Dependency pins
 
 `deploy/requirements.txt` is the single source of the runtime version set (torch installs
-separately from the cu128 index in the Dockerfile). The pins there are **provisional** until the
-H100 i2v validation hands over the exact `diffusers` / `transformers` / `torchao` /
-`imageio-ffmpeg` + Wan / fp8 set; replace the floors with that list and rebuild.
+separately from the cu128 index in the Dockerfile). The pins are the exact set validated on real
+hardware (H200 fp8 + fused 4-step i2v, H100 bf16 + CPU-offload, A6000 SDXL keyframe); the header
+of that file records the last validation date. Change a pin only with a fresh GPU-validation
+pass, then rebuild.
+
+## See also
+
+The operator's view of the running system -- the cold-start model mirror, the R2 object-key map,
+the structured progress channel, and the failure modes -- is in
+[../docs/operations.md](../docs/operations.md).

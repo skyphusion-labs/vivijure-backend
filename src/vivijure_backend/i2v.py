@@ -49,6 +49,8 @@ class I2VParams:
 
 @dataclass
 class I2VResult:
+    """The outcome of animating one keyframe: where the clip landed, its frame count / fps /
+    length, and whether the few-step distill path produced it."""
     shot_id: str
     path: Path
     num_frames: int

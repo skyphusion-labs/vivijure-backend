@@ -36,6 +36,7 @@ MULTI_CHAR_DEFAULTS: dict[str, object] = {
 
 
 class Action(str, Enum):
+    """What a render job asks for; selects which stages the planner schedules."""
     RENDER = "render"          # full pipeline: train -> keyframes -> i2v -> assemble
     PREVIEW = "preview"        # keyframes-only preview: train -> keyframes, NO i2v, no MP4
     FINALIZE = "finalize"      # i2v over existing keyframes (no keyframe gen)
@@ -51,6 +52,7 @@ class Action(str, Enum):
 
 
 class KeyframeMode(str, Enum):
+    """How a shot's keyframe is obtained: drawn fresh, reused from disk, or an authored inject."""
     GENERATE = "generate"  # SDXL has to draw it (GPU)
     REUSE = "reuse"        # already on disk from a prior pass (no GPU)
     INJECT = "inject"      # authored start_image supplied (no GPU)
@@ -67,6 +69,8 @@ _COST = {
 
 @dataclass
 class ScenePlan:
+    """The planner's decision for one shot: how to get its keyframe, whether it animates, and the
+    GPU tier its i2v should run on."""
     shot_id: str
     keyframe_mode: KeyframeMode
     is_multi_character: bool
@@ -78,12 +82,15 @@ class ScenePlan:
 
 @dataclass
 class LoraPlan:
+    """Which character slots must train versus which are reused (already trained or pretrained)."""
     train: list[str] = field(default_factory=list)   # slots that actually have to train (GPU)
     reuse: list[str] = field(default_factory=list)   # slots skipped: already trained / pretrained
 
 
 @dataclass
 class RenderPlan:
+    """The complete CPU-decided plan for a render: the LoRA plan, the per-scene plans, whether
+    assembly is off-GPU, a GPU-seconds estimate, and the GPU work the plan eliminated."""
     action: Action
     project: str
     quality: QualityTier

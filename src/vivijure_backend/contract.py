@@ -134,6 +134,8 @@ class Storyboard:
 
 @dataclass
 class Character:
+    """One cast member: the slot it occupies, its name (the keyframe trigger token), its
+    identity prompt, and the reference images the backend resolved from the bundle's refs dir."""
     slot: str
     name: str
     prompt: str
@@ -142,6 +144,7 @@ class Character:
 
 @dataclass
 class Cast:
+    """The project's characters keyed by slot, parsed from `characters/registry.json`."""
     characters: dict[str, Character]  # slot -> Character
 
     @classmethod
@@ -216,8 +219,13 @@ class RenderRequest:
 
     `overrides` is kept as the raw `render_overrides` dict for the small set of non-generation
     *routing* flags the pipeline still reads off it (e.g. `finish_offloaded` for the off-GPU
-    finish path); every actual generation knob now lives typed under `config`."""
+    finish path); every actual generation knob now lives typed under `config`.
+
+    NOTE: the standalone `finish_clip` action is a sibling job type, NOT a RenderRequest: the
+    harness routes it directly to `run_finish_job` (no bundle / planner / Wan) before any
+    RenderRequest is built, so it carries its own input/output shape (see docs/contract.md)."""
     action: str  # "render" | "preview" | "regen_shot" | "finalize" | "train_lora"
+    # (the standalone "finish_clip" action is handled by the harness, not via RenderRequest)
     project: str
     bundle_key: str
     quality_tier: str = "final"
@@ -255,12 +263,14 @@ class RenderRequest:
 
 @dataclass
 class Keyframe:
+    """A rendered keyframe in the result: the shot it belongs to and its object-store key."""
     shot_id: str
     key: str  # object-store key of the PNG
 
 
 @dataclass
 class Clip:
+    """A per-shot i2v clip in the result: the shot, its object-store key, and the clip length."""
     shot_id: str
     key: str
     target_seconds: float | None = None

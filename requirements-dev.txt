@@ -3,4 +3,4 @@ pytest>=8.0
 # Pillow renders the OpenPose pose-skeleton (keyframe._pose_skeleton, deferred-
 # imported) which test_keyframe exercises on CPU. The GPU image gets it via
 # deploy/requirements.txt; the test env needs it explicitly.
-Pillow>=10.0
+Pillow>=12.2.0  # 12.2.0 clears 6 CVEs (GHSA-pwv6/r73j/wjx4/5xmw/whj4/cfh3)

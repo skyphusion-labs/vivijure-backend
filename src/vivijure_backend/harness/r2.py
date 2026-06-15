@@ -20,6 +20,8 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class R2Config:
+    """R2 connection settings: the endpoint, the access key pair, and the bucket. The worker's
+    only credential, supplied through the environment."""
     endpoint: str
     access_key_id: str
     secret_access_key: str
@@ -27,6 +29,8 @@ class R2Config:
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "R2Config":
+        """Build from `R2_ENDPOINT` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET`;
+        raise if any are missing."""
         e = env if env is not None else os.environ
         missing = [k for k in ("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET")
                    if not e.get(k)]
