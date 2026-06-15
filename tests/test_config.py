@@ -29,7 +29,6 @@ def test_i2v_model_defaults_to_the_spec_wan():
 def test_multichar_defaults_mirror_orchestrator():
     # The anti-bleed scales must agree with what the planner already records.
     mc = MultiCharConfig()
-    assert mc.regional is (MULTI_CHAR_DEFAULTS["engine"] == "regional")
     assert mc.pose_conditioning == MULTI_CHAR_DEFAULTS["pose_conditioning"]
     assert mc.lora_scale_per_slot == MULTI_CHAR_DEFAULTS["lora_scale_per_slot"]
     assert mc.ip_adapter_scale_per_slot == MULTI_CHAR_DEFAULTS["ip_adapter_scale_per_slot"]

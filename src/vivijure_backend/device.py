@@ -66,11 +66,10 @@ class Device:
     def supports_fp8(self) -> bool:
         return self.arch in (Arch.BLACKWELL, Arch.HOPPER)
 
-    def image_quant(self) -> Quant:
-        """Card ceiling for a 4-bit-capable image DiT (FLUX / Qwen-Image): NVFP4 on Blackwell,
-        fp8 on Hopper. NOTE: SDXL is a UNet with no 4-bit engine, so it never actually reaches
-        NVFP4; `models.quant_for(family, device)` is the real per-model decision and narrows
-        SDXL to fp8. This stays as the raw card-capability ceiling."""
+    def dit_quant(self) -> Quant:
+        """Card ceiling for FP4-capable image DiTs (FLUX / Qwen-Image / SANA): NVFP4 on
+        Blackwell, fp8 on Hopper. SDXL is a UNet with no 4-bit engine and never reaches NVFP4;
+        use `models.quant_for(family, device)` for the real per-model decision."""
         if self.supports_fp4:
             return Quant.NVFP4
         if self.supports_fp8:
@@ -122,7 +121,7 @@ class Device:
 
     def summary(self) -> str:
         return (f"{self.tier.value} ({self.arch.value}, sm_{self.capability[0]}{self.capability[1]}, "
-                f"{self.vram_gb}GB): image={self.image_quant().value} video={self.video_quant().value} "
+                f"{self.vram_gb}GB): dit={self.dit_quant().value} video={self.video_quant().value} "
                 f"attn={self.attention().value}")
 
 

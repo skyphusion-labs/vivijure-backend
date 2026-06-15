@@ -1,7 +1,7 @@
 """i2v's pure surface, tested on CPU: the frame-count math the temporal VAE constrains, the
 duration it realizes, and the tier->profile decision. The Wan generation body needs torch and is
 validated on a pod."""
-from vivijure_backend.config import FeatureCache
+from vivijure_backend.config import FeatureCache, I2VConfig
 from vivijure_backend.contract import Scene
 from vivijure_backend.i2v import (
     DEFAULT_FPS,
@@ -12,7 +12,6 @@ from vivijure_backend.i2v import (
     _step_callback,
     clip_seconds,
     frames_for,
-    params_for,
     snap_frames,
 )
 from vivijure_backend.routing import QualityTier
@@ -293,28 +292,32 @@ def test_clip_seconds_is_frames_over_fps():
     assert clip_seconds(65, 16) == 4.062
 
 
-# ----------------------------------------------------------------------- tier profiles
+# ----------------------------------------------------------------------- tier profiles (I2VConfig)
 
 def test_final_tier_is_full_step():
-    p = params_for(_scene(5), QualityTier.FINAL)
-    assert p.distill is False
-    assert p.steps == 40
-    assert p.guidance_scale == 5.0
-    assert p.num_frames == 81
+    cfg = I2VConfig.for_tier(QualityTier.FINAL)
+    assert cfg.distill is False
+    assert cfg.steps == 40
+    assert cfg.guidance_scale == 3.5
 
 
-def test_draft_and_standard_are_distilled():
-    for tier in (QualityTier.DRAFT, QualityTier.STANDARD):
-        p = params_for(_scene(4), tier)
-        assert p.distill is True
-        assert p.steps == 4
-        assert p.guidance_scale == 1.0
-        assert p.num_frames == 65   # 4s at 16fps, snapped
+def test_draft_tier_is_distilled():
+    cfg = I2VConfig.for_tier(QualityTier.DRAFT)
+    assert cfg.distill is True
+    assert cfg.steps == 4
+    assert cfg.guidance_scale == 1.0
 
 
-def test_params_for_uses_scene_target_for_frame_count():
-    assert params_for(_scene(2), QualityTier.DRAFT).num_frames == snap_frames(2 * DEFAULT_FPS)
-    assert params_for(_scene(None), QualityTier.DRAFT).num_frames == MAX_FRAMES
+def test_standard_tier_is_full_step_with_easycache():
+    cfg = I2VConfig.for_tier(QualityTier.STANDARD)
+    assert cfg.distill is False
+    assert cfg.feature_cache is FeatureCache.EASYCACHE
+
+
+def test_frames_for_derives_from_seconds():
+    cfg = I2VConfig.for_tier(QualityTier.DRAFT)
+    assert cfg.frames_for(2.0) == max(1, min(256, round(2.0 * cfg.fps)))
+    assert cfg.frames_for(None) == cfg.num_frames
 
 
 def test_default_params_are_the_distilled_path():

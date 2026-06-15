@@ -90,19 +90,6 @@ def clip_seconds(num_frames: int, fps: int = DEFAULT_FPS) -> float:
     return round(num_frames / fps, 3)
 
 
-def params_for(scene: Scene, quality: QualityTier, *, base: I2VParams | None = None) -> I2VParams:
-    """Resolve the per-shot params: frame count from the scene's target duration, and the
-    step/guidance/distill profile from the quality tier (draft/standard distilled for throughput,
-    final full-step for the hero clip)."""
-    p = base or I2VParams()
-    p.num_frames = frames_for(scene.target_seconds, p.fps)
-    if quality is QualityTier.FINAL:
-        p.distill, p.steps, p.guidance_scale = False, 40, 5.0
-    else:  # draft / standard: the few-step distilled path
-        p.distill, p.steps, p.guidance_scale = True, 4, 1.0
-    return p
-
-
 # --------------------------------------------------------------------------- animate (GPU)
 
 def animate(
