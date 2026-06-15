@@ -11,6 +11,8 @@ tag drops the `backend-v` prefix).
 
 | git tag | GHCR image | source commit | built | notes |
 |---|---|---|---|---|
+| backend-v0.2.20 | 0.2.20 | 4131e81 | (pending) | feat(models-mirror): structured cold-start staging telemetry (#55, Sprint 4 Phase A, PRs #85). ensure_models emits @event mirror_complete (per-leg + total seconds, mirrored bytes, derived throughput_mbps) and @event mirror_skipped {reason} on warm/no-creds returns; ensure_i2v_models emits @event i2v_mirror_complete for the lazy Wan pull. Makes cold-start staging cost (the open #55 problem) readable from logs instead of SSH snapshots -- the data Phase B needs to weigh bake vs pre-warm vs stage. Pure best-effort helpers (_timed/_dir_bytes/_mirror_event/_skip_event); telemetry wrapped so a _dir_bytes walk error never fails a good mirror (review hardening, f4994be). No render-path change. 334 passed, 3 skipped. |
+|---|---|---|---|---|
 | backend-v0.2.19 | 0.2.19 | fa61ec3 | (pending) | fix(instantid): remove instantid_controlnet_scale phantom knob + draw_kps dead code (#23, PR #82) -- IdentityNet ControlNet never wired; IP-Adapter face embedding path unchanged. fix(worker): capture job-done 4xx response body as @event job_done_error (#65, PR #83) -- surfaces WHY RunPod rejects the callback so the root cause can be fixed. 333 passed, 3 skipped. |
 |---|---|---|---|---|
 | backend-v0.2.18 | 0.2.18 | 277a718 | (pending) | fix(harness): gate i2v prefetch on action != finish_clip (issue #76, PR #80) -- prefetch was unconditional before the finish_clip dispatch; on a cold worker the Wan2.2 mirror thread ran long after the finish job returned, keeping the job stuck at IN_PROGRESS. One-line guard mirrors the existing action check. |
