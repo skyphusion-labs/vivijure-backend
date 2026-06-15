@@ -161,12 +161,26 @@ def _jitter_seconds(e: dict) -> float:
     return random.uniform(0, ceiling) if ceiling > 0 else 0.0
 
 
+def _volume_sentinel_ok(path: Path, model_version: str) -> bool:
+    """True iff the sentinel file at `path` exists and matches `model_version`. Raises only OSError,
+    which the caller treats as a miss."""
+    return path.exists() and path.read_text().strip() == model_version
+
+
 def _resolve_volume(e: dict, model_version: str, log: Callable[[str], None]) -> bool:
-    """If a preloaded RunPod network volume is mounted (`VJ_VOLUME_ROOT`) and carries a sentinel at
-    the wanted `model_version`, repoint `HF_HOME` + `VJ_MODELS_ROOT` at it so the worker reads the
-    weights straight off the local-datacenter volume -- no 223 GB R2 copy -- and return True. Else
-    return False so the caller falls back to the R2 mirror on writable local disk (issue #55 Phase
-    C: per-datacenter preloaded volumes, R2 mirror as the universal fallback).
+    """If a fully preloaded RunPod network volume is mounted (`VJ_VOLUME_ROOT`) and carries BOTH the
+    base AND the i2v sentinel at the wanted `model_version`, repoint `HF_HOME` + `VJ_MODELS_ROOT` at
+    it so the worker reads the weights straight off the local-datacenter volume -- no 223 GB R2 copy
+    -- and return True. Else return False so the caller falls back to the R2 mirror on writable
+    local disk (issue #55 Phase C: per-datacenter preloaded volumes, R2 mirror as the universal
+    fallback).
+
+    BOTH sentinels are required, not just the base one: after the repoint, a standalone `i2v_clip`
+    calls `ensure_i2v_models` against the volume root, and if the volume held the base set but NOT
+    the i2v set (a partial preload that still wrote the base sentinel, or a base-only volume), that
+    would try to mirror Wan ONTO the read-only volume and fail instead of falling back. So an
+    incompletely preloaded volume degrades wholesale to the R2 mirror rather than throwing
+    mysterious i2v failures in that datacenter. (One full volume per DC is the design.)
 
     The volume is READ-ONLY for workers: RunPod warns that concurrent writes from multiple workers
     corrupt a volume, and the preloader is the sole writer. So this never writes to the volume; on
@@ -177,20 +191,19 @@ def _resolve_volume(e: dict, model_version: str, log: Callable[[str], None]) -> 
     vol = e.get("VJ_VOLUME_ROOT")
     if not vol:
         return False
-    sentinel = Path(vol) / SENTINEL
+    base_ok = i2v_ok = False
     try:
-        if sentinel.exists() and sentinel.read_text().strip() == model_version:
+        base_ok = _volume_sentinel_ok(Path(vol) / SENTINEL, model_version)
+        i2v_ok = _volume_sentinel_ok(Path(vol) / I2V_SENTINEL, model_version)
+        if base_ok and i2v_ok:
             e["VJ_MODELS_ROOT"] = str(vol)
             e["HF_HOME"] = str(Path(vol) / "hf-cache")
-            log(f"models_mirror: preloaded network volume at {vol} (v{model_version}); "
+            log(f"models_mirror: fully preloaded network volume at {vol} (v{model_version}); "
                 "reading weights from it, skipping the R2 mirror.")
             log(_skip_event("volume"))
             return True
-        if sentinel.exists():
-            log(f"models_mirror: volume at {vol} has v{sentinel.read_text().strip()!r} "
-                f"(want v{model_version!r}); falling back to R2 mirror.")
-        else:
-            log(f"models_mirror: VJ_VOLUME_ROOT={vol} set but no sentinel; falling back to R2 mirror.")
+        log(f"models_mirror: volume at {vol} not fully preloaded for v{model_version} "
+            f"(base={base_ok}, i2v={i2v_ok}); falling back to R2 mirror.")
     except OSError as exc:  # noqa: BLE001 -- a volume probe failure must never abort the job
         log(f"models_mirror: volume probe at {vol} failed ({exc}); falling back to R2 mirror.")
     return False
