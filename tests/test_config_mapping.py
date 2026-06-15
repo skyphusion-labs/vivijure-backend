@@ -83,11 +83,6 @@ def test_keyframe_identity_method_reaches_params():
     assert p.identity_method == "instantid"
 
 
-def test_keyframe_instantid_controlnet_scale_reaches_params():
-    p = keyframe_params_from(_rcfg(kf={"instantid_controlnet_scale": 0.5}))
-    assert p.instantid_controlnet_scale == pytest.approx(0.5)
-
-
 def test_keyframe_instantid_ip_adapter_scale_reaches_params():
     p = keyframe_params_from(_rcfg(kf={"instantid_ip_adapter_scale": 0.3}))
     assert p.instantid_ip_adapter_scale == pytest.approx(0.3)
@@ -235,7 +230,7 @@ def test_finish_only_faces_reaches_params():
 KEYFRAME_ASSERTED = {
     "steps", "distill_steps", "guidance_scale", "width", "height", "seed",
     "distill", "scheduler", "identity_method",
-    "instantid_controlnet_scale", "instantid_ip_adapter_scale",
+    "instantid_ip_adapter_scale",
     "ip_adapter_scale",
     "multi_char",
 }

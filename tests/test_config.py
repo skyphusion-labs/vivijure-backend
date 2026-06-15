@@ -116,9 +116,8 @@ def test_identity_method_is_keyframe_level_default_ip_adapter():
     # Identity applies to single AND multi-char shots, so it lives on KeyframeConfig, not
     # multi_char. IP-Adapter is the default everywhere; InstantID is a single-char upgrade.
     assert KeyframeConfig().identity_method is IdentityMethod.IP_ADAPTER
-    k = KeyframeConfig.from_dict({"identity_method": "instantid", "instantid_controlnet_scale": 0.9})
+    k = KeyframeConfig.from_dict({"identity_method": "instantid"})
     assert k.identity_method is IdentityMethod.INSTANTID
-    assert k.instantid_controlnet_scale == 0.9
     # The regional block carries no identity method (masked IP-Adapter only, no InstantID).
     assert not hasattr(MultiCharConfig(), "identity_method")
 
