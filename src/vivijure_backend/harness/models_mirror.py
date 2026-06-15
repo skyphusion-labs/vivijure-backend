@@ -202,6 +202,9 @@ def _acquire_volume_lock(lockpath: Path, log: Callable[[str], None], ttl_s: int 
                 lockpath.unlink()
             except OSError:
                 return False
+        except OSError as exc:  # e.g. volume not mounted (ENOENT) / not writable -- never crash
+            log(f"models_mirror: cannot claim preload lock at {lockpath} ({exc}); using R2 mirror.")
+            return False
     return False
 
 
@@ -275,6 +278,13 @@ def _resolve_volume(e: dict, model_version: str, log: Callable[[str], None]) -> 
     loads, which read `HF_HOME` at call time."""
     vol = e.get("VJ_VOLUME_ROOT")
     if not vol:
+        return False
+    # The volume must actually be mounted. If VJ_VOLUME_ROOT is set but the path isn't there (the
+    # endpoint is configured for volumes but this worker landed in a DC without one, or the env was
+    # set before the volume was attached), treat it as a clean miss -> R2 mirror. Without this, the
+    # self-preload lock attempt would os.open() a non-existent dir and crash the worker.
+    if not Path(vol).is_dir():
+        log(f"models_mirror: VJ_VOLUME_ROOT={vol} is not mounted here; falling back to R2 mirror.")
         return False
     try:
         base_ok = _volume_sentinel_ok(Path(vol) / SENTINEL, model_version)
