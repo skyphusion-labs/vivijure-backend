@@ -122,6 +122,22 @@ def test_acquire_lock_takes_over_stale(tmp_path):
     assert _acquire_volume_lock(lk, log=lambda *_: None) is True   # stale -> taken over
 
 
+def test_resolve_volume_unmounted_volume_falls_back_no_crash(tmp_path, monkeypatch):
+    # VJ_VOLUME_ROOT set + self-preload on, but the path is NOT mounted: must fall back cleanly,
+    # never attempt the lock (which would os.open a missing dir and crash the worker).
+    called = []
+    monkeypatch.setattr(models_mirror, "_self_preload_volume", lambda *a: called.append(1) or True)
+    e = {"VJ_VOLUME_ROOT": str(tmp_path / "not-mounted"), "VJ_VOLUME_SELF_PRELOAD": "1"}
+    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is False
+    assert not called
+    assert "HF_HOME" not in e
+
+
+def test_acquire_lock_missing_dir_returns_false(tmp_path):
+    # lock path under a non-existent dir -> OSError(ENOENT) must be swallowed, not raised
+    assert _acquire_volume_lock(tmp_path / "nope" / _PRELOAD_LOCK, log=lambda *_: None) is False
+
+
 def test_resolve_volume_no_self_preload_when_flag_unset(tmp_path, monkeypatch):
     called = []
     monkeypatch.setattr(models_mirror, "_self_preload_volume", lambda *a: called.append(1) or True)
