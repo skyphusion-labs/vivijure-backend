@@ -98,13 +98,14 @@ def handler(job: dict) -> dict:
     """RunPod serverless entry. Build the per-job pipeline from the request's RenderConfig,
     register it, and hand off to the harness (which owns model mirror, R2, plan, finish).
 
-    finish_clip actions skip pipeline registration: they only need the ModelServer for RIFE
-    and face-restore, which run_finish_job creates directly, so there is no render pipeline
-    to register."""
+    finish_clip and i2v_clip actions skip pipeline registration: they use the ModelServer
+    directly (RIFE/face-restore for finish, the Wan i2v pipeline for i2v_clip), so there is no
+    render pipeline to register. i2v_clip still needs the Wan models, so it keeps the cold-start
+    i2v prefetch (gated only against finish_clip in harness.handler)."""
     from .harness.handler import handler as harness_handler
 
     payload = job.get("input", job)
-    if str(payload.get("action", "render")) != "finish_clip":
+    if str(payload.get("action", "render")) not in ("finish_clip", "i2v_clip"):
         register_pipeline(build_pipeline(RenderRequest.from_dict(payload)))
     return harness_handler(job)
 

@@ -221,11 +221,13 @@ class RenderRequest:
     *routing* flags the pipeline still reads off it (e.g. `finish_offloaded` for the off-GPU
     finish path); every actual generation knob now lives typed under `config`.
 
-    NOTE: the standalone `finish_clip` action is a sibling job type, NOT a RenderRequest: the
-    harness routes it directly to `run_finish_job` (no bundle / planner / Wan) before any
-    RenderRequest is built, so it carries its own input/output shape (see docs/contract.md)."""
+    NOTE: the standalone `finish_clip` and `i2v_clip` actions are sibling job types, NOT
+    RenderRequests: the harness routes them directly to `run_finish_job` / `run_i2v_clip_job`
+    (no bundle / planner) before any RenderRequest is built, so each carries its own
+    input/output shape (see docs/contract.md). i2v_clip drives one shot's Wan image-to-video;
+    finish_clip runs RIFE/face-restore."""
     action: str  # "render" | "preview" | "regen_shot" | "finalize" | "train_lora"
-    # (the standalone "finish_clip" action is handled by the harness, not via RenderRequest)
+    # (the standalone "finish_clip"/"i2v_clip" actions are handled by the harness, not RenderRequest)
     project: str
     bundle_key: str
     quality_tier: str = "final"
