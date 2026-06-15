@@ -18,6 +18,7 @@ from .device import Tier
 
 
 class Stage(str, Enum):
+    """A pipeline stage the routing table places on a GPU tier (ASSEMBLE is off-GPU)."""
     LORA_TRAIN = "lora_train"
     KEYFRAME = "keyframe"
     I2V = "i2v"
@@ -25,6 +26,7 @@ class Stage(str, Enum):
 
 
 class QualityTier(str, Enum):
+    """The render quality tier: it sets every config baseline and drives stage-to-tier routing."""
     DRAFT = "draft"
     STANDARD = "standard"
     FINAL = "final"
