@@ -21,6 +21,7 @@ module imports and unit-tests on a CPU box, the same convention `models.py` uses
 """
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -140,19 +141,30 @@ def train_slot(
     # --- frozen backbone: VAE (fp32 for stable latents), both text encoders, the UNet ---
     # The VAE stays fp32 because SDXL's VAE produces NaNs under fp16/bf16 encode; everything
     # else lives in bf16. Only the UNet gets a trainable LoRA; the rest is inference-only.
-    vae = AutoencoderKL.from_pretrained(base, subfolder="vae", torch_dtype=torch.float32).to(device)
+    vae = AutoencoderKL.from_pretrained(
+        base, subfolder="vae", torch_dtype=torch.float32, local_files_only=True).to(device)
     # CLIPTokenizer, not AutoTokenizer: Auto* probes AutoConfig for a config.json the CLIP
     # tokenizer subfolders do not have, which is a graceful 404 online but a FATAL
     # LocalEntryNotFoundError under HF_HUB_OFFLINE=1 on the deployed worker. CLIPTokenizer loads
     # the tokenizer files directly (the diffusers SDXL path), so it works offline from the cache.
     tokenizer_one = CLIPTokenizer.from_pretrained(base, subfolder="tokenizer")
     tokenizer_two = CLIPTokenizer.from_pretrained(base, subfolder="tokenizer_2")
+    # local_files_only=True: transformers probes the repo tree for additional_chat_templates on
+    # from_pretrained; that tree-listing call raises under HF_HUB_OFFLINE=1. Safe here because
+    # the R2 mirror has run before lora_train is called, so the weights are in the local cache.
     text_encoder_one = CLIPTextModel.from_pretrained(
-        base, subfolder="text_encoder", torch_dtype=weight_dtype).to(device)
+        base, subfolder="text_encoder", torch_dtype=weight_dtype,
+        local_files_only=True).to(device)
     text_encoder_two = CLIPTextModelWithProjection.from_pretrained(
-        base, subfolder="text_encoder_2", torch_dtype=weight_dtype).to(device)
-    unet = UNet2DConditionModel.from_pretrained(base, subfolder="unet", torch_dtype=weight_dtype).to(device)
-    noise_scheduler = DDPMScheduler.from_pretrained(base, subfolder="scheduler")
+        base, subfolder="text_encoder_2", torch_dtype=weight_dtype,
+        local_files_only=True).to(device)
+    # local_files_only=True: diffusers calls model_info() to check for a newer revision before
+    # loading; that API call raises OfflineModeIsEnabled under HF_HUB_OFFLINE=1. The R2 mirror
+    # has already run, so the weights are in the local cache -- it is safe to skip the check.
+    unet = UNet2DConditionModel.from_pretrained(
+        base, subfolder="unet", torch_dtype=weight_dtype, local_files_only=True).to(device)
+    noise_scheduler = DDPMScheduler.from_pretrained(base, subfolder="scheduler",
+                                                    local_files_only=True)
 
     for module in (vae, text_encoder_one, text_encoder_two, unet):
         module.requires_grad_(False)
@@ -237,6 +249,11 @@ def train_slot(
     _save_adapter(unet, out_dir, StableDiffusionXLPipeline,
                   get_peft_model_state_dict, convert_state_dict_to_diffusers)
     saved = out_dir / "pytorch_lora_weights.safetensors"
+
+    # Remove intermediate checkpoint dirs written by save_every; only the final adapter matters.
+    for ckpt in out_dir.glob("checkpoint-*"):
+        if ckpt.is_dir():
+            shutil.rmtree(ckpt, ignore_errors=True)
 
     return TrainedLora(
         slot=char.slot,

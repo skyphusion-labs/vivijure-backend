@@ -20,6 +20,8 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class R2Config:
+    """R2 connection settings: the endpoint, the access key pair, and the bucket. The worker's
+    only credential, supplied through the environment."""
     endpoint: str
     access_key_id: str
     secret_access_key: str
@@ -27,6 +29,8 @@ class R2Config:
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "R2Config":
+        """Build from `R2_ENDPOINT` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET`;
+        raise if any are missing."""
         e = env if env is not None else os.environ
         missing = [k for k in ("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET")
                    if not e.get(k)]
@@ -61,7 +65,14 @@ class R2:
     def get_file(self, key: str, dest: Path) -> Path:
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
+        head = self._client().head_object(Bucket=self.config.bucket, Key=key)
+        expected = head.get("ContentLength")
         self._client().download_file(self.config.bucket, key, str(dest))
+        actual = dest.stat().st_size
+        if expected is not None and actual != expected:
+            dest.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"R2 download truncated: {key!r} expected {expected} bytes, got {actual}")
         return dest
 
     def put_file(self, path: Path, key: str, *, content_type: str | None = None,

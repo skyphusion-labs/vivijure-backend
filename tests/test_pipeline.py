@@ -7,6 +7,7 @@ import shutil
 import tarfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 from vivijure_backend.config import RenderConfig
@@ -53,7 +54,9 @@ def test_keyframe_params_pull_multichar_scales():
         "max_slots": 2, "pose_conditioning": False}}})
     p = keyframe_params_from(cfg)
     assert p.lora_scale == 0.25
-    assert p.ip_adapter_scale == 0.6
+    # ip_adapter_scale comes from kc.ip_adapter_scale (top-level), not mc.ip_adapter_scale_per_slot;
+    # mc's per-slot value is consumed by the regional blending engine, not this params field.
+    assert p.ip_adapter_scale == pytest.approx(0.65)  # KeyframeConfig default
     assert p.pose_conditioning is False
     assert p.max_slots == 2
 
@@ -127,6 +130,8 @@ def _extract_bundle(tmp_path: Path) -> Bundle:
         "characters/registry.json": json.dumps({"characters": {
             "A": {"name": "Vesper", "prompt": "teal"}, "B": {"name": "Rhode", "prompt": "orange"}}}).encode(),
         "injected/shot_03.png": b"PNG-ish",   # the authored start_image for the INJECT shot
+        "characters/refs/A/ref_01.png": b"PNG-ish",
+        "characters/refs/B/ref_01.png": b"PNG-ish",
     }
     with tarfile.open(tarp, "w:gz") as tf:
         for name, data in members.items():
@@ -168,6 +173,25 @@ class StubPipeline(GpuPipeline):
         self.finished.append(shot_id)
         out_path = Path(out_path); out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(b"x"); return out_path
+
+
+# --------------------------------------------------------------------- cast-missing guard
+
+def test_execute_raises_on_cast_missing_trained_slot(tmp_path):
+    # If the plan lists a slot for training but the cast registry has no character for it,
+    # execute must raise HarnessError immediately rather than silently skipping and producing
+    # a keyframe with no identity (the old behaviour was a silent continue).
+    from vivijure_backend.contract import Bundle, Cast, Storyboard
+    from vivijure_backend.harness.handler import HarnessError
+    bundle = _extract_bundle(tmp_path)
+    # Remove B from the cast so the plan's "train B" slot has no character backing it.
+    bundle.cast.characters.pop("B")
+    req = RenderRequest.from_dict({"action": "render", "project": "neon",
+                                   "bundle_key": "x", "quality_tier": "draft"})
+    plan = make_plan(req, bundle.storyboard)
+    assert "B" in plan.lora.train
+    with pytest.raises(HarnessError, match="slot 'B'"):
+        StubPipeline(req.config).execute(plan, bundle, tmp_path / "work")
 
 
 # --------------------------------------------------------------------- execute orchestration
@@ -281,7 +305,7 @@ def test_run_job_drives_gpu_pipeline_offloaded(tmp_path):
 
     assert res["lora"]["A"]["lora_id"].endswith("A/pytorch_lora_weights.safetensors")
     assert [c["shot_id"] for c in res["clips"]] == ["shot_01", "shot_02", "shot_03"]
-    assert {k["shot_id"] for k in res["keyframes"]} == {"shot_01", "shot_02"}
+    assert {k["shot_id"] for k in res["keyframes"]} == {"shot_01", "shot_02", "shot_03"}
     assert any(k.endswith("manifest.json") for k in store.puts)
     assert res["state_key"] == "projects/neon/state.tar.gz"
 

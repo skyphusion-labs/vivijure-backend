@@ -26,7 +26,8 @@ from . import i2v as _i2v
 from . import keyframe as _keyframe
 from . import lora_train as _lora_train
 from .config import RenderConfig
-from .harness.handler import Outputs
+from .device import current as _current_device
+from .harness.handler import HarnessError, Outputs
 from .harness.progress import NullEmitter
 from .keyframe import KeyframeParams, build_prompt
 from .i2v import I2VParams, frames_for, snap_frames
@@ -55,7 +56,7 @@ def keyframe_params_from(config: RenderConfig) -> KeyframeParams:
         few_step=kc.distill,
         scheduler=kc.scheduler.value,              # ddim_trailing on the few-step path, a solver on final
         lora_scale=mc.lora_scale_per_slot,
-        ip_adapter_scale=mc.ip_adapter_scale_per_slot,
+        ip_adapter_scale=kc.ip_adapter_scale,      # single-char field; multi-char path uses mc.ip_adapter_scale_per_slot via region override
         identity_method=kc.identity_method.value,  # single-char path: ip_adapter (default) or instantid
         instantid_controlnet_scale=kc.instantid_controlnet_scale,
         instantid_ip_adapter_scale=kc.instantid_ip_adapter_scale,
@@ -87,7 +88,7 @@ def i2v_params_from(config: RenderConfig, scene) -> I2VParams:
         feature_cache=ic.feature_cache,
     )
     if ic.negative_prompt:
-        p.negative_prompt = ic.negative_prompt
+        p.negative_prompt = ic.negative_prompt + ", " + I2VParams.negative_prompt
     return p
 
 
@@ -181,17 +182,34 @@ class GpuPipeline:
     # --- orchestration (CPU; the stages above are the only GPU touch points) ---
 
     def execute(self, plan: RenderPlan, bundle: Bundle, workdir: Path) -> Outputs:
+        """Run the plan on the GPU over the shared `ModelServer`: train the kept LoRAs, then per
+        shot draw / reuse / inject the keyframe, animate it, and finish the clip. Returns the
+        `Outputs` (LoRA paths, keyframes, clips) the harness uploads; assembly happens off-GPU in
+        the harness, not here."""
         out = Outputs()
         workdir = Path(workdir)
         cast, storyboard = bundle.cast, bundle.storyboard
         scenes_by_id = {s.id: s for s in storyboard.scenes}
+
+        # Warn once if the running card doesn't match the tier the planner targeted for i2v.
+        # A mismatch means the job landed on the wrong pool (cheaper card for a final-tier job,
+        # or an expensive card burning money on a draft). Does not block the render.
+        planned_i2v_tiers = {sp.i2v_tier for sp in plan.scenes if sp.i2v_tier is not None}
+        if planned_i2v_tiers:
+            actual_tier = _current_device().tier
+            if actual_tier not in planned_i2v_tiers:
+                self.progress.emit("tier_mismatch",
+                                   actual=actual_tier.value,
+                                   planned=[t.value for t in planned_i2v_tiers])
 
         # 1) Train the LoRAs the plan kept; collect adapter paths for keyframing.
         lora_paths: dict[str, Path] = {}
         for slot in plan.lora.train:
             char = cast.characters.get(slot)
             if char is None:
-                continue  # plan listed a slot the cast does not define; nothing to train
+                raise HarnessError(
+                    f"plan requires LoRA training for slot {slot!r} but the cast has no "
+                    "such character; validate(cast=bundle.cast) should have caught this")
             path = self._train_slot(char, workdir / "loras" / slot)
             out.loras[slot] = path
             lora_paths[slot] = path

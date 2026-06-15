@@ -216,6 +216,8 @@ def _bundle_tar(path):
         "storyboard.yaml": yaml.safe_dump(STORYBOARD).encode(),
         "characters/registry.json": json.dumps({"characters": {
             "A": {"name": "Vesper", "prompt": "teal"}, "B": {"name": "Rhode", "prompt": "orange"}}}).encode(),
+        "characters/refs/A/ref_01.png": b"PNG-ish",
+        "characters/refs/B/ref_01.png": b"PNG-ish",
     }
     with tarfile.open(path, "w:gz") as tf:
         for name, data in members.items():

@@ -1,6 +1,8 @@
 """The planner's whole job is to decide the render on the CPU and eliminate GPU work before
 it fires. These tests pin every elimination path and the cost arithmetic."""
-from vivijure_backend.contract import RenderRequest, Storyboard
+from pathlib import Path
+
+from vivijure_backend.contract import Cast, Character, RenderRequest, Storyboard
 from vivijure_backend.device import Tier
 from vivijure_backend.orchestrator import kf_hash
 from vivijure_backend.orchestrator import (
@@ -190,8 +192,43 @@ def test_validate_flags_unknown_process_shot_ids():
     assert any("process_shot_ids not in storyboard" in e for e in errs)
 
 
+def test_validate_flags_empty_scene_prompt():
+    sb = _sb([{"id": "s1", "prompt": "", "character_slots": ["A"]},
+              {"id": "s2", "prompt": "fine", "character_slots": ["B"]}])
+    errs = validate(_req(), sb)
+    assert any("empty prompt" in e and "s1" in e for e in errs)
+    assert not any("s2" in e for e in errs)
+
+
+def test_validate_flags_whitespace_only_prompt():
+    sb = _sb([{"id": "s1", "prompt": "   ", "character_slots": ["A"]}])
+    errs = validate(_req(), sb)
+    assert any("empty prompt" in e for e in errs)
+
+
+def _cast(slots: list[str], with_refs: bool = True) -> Cast:
+    chars = {}
+    for slot in slots:
+        chars[slot] = Character(slot=slot, name=slot, prompt="",
+                                ref_paths=[Path(f"/fake/{slot}.png")] if with_refs else [])
+    return Cast(characters=chars)
+
+
+def test_validate_flags_missing_cast_slot():
+    sb = _sb(TWO_SCENES, use_characters=["A", "B"])
+    cast = _cast(["A"])  # B is missing
+    errs = validate(_req(), sb, cast=cast)
+    assert any("no entry in the cast registry" in e and "'B'" in e for e in errs)
+    assert not any("'A'" in e for e in errs)
+
+
 def test_validate_clean_storyboard_has_no_errors():
     assert validate(_req(), _sb(TWO_SCENES)) == []
+
+
+def test_validate_clean_storyboard_with_cast_has_no_errors():
+    sb = _sb(TWO_SCENES, use_characters=["A", "B"])
+    assert validate(_req(), sb, cast=_cast(["A", "B"])) == []
 
 
 # ------------------------------------------------------------------------------ cost

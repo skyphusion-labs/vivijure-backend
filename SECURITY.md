@@ -34,6 +34,8 @@ The security boundary is:
 
 - The worker holds exactly one credential: an R2 (S3-compatible) API token scoped to a
   single bucket, delivered through the environment. It is the only secret in the runtime.
+  ([docs/operations.md](docs/operations.md) details the runtime, the key layout, and the
+  trust boundary in full.)
 - Render-job input arrives from the control plane; this backend does not authenticate end
   users itself (the control plane does, behind Cloudflare Access).
 - Generated artifacts are stamped with the requesting `user_email` so the control plane's

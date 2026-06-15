@@ -102,6 +102,15 @@ RUN mkdir -p /opt/vivijure/rife \
        done \
     && touch /opt/vivijure/rife/__init__.py
 
+# Bake HF repo config files (no weights) into the image and write .no_exist stubs for the 3
+# offline-fatal from_pretrained probes (shard-index + adapter_config). Weights arrive at render
+# time from R2; baking configs eliminates the probes that forced HF_HUB_OFFLINE to be overridden
+# at the endpoint. Placed BEFORE COPY src/ so code changes do not bust this download layer.
+# Override the offline ENV flags for this build step only; the global ENV remains offline.
+COPY deploy/bake_hf_configs.py /tmp/bake_hf_configs.py
+RUN HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 HF_DATASETS_OFFLINE=0 \
+    python /tmp/bake_hf_configs.py
+
 # Our package. src/ layout -> /opt/vivijure/vivijure_backend, on PYTHONPATH.
 WORKDIR /opt/vivijure
 COPY src/vivijure_backend /opt/vivijure/vivijure_backend

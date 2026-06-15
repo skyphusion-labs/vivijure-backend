@@ -88,7 +88,7 @@ def run_job(
         bundle = Bundle.extract(Path(tar), workdir / "project")
 
         # --- validate + plan (CPU) ---
-        errs = validate(req, bundle.storyboard)
+        errs = validate(req, bundle.storyboard, cast=bundle.cast)
         if errs:
             raise HarnessError("invalid render job: " + "; ".join(errs))
         plan = make_plan(
@@ -96,6 +96,15 @@ def run_job(
             trained_slots=set(trained_slots) | set(req.pretrained_loras),
             existing_keyframes=existing_keyframes,
         )
+        # Post-plan ref check: validate can't know which slots actually need training (that
+        # depends on prior trained_slots from R2), so check refs here where the plan is settled.
+        ref_errs = [
+            f"character slot {s!r} has no reference images; LoRA training will fail"
+            for s in plan.lora.train
+            if not bundle.cast.characters.get(s) or not bundle.cast.characters[s].ref_paths
+        ]
+        if ref_errs:
+            raise HarnessError("invalid render job: " + "; ".join(ref_errs))
 
         # --- stage reused LoRAs from R2 (the harness owns R2; the GPU layer never touches it) ---
         # The plan skipped training for these slots; their adapters live as R2 keys, so pull each
@@ -200,16 +209,25 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
 
     # Keyframes: upload whatever the stage drew; also persist into the project tree so the
     # next incremental render's state restore can derive existing_keyframes without an R2 list.
+    reported_shots: set[str] = set()
     for shot_id, path in outputs.keyframes.items():
         key = store.put_file(Path(path), keys.keyframe_key(project, shot_id),
                              content_type="image/png", metadata=owner_meta)
         result.keyframes.append(Keyframe(shot_id=shot_id, key=key))
+        reported_shots.add(shot_id)
         state_kf = bundle.root / "keyframes" / f"{shot_id}.png"
         state_kf.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, state_kf)
         hash_src = Path(path).with_suffix(".hash")
         if hash_src.is_file():
             shutil.copy2(hash_src, state_kf.with_suffix(".hash"))
+
+    # Reused keyframes: already in R2 from a prior run, not re-uploaded, but the caller needs
+    # their keys to animate them. Report every REUSE/INJECT shot that wasn't freshly generated.
+    from ..orchestrator import KeyframeMode
+    for sc in plan.scenes:
+        if sc.shot_id not in reported_shots and sc.keyframe_mode in (KeyframeMode.REUSE, KeyframeMode.INJECT):
+            result.keyframes.append(Keyframe(shot_id=sc.shot_id, key=keys.keyframe_key(project, sc.shot_id)))
 
     # Clips ordered by the storyboard (never the stage's incidental order).
     ordered = order_for_storyboard(
@@ -304,6 +322,76 @@ def _restore_prior_state(store, project: str, workdir: Path) -> tuple[set[str], 
     return trained_slots, existing_keyframes
 
 
+def run_finish_job(
+    job: dict,
+    *,
+    store,
+    workdir: Path,
+    job_id: str = "local",
+    on_progress=None,
+) -> dict:
+    """Standalone finish pass: download a clip from R2, run RIFE interpolation and/or face restore,
+    upload the result, return the output key. No bundle, no pipeline, no Wan needed.
+
+    Input shape (the `input` dict from the RunPod job):
+      { action, project, shot_id, clip_key, config: { interpolate, interpolation_factor,
+        face_restore, face_fidelity, only_faces } }
+    """
+    from ..finish import FinishParams, finish_clip
+    from ..models import ModelServer
+
+    project = str(job.get("project") or "untitled")
+    shot_id = str(job.get("shot_id") or "shot")
+    clip_key_in = str(job.get("clip_key") or "")
+    cfg = job.get("config") or {}
+
+    progress = ProgressEmitter(store, project, job_id, on_progress=on_progress)
+    progress.emit("started", action="finish_clip", project=project)
+
+    if not clip_key_in:
+        raise HarnessError("finish_clip: clip_key is required")
+
+    params = FinishParams(
+        interpolate=bool(cfg.get("interpolate", True)),
+        factor=int(cfg.get("interpolation_factor", 2)),
+        target_fps=int(cfg.get("target_fps", 0)),
+        face_restore=bool(cfg.get("face_restore") not in (None, False, "none", "")),
+        face_restore_backend=str(cfg.get("face_restore") or "gfpgan") if cfg.get("face_restore") not in (None, False, "none", "") else "gfpgan",
+        face_fidelity=float(cfg.get("face_fidelity", 0.7)),
+        only_faces=bool(cfg.get("only_faces", True)),
+    )
+
+    local_in = workdir / "input.mp4"
+    local_out = workdir / "output.mp4"
+
+    try:
+        store.get_file(clip_key_in, local_in)
+    except Exception as e:
+        raise HarnessError(f"finish_clip: could not fetch clip {clip_key_in!r}: {e}")
+
+    server = ModelServer()
+    result = finish_clip(shot_id, local_in, local_out, server, params=params)
+
+    safe = lambda s: (s or "x").replace("/", "_").replace(" ", "_")
+    clip_key_out = f"renders/{safe(project)}/clips/{safe(shot_id)}_finished.mp4"
+    store.put_file(local_out, clip_key_out)
+
+    applied: list[str] = []
+    if result.interpolated:
+        applied.append(f"interpolate:{params.factor}x")
+    if result.face_restored:
+        applied.append(f"face_restore:{params.face_restore_backend}")
+
+    progress.complete(output_key=clip_key_out)
+    return {
+        "shot_id": shot_id,
+        "clip_key": clip_key_out,
+        "out_fps": result.out_fps,
+        "frames": result.frames_out,
+        "applied": applied,
+    }
+
+
 def handler(job: dict) -> dict:
     """RunPod serverless entry point. Mirrors models on a cold worker, builds the live R2
     client, runs the job through the deployed GPU pipeline, returns the response. RunPod passes
@@ -336,11 +424,24 @@ def handler(job: dict) -> dict:
         ProgressEmitter(store, project, job_id, on_progress=on_progress).error("mirror", e)
         raise
 
+    # Eager-start the Wan I2V pull in the background so it overlaps LoRA training: training is
+    # GPU-bound with the network idle, while the pull (~120GB from R2) is network-bound. The two
+    # run concurrently; ensure_i2v_models() joins the thread before loading the Wan pipeline.
+    from .models_mirror import start_i2v_prefetch
+    start_i2v_prefetch()
+
     workdir = Path(tempfile.mkdtemp(prefix="vj-job-"))
-    trained_slots, existing_keyframes = _restore_prior_state(store, project, workdir)
-    return run_job(payload, pipeline=get_pipeline(), store=store, workdir=workdir,
-                   job_id=job_id, mirrored=bool(mirrored), on_progress=on_progress,
-                   trained_slots=trained_slots, existing_keyframes=existing_keyframes)
+    try:
+        if str(payload.get("action", "render")) == "finish_clip":
+            return run_finish_job(payload, store=store, workdir=workdir,
+                                  job_id=job_id, on_progress=on_progress)
+
+        trained_slots, existing_keyframes = _restore_prior_state(store, project, workdir)
+        return run_job(payload, pipeline=get_pipeline(), store=store, workdir=workdir,
+                       job_id=job_id, mirrored=bool(mirrored), on_progress=on_progress,
+                       trained_slots=trained_slots, existing_keyframes=existing_keyframes)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def _runpod_progress_hook(job: dict):

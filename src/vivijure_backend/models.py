@@ -29,6 +29,7 @@ from .device import Device, Quant, current
 
 
 class ModelRole(str, Enum):
+    """A role a model plays in the pipeline; the key into the spec table and the load cache."""
     KEYFRAME_BASE = "keyframe_base"      # SDXL checkpoint that draws the still
     KEYFRAME_FEWSTEP = "keyframe_fewstep"  # distill LoRA/unet (Hyper-SD / DMD2) for 4-8 step
     I2V = "i2v"                          # Wan 2.2 image-to-video
@@ -41,6 +42,7 @@ class ModelRole(str, Enum):
 
 
 class ModelFamily(str, Enum):
+    """The model's architecture class, which decides the precision it can be loaded at."""
     SDXL_UNET = "sdxl_unet"  # fp8 ceiling (no 4-bit engine)
     DIT = "dit"              # FLUX/Qwen/SANA: NVFP4-capable on Blackwell
     VIDEO_DIT = "video_dit"  # Wan: fp8 on both archs
@@ -53,6 +55,7 @@ class ModelFamily(str, Enum):
 
 @dataclass(frozen=True)
 class ModelSpec:
+    """Where a model role's weights live (HF repo, optional subfolder / weight file) and its family."""
     role: ModelRole
     repo_id: str
     family: ModelFamily
@@ -79,7 +82,9 @@ DEFAULT_SPECS: dict[ModelRole, ModelSpec] = {
     ),
     ModelRole.I2V_DISTILL: ModelSpec(
         ModelRole.I2V_DISTILL, "lightx2v/Wan2.2-Lightning", ModelFamily.AUX,
-        note="4-step distill LoRA; watch diffusers LoRA-load compat (issue #12535), LightX2V/DiffSynth is the fallback loader",
+        weight_name="Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/high_noise_model.safetensors",
+        note="4-step distill LoRA; no root-level .safetensors (repo uses subdirs); I2V path confirmed "
+             "from R2 listing. Watch diffusers LoRA-load compat (issue #12535), LightX2V/DiffSynth is the fallback.",
     ),
     ModelRole.INSTANTID: ModelSpec(ModelRole.INSTANTID, "InstantX/InstantID", ModelFamily.AUX),
     ModelRole.IP_ADAPTER: ModelSpec(ModelRole.IP_ADAPTER, "h94/IP-Adapter", ModelFamily.AUX),
@@ -157,9 +162,10 @@ class ModelServer:
         # hands it a blank control image at conditioning_scale 0.0, which makes the ControlNet inert
         # (zero residual), so single-subject renders behave exactly like plain SDXL. Sharing one pipe
         # keeps the dynamic per-scene LoRA + IP-Adapter attach points identical across both paths.
-        controlnet = ControlNetModel.from_pretrained(cn_spec.repo_id, torch_dtype=torch.bfloat16)
+        controlnet = ControlNetModel.from_pretrained(
+            cn_spec.repo_id, torch_dtype=torch.bfloat16, local_files_only=True)
         pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
-            spec.repo_id, controlnet=controlnet, torch_dtype=torch.bfloat16)
+            spec.repo_id, controlnet=controlnet, torch_dtype=torch.bfloat16, local_files_only=True)
         pipe.to("cuda")
         _set_attention(pipe, self.device)
 
@@ -237,7 +243,8 @@ class ModelServer:
 
         base = self.specs[ModelRole.KEYFRAME_BASE]
         id_spec = self.specs[ModelRole.INSTANTID]
-        pipe = StableDiffusionXLPipeline.from_pretrained(base.repo_id, torch_dtype=torch.bfloat16)
+        pipe = StableDiffusionXLPipeline.from_pretrained(
+            base.repo_id, torch_dtype=torch.bfloat16, local_files_only=True)
         pipe.to("cuda")
         _set_attention(pipe, self.device)
         pipe._vj_default_scheduler = pipe.scheduler
@@ -287,7 +294,8 @@ class ModelServer:
         # variant. Wan 2.2 A14B is a ~28B two-expert MoE, too large to hold resident on the tighter
         # cards (and an 80GB H100, where it OOMs), so CPU-offload the inactive expert below the
         # big-VRAM tiers; the H200/B200 keep it resident and quantize to fp8 for full speed.
-        pipe = WanImageToVideoPipeline.from_pretrained(spec.repo_id, torch_dtype=torch.bfloat16)
+        pipe = WanImageToVideoPipeline.from_pretrained(
+            spec.repo_id, torch_dtype=torch.bfloat16, local_files_only=True)
         offload = bool(self.device.vram_gb) and self.device.vram_gb < 120
         if not offload:
             pipe.to("cuda")
@@ -451,7 +459,10 @@ def _try_diffusers_distill(pipe, distill_spec) -> bool:
     weight matrices (TorchaoLoraLinear cannot be quantized after a LoRA is attached, #12535).
     Returns True on success and marks the pipe as fused."""
     try:
-        pipe.load_lora_weights(distill_spec.repo_id, adapter_name="distill")
+        # weight_name is required under HF_HUB_OFFLINE=1: diffusers scans the repo to pick a file
+        # when weight_name is omitted, and that scan raises OfflineModeIsEnabled (probe 6).
+        pipe.load_lora_weights(distill_spec.repo_id, weight_name=distill_spec.weight_name,
+                               adapter_name="distill")
         pipe.fuse_lora()
         pipe.unload_lora_weights()
         pipe._vj_i2v_distill_loaded = True
@@ -489,17 +500,16 @@ def _apply_lora_delta_to_wan(pipe, distill_spec) -> bool:
     """Apply the Wan2.2-Lightning LoRA as a weight delta (B @ A * alpha/rank) directly onto each
     transformer expert's weight matrices. No diffusers LoRA injection -- works on quantized models.
 
-    POD-TODO: verify the filename and key format against the actual repo. The Wan2.2-Lightning
-    safetensors from lightx2v/Wan2.2-Lightning uses keys structured as either:
-    "transformer.<block>.<proj>.lora_A.weight" or "diffusion_model.<...>.lora_A.weight".
-    Confirm the correct prefix and alpha key name on the pod before shipping as the default."""
+    The safetensors keys use either "transformer.<block>.<proj>.lora_A.weight" or
+    "diffusion_model.<...>.lora_A.weight" prefixes; both are handled by the prefix-strip loop.
+    Alpha key naming and key format still to be confirmed on a pod (POD-TODO in the loop body)."""
     import torch
     from huggingface_hub import hf_hub_download
     from safetensors.torch import load_file
 
-    # POD-TODO: verify the actual filename in lightx2v/Wan2.2-Lightning
-    lora_path = hf_hub_download(distill_spec.repo_id,
-                                 filename="wan2.2_i2v_lora.safetensors")  # POD-TODO: confirm filename
+    # distill_spec.weight_name is the subdirectory path within the repo confirmed from R2:
+    # "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/high_noise_model.safetensors"
+    lora_path = hf_hub_download(distill_spec.repo_id, filename=distill_spec.weight_name)
     sd = load_file(lora_path)
 
     applied = 0

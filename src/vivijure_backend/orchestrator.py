@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
-from .contract import RenderRequest, Scene, Storyboard
+from .contract import Cast, RenderRequest, Scene, Storyboard
 from .routing import QualityTier, Stage, Tier, gpu_for
 import hashlib
 import json
@@ -36,6 +36,7 @@ MULTI_CHAR_DEFAULTS: dict[str, object] = {
 
 
 class Action(str, Enum):
+    """What a render job asks for; selects which stages the planner schedules."""
     RENDER = "render"          # full pipeline: train -> keyframes -> i2v -> assemble
     PREVIEW = "preview"        # keyframes-only preview: train -> keyframes, NO i2v, no MP4
     FINALIZE = "finalize"      # i2v over existing keyframes (no keyframe gen)
@@ -51,6 +52,7 @@ class Action(str, Enum):
 
 
 class KeyframeMode(str, Enum):
+    """How a shot's keyframe is obtained: drawn fresh, reused from disk, or an authored inject."""
     GENERATE = "generate"  # SDXL has to draw it (GPU)
     REUSE = "reuse"        # already on disk from a prior pass (no GPU)
     INJECT = "inject"      # authored start_image supplied (no GPU)
@@ -67,6 +69,8 @@ _COST = {
 
 @dataclass
 class ScenePlan:
+    """The planner's decision for one shot: how to get its keyframe, whether it animates, and the
+    GPU tier its i2v should run on."""
     shot_id: str
     keyframe_mode: KeyframeMode
     is_multi_character: bool
@@ -78,12 +82,15 @@ class ScenePlan:
 
 @dataclass
 class LoraPlan:
+    """Which character slots must train versus which are reused (already trained or pretrained)."""
     train: list[str] = field(default_factory=list)   # slots that actually have to train (GPU)
     reuse: list[str] = field(default_factory=list)   # slots skipped: already trained / pretrained
 
 
 @dataclass
 class RenderPlan:
+    """The complete CPU-decided plan for a render: the LoRA plan, the per-scene plans, whether
+    assembly is off-GPU, a GPU-seconds estimate, and the GPU work the plan eliminated."""
     action: Action
     project: str
     quality: QualityTier
@@ -143,15 +150,22 @@ def kf_hash(kc) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def validate(request: RenderRequest, storyboard: Storyboard) -> list[str]:
+def validate(request: RenderRequest, storyboard: Storyboard, *, cast: Cast | None = None) -> list[str]:
     """Cheap preflight. Catch on the CPU what would otherwise fail minutes into a GPU job."""
     errs: list[str] = []
     if not storyboard.scenes:
         errs.append("storyboard has no scenes")
+    for sc in storyboard.scenes:
+        if not sc.prompt or not sc.prompt.strip():
+            errs.append(f"scene {sc.id!r} has an empty prompt")
     slots_used = {sl for sc in storyboard.scenes for sl in sc.character_slots}
     unknown = slots_used - set(storyboard.use_characters)
     if unknown:
         errs.append(f"scenes reference slots not in use_characters: {sorted(unknown)}")
+    if cast is not None:
+        for slot in storyboard.use_characters:
+            if slot not in cast.characters:
+                errs.append(f"use_characters slot {slot!r} has no entry in the cast registry")
     if request.process_shot_ids:
         known = {sc.id for sc in storyboard.scenes}
         missing = [s for s in request.process_shot_ids if s not in known]
@@ -256,6 +270,10 @@ def _keyframe_mode(
 
 
 def _estimate_cost(p: RenderPlan) -> float:
+    # These per-second constants reflect uncached, full-step timing. EASYCACHE (standard tier)
+    # and MIXCACHE (final tier) reduce actual i2v GPU-seconds by 30-50%; the estimate is
+    # therefore conservative (high) for those tiers and is intended only as an order-of-magnitude
+    # pre-flight check, not a billing figure.
     secs = len(p.lora.train) * _COST["lora_train_per_slot"]
     secs += p.keyframes_to_generate * _COST["keyframe_generate"]
     per_sec = _COST["i2v_per_target_second"][p.quality]

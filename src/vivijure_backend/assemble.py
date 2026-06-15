@@ -20,10 +20,13 @@ only the thin `assemble`/`probe_*` wrappers actually shell out, validated where 
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 from .contract import Clip, Storyboard
 
@@ -61,7 +64,11 @@ def order_for_storyboard(clips: list[ClipInput], storyboard: Storyboard) -> list
     """Put the clips in storyboard scene order. Clips whose shot_id is not in the storyboard
     are dropped (a stray clip must not wander into the cut); scenes with no clip are simply
     absent. Order follows the storyboard, never the clip list's incidental order."""
+    scene_ids = {s.id for s in storyboard.scenes}
     by_id = {c.shot_id: c for c in clips}
+    stray = [c.shot_id for c in clips if c.shot_id not in scene_ids]
+    if stray:
+        log.warning("order_for_storyboard: dropping %d clip(s) not in storyboard: %s", len(stray), stray)
     return [by_id[s.id] for s in storyboard.scenes if s.id in by_id]
 
 
@@ -83,6 +90,7 @@ def build_manifest(clips: list[ClipInput], *, output_name: str, audio: str | Non
 
 
 def write_manifest(manifest: dict, path: Path) -> Path:
+    """Write a finish-handoff manifest to disk as JSON; returns the path."""
     path = Path(path)
     path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return path
@@ -129,11 +137,13 @@ def ffmpeg_concat_cmd(list_file: Path, out_path: Path, *,
 
 
 def ffprobe_duration_cmd(path: Path) -> list[str]:
+    """argv for ffprobe to print a file's duration in seconds."""
     return ["ffprobe", "-v", "error", "-show_entries", "format=duration",
             "-of", "default=nokey=1:noprint_wrappers=1", str(path)]
 
 
 def ffprobe_has_audio_cmd(path: Path) -> list[str]:
+    """argv for ffprobe to list any audio-stream indices (empty output means no audio)."""
     return ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
             "stream=index", "-of", "csv=p=0", str(path)]
 
@@ -141,7 +151,11 @@ def ffprobe_has_audio_cmd(path: Path) -> list[str]:
 # ---------------------------------------------------------------------------- run (ffmpeg)
 
 def probe_duration(path: Path) -> float | None:
+    """The file's duration in seconds, or None if ffprobe fails (it logs the stderr)."""
     out = subprocess.run(ffprobe_duration_cmd(path), capture_output=True, text=True)
+    if out.returncode != 0:
+        log.warning("ffprobe duration failed for %s (rc=%d): %s", path, out.returncode, out.stderr.strip()[-500:])
+        return None
     try:
         return round(float(out.stdout.strip()), 3)
     except (ValueError, AttributeError):
@@ -149,7 +163,11 @@ def probe_duration(path: Path) -> float | None:
 
 
 def probe_has_audio(path: Path) -> bool:
+    """Whether the file has an audio stream (False if ffprobe fails; it logs the stderr)."""
     out = subprocess.run(ffprobe_has_audio_cmd(path), capture_output=True, text=True)
+    if out.returncode != 0:
+        log.warning("ffprobe audio check failed for %s (rc=%d): %s", path, out.returncode, out.stderr.strip()[-500:])
+        return False
     return bool(out.stdout.strip())
 
 
