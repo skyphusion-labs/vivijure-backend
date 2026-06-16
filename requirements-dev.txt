@@ -4,4 +4,4 @@ pytest>=8.0
 # imported) which test_keyframe exercises on CPU. The GPU image gets it via
 # deploy/requirements.txt; the test env needs it explicitly.
 Pillow>=12.2.0  # 12.2.0 clears 6 CVEs (GHSA-pwv6/r73j/wjx4/5xmw/whj4/cfh3)
-pytest-cov # For code coverage testing
+pytest-cov # For code coverage testing (GitHub)
