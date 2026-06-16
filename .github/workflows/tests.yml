@@ -1,32 +1,45 @@
-name: tests
+name: Test and Native Code Coverage
 
-# The CI gate for vivijure-backend (the Python equivalent of skyphusion-llm-
-# public's typecheck gate). The heavy GPU deps (torch/diffusers) live only in
-# deploy/requirements.txt and are deferred-imported, so the suite runs CPU-only
-# on a GitHub-hosted runner with just PyYAML + pytest. Branch protection on main
-# requires this "tests" check.
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
 
-# Least privilege: CI only needs to read the repo.
-permissions:
-  contents: read
-
 concurrency:
-  group: tests-${{ github.ref }}
+  group: coverage-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  tests:
+  coverage:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write      
+      code-quality: write    # Required for GitHub Enterprise Code Coverage API
+      pull-requests: write   # Allows appending the widget inside the PR
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python environment
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
-      - run: pip install -r requirements-dev.txt
-      - run: pytest
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run Pytest with Coverage
+        run: pytest --cov=. --cov-report=xml:coverage.xml
+
+      - name: Upload coverage report
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/upload-code-coverage@v1
+        with:
+          file: ./coverage.xml
+          language: python
