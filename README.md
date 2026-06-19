@@ -7,6 +7,18 @@ shape the Vivijure control plane already expects.
 
 ![vivijure-backend architecture: the control plane writes a bundle to R2 and submits a render job; a RunPod serverless GPU worker plans the render on the CPU, then trains character LoRAs, draws SDXL keyframes, animates them with Wan image-to-video, finishes the clips, and assembles the final film off-GPU, writing all artifacts and progress back to R2.](assets/diagram-architecture.svg)
 
+## Ecosystem
+
+```
+slate  -->  vivijure  -->  vivijure-backend
+```
+
+| Repo | Role |
+|---|---|
+| [slate](https://github.com/skyphusion-labs/slate) | Collaborative AI screenwriter Discord bot -- shapes the film in-channel, then hands it to vivijure to render |
+| [vivijure](https://github.com/skyphusion-labs/vivijure) | AI film studio control plane (Cloudflare Worker) -- planner, cast, render UI; orchestrates render jobs |
+| **[vivijure-backend](https://github.com/skyphusion-labs/vivijure-backend)** | **GPU render backend (RunPod serverless) -- SDXL keyframes, i2v, finish, assemble** |
+
 ## What it is
 
 The control plane writes a project bundle to object storage (R2) and submits a render job. A
