@@ -1,0 +1,103 @@
+name: Release (GHCR image build)
+
+# Mirrors the Jenkinsfile release mechanics: image + version come from a git tag
+# on HEAD (explicit and immutable), not a parsed commit subject.
+#
+#   backend-vX.Y.Z  ->  ghcr.io/skyphusion-labs/vivijure-backend:X.Y.Z (+ :latest)
+#
+# A commit push with no release tag is a no-op; only backend-v* tags trigger a
+# build. Build + push only -- deploying (pinning the RunPod endpoint template)
+# is a separate deliberate step: scripts/pin-runpod-template.py.
+#
+# Release flow:
+#   git push origin main
+#   git tag backend-v0.2.25 && git push origin backend-v0.2.25
+
+on:
+  push:
+    tags:
+      - 'backend-v[0-9]*.[0-9]*.[0-9]*'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build and push GHCR image
+    # Heavy-load runner: CUDA + torch cu128 + diffusers is a multi-GB image build.
+    # The cache-warm path finishes in under 10 minutes; a cold pip-compile can run
+    # up to 2 hours -- match the Jenkins 120-minute timeout.
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 120
+
+    env:
+      REGISTRY: ghcr.io
+      OWNER: skyphusion-labs
+      IMAGE_NAME: vivijure-backend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          # Strip the 'backend-v' prefix to get the semver string.
+          VERSION="${TAG#backend-v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${OWNER}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Tag: ${TAG}"
+          echo "Version: ${VERSION}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        # Build context is the repo root (COPY src/... resolves); Dockerfile in deploy/.
+        # Import smoke runs after build and before push: a missing runtime dep
+        # (gfpgan, basicsr, rife, av) fails here in seconds rather than after a
+        # 33-minute GPU render.
+        run: |
+          set -eu
+          IMG="${{ steps.version.outputs.image }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          docker build \
+            --pull \
+            --platform linux/amd64 \
+            -f deploy/Dockerfile \
+            -t "${IMG}:${VERSION}" \
+            -t "${IMG}:latest" \
+            .
+
+      - name: Import smoke (CPU, no GPU or weights required)
+        run: |
+          IMG="${{ steps.version.outputs.image }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          docker run --rm "${IMG}:${VERSION}" \
+            conda run --no-capture-output -n vivijure \
+            python /opt/vivijure/smoke_imports.py
+
+      - name: Push image to GHCR
+        run: |
+          IMG="${{ steps.version.outputs.image }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          docker push "${IMG}:${VERSION}"
+          docker push "${IMG}:latest"
+          echo "Pushed ${IMAGE_NAME}:${VERSION} to GHCR."
+          echo "Deploy is separate: scripts/pin-runpod-template.py pins the RunPod template to a built image."
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker logout ghcr.io || true
+          docker image prune -f --filter 'until=168h' || true
