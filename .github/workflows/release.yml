@@ -1,0 +1,136 @@
+name: Release worker image to GHCR
+
+# Port of the (decommissioned-Jenkins) image-build pipeline to GitHub Actions.
+#
+# Mirrors the old Jenkinsfile release mechanics exactly: the image + version come from a git TAG,
+# not a parsed commit subject. One release track:
+#
+#   backend-vX.Y.Z  ->  ghcr.io/skyphusion-labs/vivijure-backend:X.Y.Z (+ :latest)
+#
+# A plain commit/branch push is a NO-OP: this workflow only triggers on backend-v* tags, so an
+# ordinary push to main builds nothing. This pipeline BUILDS + PUSHES only; deploying (pinning the
+# RunPod endpoint template to a built image) is a separate, deliberate, MANUAL step --
+# scripts/pin-runpod-template.py -- so an iteration tag never re-pins the live endpoint by surprise.
+#
+# Release flow (tag the commit you want released, normally current main HEAD):
+#   git push origin main
+#   git tag backend-v0.2.26 && git push origin backend-v0.2.26
+# then, after the image is in GHCR, pin RunPod by hand:
+#   python scripts/pin-runpod-template.py --image ghcr.io/skyphusion-labs/vivijure-backend:0.2.26 ...
+#
+# Runner choice: GitHub-hosted ubuntu-latest (NOT a self-hosted fleet box). Per our runner policy
+# public repos build on GitHub-hosted, fork-safe runners. This is a heavy CUDA 12.8 + torch cu128 +
+# diffusers from-scratch build (tens of GB), so the hosted runner needs a disk-cleanup step to fit;
+# see "Free disk space" below. The build is tag-push-only (only a maintainer with push access can
+# create a backend-v* tag -- a fork PR cannot), so it never runs untrusted code; keeping it
+# GitHub-hosted means zero fleet exposure.
+
+on:
+  push:
+    tags:
+      - 'backend-v*'
+
+# Only the tag-push event reaches here. Guard the version parse in the job so a malformed tag
+# (e.g. backend-vfoo) is a clean no-op rather than a bad image push.
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: skyphusion-labs
+  WORKER_IMAGE: vivijure-backend
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Derive image version from tag
+        id: ver
+        run: |
+          set -eu
+          # github.ref_name is the tag name on a tag push, e.g. "backend-v0.2.25".
+          TAG="${GITHUB_REF_NAME}"
+          echo "ref tag: ${TAG}"
+          if [[ "${TAG}" =~ ^backend-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            VER="${BASH_REMATCH[1]}"
+            echo "worker version: ${VER}"
+            echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Tag '${TAG}' is not a backend-vX.Y.Z release tag; nothing to build."
+            exit 1
+          fi
+
+      # CUDA + torch cu128 + diffusers is a tens-of-GB from-scratch build. ubuntu-latest ships
+      # with ~14GB free; reclaim ~25-30GB by dropping preinstalled toolchains this image never uses.
+      - name: Free disk space
+        run: |
+          set -eu
+          echo "--- before ---"; df -h /
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune -af || true
+          echo "--- after ---"; df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # GHCR auth uses the workflow's built-in GITHUB_TOKEN, not a long-lived PAT. The package
+      # ghcr.io/skyphusion-labs/vivijure-backend is already linked to THIS repo, so a GITHUB_TOKEN
+      # with packages:write (granted in the permissions block above) can push to it. This is the
+      # least-privilege path: nothing to provision or rotate, and the credential's blast radius is
+      # one workflow run -- strictly better than the old Jenkins ghcr-skyphusion PAT.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build context is the repo ROOT (so `COPY src/...` and `COPY deploy/...` resolve);
+      # the Dockerfile lives in deploy/. Load the image into the local docker daemon (not pushed
+      # yet) so the import smoke can run against it before we publish.
+      - name: Build worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64
+          pull: true
+          load: true
+          push: false
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WORKER_IMAGE }}:${{ steps.ver.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WORKER_IMAGE }}:latest
+
+      # Import smoke runs AFTER build and BEFORE push: a missing runtime dep (gfpgan, basicsr, rife,
+      # av) fails here in seconds rather than after a 33-min GPU render. CPU-only; no GPU / weights.
+      - name: Import smoke (CPU, no GPU / weights)
+        run: |
+          set -eu
+          IMG="${REGISTRY}/${OWNER}/${WORKER_IMAGE}:${{ steps.ver.outputs.version }}"
+          docker run --rm "${IMG}" \
+            conda run --no-capture-output -n vivijure \
+            python /opt/vivijure/smoke_imports.py
+
+      # Smoke passed; publish both tags. Push the already-built local images (no rebuild).
+      - name: Push :X.Y.Z and :latest to GHCR
+        run: |
+          set -eu
+          IMG="${REGISTRY}/${OWNER}/${WORKER_IMAGE}"
+          docker push "${IMG}:${{ steps.ver.outputs.version }}"
+          docker push "${IMG}:latest"
+          echo "Pushed ${WORKER_IMAGE}:${{ steps.ver.outputs.version }} and :latest to GHCR."
+          echo "Deploy is SEPARATE + MANUAL: scripts/pin-runpod-template.py pins RunPod to a built image."
