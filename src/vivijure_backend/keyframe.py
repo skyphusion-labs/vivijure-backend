@@ -36,6 +36,18 @@ DEFAULT_NEGATIVE = (
 # 0.0 on the full-step (final) path, so one warm pipe renders every tier.
 DISTILL_ADAPTER = "distill"
 
+# A few-step distilled keyframe (Hyper-SD/DMD2) is trained to be (near-)guidance-free; driving it at the
+# full-step CFG over-saturates and tears the frame (RGB channel split + grain). Mirrors the i2v distill
+# (guidance_scale 1.0). Enforced at the source in `_guidance` so a caller that forgets to lower CFG on
+# the few-step path can't break the render; the full-step (final) tier keeps its real CFG.
+DISTILL_GUIDANCE = 1.0
+
+
+def _guidance(cfg: "KeyframeParams") -> float:
+    """The guidance scale to actually sample at: clamped to the distilled value on the few-step path,
+    the configured CFG on the full-step (final) path."""
+    return DISTILL_GUIDANCE if cfg.few_step else cfg.guidance_scale
+
 
 @dataclass
 class KeyframeParams:
@@ -207,7 +219,7 @@ def _render_single(pipe, prompt, scene, cast, cfg, loras, generator):
     # residual) and this path renders exactly like plain SDXL.
     return pipe(
         prompt=prompt, negative_prompt=cfg.negative_prompt,
-        num_inference_steps=cfg.steps, guidance_scale=cfg.guidance_scale,
+        num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
         height=cfg.height, width=cfg.width, generator=generator,
         image=_blank_control(cfg.width, cfg.height),
         controlnet_conditioning_scale=0.0,
@@ -252,7 +264,7 @@ def _render_regional(pipe, prompt, scene, cast, cfg, loras, generator, pose_imag
         cn_scale = 0.0
     return pipe(
         prompt=prompt, negative_prompt=cfg.negative_prompt,
-        num_inference_steps=cfg.steps, guidance_scale=cfg.guidance_scale,
+        num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
         height=h, width=w, generator=generator,
         ip_adapter_image=ip_images,
         cross_attention_kwargs={"ip_adapter_masks": masks},
@@ -296,7 +308,7 @@ def _render_instantid(server, prompt, scene, cast, cfg, loras, slot):
     try:
         return pipe(
             prompt=prompt, negative_prompt=cfg.negative_prompt,
-            num_inference_steps=cfg.steps, guidance_scale=cfg.guidance_scale,
+            num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
             height=cfg.height, width=cfg.width, generator=generator,
         ).images[0]
     finally:

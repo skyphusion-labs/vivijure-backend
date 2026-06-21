@@ -5,10 +5,12 @@ from vivijure_backend.contract import Cast, Scene, Storyboard
 from vivijure_backend.keyframe import (
     DEFAULT_IP_ADAPTER_SCALE,
     DEFAULT_LORA_SCALE,
+    DISTILL_GUIDANCE,
     KeyframeParams,
     _bind_loras,
     _box_mask,
     _ensure_ip_adapter,
+    _guidance,
     _normalize_lora_state_dict,
     _pose_skeleton,
     build_prompt,
@@ -351,3 +353,19 @@ def test_ip_adapter_noop_when_count_unchanged():
     first = pipe.ip_count
     _ensure_ip_adapter(pipe, 1)        # same count -> no reload churn
     assert pipe.ip_count == first == 1
+
+
+def test_few_step_distill_clamps_guidance():
+    """Regression: the few-step distill was wired on (few_step=True) but guidance_scale stayed at the
+    full-step default 5.0, so the Hyper-SD/DMD2 keyframe sampled at CFG 5.0 -- over-saturated, torn,
+    chroma-split frames. A distilled keyframe must sample (near-)guidance-free; enforce it at the
+    source so a caller that forgets to lower CFG can't break the render."""
+    assert _guidance(KeyframeParams(few_step=True, guidance_scale=5.0)) == DISTILL_GUIDANCE
+    assert DISTILL_GUIDANCE == 1.0  # matches the i2v distill (guidance-free)
+
+
+def test_full_step_keeps_real_cfg():
+    """Final tier (few_step=False, full steps) keeps its configured guidance -- the clamp is only for
+    the distilled path."""
+    assert _guidance(KeyframeParams(few_step=False, guidance_scale=5.0)) == 5.0
+    assert _guidance(KeyframeParams(few_step=False, guidance_scale=7.5)) == 7.5
