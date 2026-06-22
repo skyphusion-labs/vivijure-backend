@@ -75,6 +75,20 @@ class R2:
                 f"R2 download truncated: {key!r} expected {expected} bytes, got {actual}")
         return dest
 
+    def exists(self, key: str) -> bool:
+        """True iff an object is actually present at `key`. Used to verify a state-claimed
+        artifact really exists in R2 before trusting it: a stale/partial state tar can name a
+        keyframe whose R2 object was since cleared, and reusing it ships a key to a nonexistent
+        object (#108). Any head failure (404, transport, auth) returns False -- "absent" is the
+        safe default here, since it triggers a (wasteful but correct) re-render rather than a
+        phantom reuse."""
+        from botocore.exceptions import ClientError
+        try:
+            self._client().head_object(Bucket=self.config.bucket, Key=key)
+            return True
+        except ClientError:
+            return False
+
     def put_file(self, path: Path, key: str, *, content_type: str | None = None,
                  metadata: dict[str, str] | None = None) -> str:
         """Upload one file. `metadata` becomes S3 user metadata; the control plane's artifact
