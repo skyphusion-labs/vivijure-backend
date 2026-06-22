@@ -58,9 +58,7 @@ Out-of-scope:
 - The security posture of the upstream model weights or third-party libraries themselves
   (report those to their projects), beyond how this backend invokes them.
 
-## A note on provenance
+## Scope of reports
 
-This backend is a clean-room reimplementation written from the control-plane API contract
-and the underlying models' own documentation. Security reports should concern this code
-and its runtime; please do not send code, diffs, or excerpts from any other render
-pipeline.
+Security reports should concern this code and its runtime. Please do not send code, diffs,
+or excerpts you do not have the rights to share.

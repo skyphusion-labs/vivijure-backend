@@ -2,7 +2,7 @@
 
 How to work on the backend locally: the CPU-vs-GPU split that shapes everything, the test
 suite, running a single render stage by hand, and the conventions that keep the code testable.
-For the clean-room rules and the PR process see [CONTRIBUTING](../CONTRIBUTING.md); for the
+For the house style and the PR process see [CONTRIBUTING](../CONTRIBUTING.md); for the
 security boundary see [SECURITY](../SECURITY.md).
 
 ## The CPU / GPU split
@@ -98,8 +98,8 @@ exactly which path a shot resolved to.
   body explains the *why*.
 - **Releases** are SemVer-style `backend-vX.Y.Z` tags (PATCH for fixes, MINOR for features,
   pre-1.0). The tag must be pushed to origin to build (see [RELEASES.md](../RELEASES.md)).
-- **Clean room**: do not bring in code, diffs, or file layouts from any other render pipeline;
-  describe behavior or public model docs instead (see [CONTRIBUTING](../CONTRIBUTING.md)).
+- **Original work + sign-off**: contribute only your own original or appropriately-licensed
+  work, and sign your commits off (`git commit -s`, DCO; see [CONTRIBUTING](../CONTRIBUTING.md)).
 - **Mirror every binding in a typed config / `Env`**: a generation knob belongs in
   `config.py` (typed, clamped, tier-aware), not read ad hoc from the raw overrides dict.
 

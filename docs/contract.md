@@ -7,7 +7,7 @@ forgivingly: unknown keys are ignored and only fields the renderer actually cons
 surfaced, so the control plane can add authored fields without breaking an older backend.
 
 The contract is the *only* thing carried over from the control plane; it is a data shape, not
-borrowed implementation (see [CONTRIBUTING](../CONTRIBUTING.md) on the clean-room posture).
+borrowed implementation. The backend is a clean-sheet implementation written against it.
 
 ## The project bundle
 

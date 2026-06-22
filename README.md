@@ -1,6 +1,6 @@
 # vivijure-backend
 
-A clean-room render backend for Vivijure: it consumes a project bundle (a standard
+A render backend for Vivijure: it consumes a project bundle (a standard
 `storyboard.yaml` plus the cast), generates SDXL keyframes, trains per-character LoRAs,
 turns the keyframes into motion with image-to-video, and returns the artifacts in the
 shape the Vivijure control plane already expects.
@@ -35,11 +35,13 @@ GPU-validated features land tagged; the CPU-testable logic is covered by the sui
 
 ## Why this exists
 
-This is an independent reimplementation, written from the control-plane API contract and the
-underlying models' own documentation. It deliberately shares no source with any prior render
-pipeline; the contract (the `storyboard.yaml` schema, the cast registry, the render-job
-input/output) is the only thing carried over, and that contract is the control plane's own. See
-[CONTRIBUTING](CONTRIBUTING.md) for the clean-room posture.
+This is an independent, built-from-scratch implementation, written against the control-plane
+API contract and the underlying models' own documentation. There is no inherited pipeline code
+and no legacy cruft; the contract (the `storyboard.yaml` schema, the cast registry, the
+render-job input/output) is the only thing carried over, and that contract is the control
+plane's own. The payoff is a clean-sheet codebase that is easy to extend and to reason about:
+contract, config, orchestrator, routing, models, stages, and harness are each cleanly
+separated. See [CONTRIBUTING](CONTRIBUTING.md) for the house style and PR process.
 
 ## Architecture at a glance
 
@@ -115,14 +117,10 @@ Build and deploy the worker image: [docs/operations.md](docs/operations.md) (and
 - [docs/operations.md](docs/operations.md) -- build, deploy, the model mirror, the R2 key map, the progress channel, failure modes.
 - [docs/development.md](docs/development.md) -- the CPU/GPU split, the test suite, running stages locally.
 - [docs/cold-start-design.md](docs/cold-start-design.md) -- issue #55 Phase B: the cold-start cost model (from telemetry) and the bake/pre-warm/stage decision.
-- [CONTRIBUTING](CONTRIBUTING.md) -- clean-room rules, house style, PR process.
+- [CONTRIBUTING](CONTRIBUTING.md) -- house style, PR process.
 - [SECURITY](SECURITY.md) -- the security boundary (one R2 credential, control-plane-trusted input).
 - [CHANGELOG](CHANGELOG.md) / [RELEASES](RELEASES.md) -- per-release notes and the release ledger.
 
 ## License
 
-[AGPL-3.0-only](LICENSE). A labor of love, given freely: use it, learn from it,
-self-host it, build your own creative visions on it. Run it as a network service and
-the AGPL has you share your changes back, so it stays a commons. It is not for sale,
-and not to be resold as a SaaS. Nothing here is encumbered by third-party pipeline
-code (clean-room reimplementation), so this choice is the author's to make.
+**AGPL-3.0-only.** A labor of love, given freely: use it, learn from it, self-host it, build your own creative visions on it. Run it as a network service and the AGPL has you share your changes back, so it stays a commons. It is not for sale, and not to be resold as a SaaS.
