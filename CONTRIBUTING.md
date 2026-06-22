@@ -7,25 +7,18 @@ Thanks for your interest. A few things to know before you open an issue or PR.
 This is a labor of love, maintained as time allows. Response times on issues and PRs may
 vary. If you find it useful and want to make it better, you are welcome here.
 
-## A clean-room project (please read)
+## Contributing code
 
-This backend is an **independent, clean-room reimplementation**, written from the
-control-plane API contract and the underlying models' own public documentation. It
-deliberately shares no source with any prior or third-party render pipeline. That
-independence is a feature of the project, and we keep it intact:
+This backend is an independent, built-from-scratch implementation, written against the
+control-plane API contract and the underlying models' own public documentation. It is a
+clean-sheet codebase, which is exactly what makes it pleasant to extend. A couple of
+standard hygiene points keep it that way:
 
-- **Do not paste, attach, or describe code, diffs, file layouts, or implementation
-  details from any other render pipeline** in issues, PRs, comments, or commit messages.
-  If your suggestion is "do it the way project X does," describe the *behavior or the
-  public model/API docs*, never their source.
-- The pipeline **core is maintainer-authored** and stays that way. Code contributions are
-  reviewed and curated carefully; some will be reimplemented by the maintainer rather than
-  merged verbatim, specifically to preserve the provenance. This is not a comment on your
-  work, it is how the clean room stays clean.
 - By submitting a contribution you affirm it is **your own original work** (or
-  appropriately licensed), that you have the right to contribute it, and that it carries
-  no third-party render-pipeline code. For code PRs, sign your commits off
-  (`git commit -s`, a [DCO](https://developercertificate.org/) affirmation).
+  appropriately licensed), and that you have the right to contribute it. Please do not
+  paste code or diffs you do not have the rights to.
+- For code PRs, **sign your commits off** (`git commit -s`, a
+  [DCO](https://developercertificate.org/) affirmation).
 
 ## Where contributions fit best
 
@@ -38,7 +31,7 @@ Most welcome, lowest friction:
   from observed behavior.
 
 Larger feature work is best discussed in an issue first, so we can agree on the shape
-(and on how to keep it independent) before you invest time.
+before you invest time.
 
 ## House rules
 
