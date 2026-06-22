@@ -277,8 +277,27 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
         progress.emit("upload_done", key=result.output_key)
 
     # Project state for the next incremental render.
-    result.state_key = store.put_dir_as_tar(bundle.root, keys.state_key(project), metadata=owner_meta)
-    progress.emit("upload_done", key=result.state_key)
+    #
+    # Only one shared per-project state object exists (keys.state_key(project)), and EVERY pass
+    # restores it and -- historically -- rewrote it. That is fine for a single render, but the
+    # control plane scatters a render into concurrent shards: a clips-only / finalize shard
+    # generates no keyframe and trains no LoRA, yet it would still tar its whole restored
+    # bundle.root back over the shared key. Two such writes (or a clips shard racing a
+    # keyframe-generating shard) are last-writer-wins, so a sibling's freshly persisted keyframe
+    # state can be silently dropped -- the latent enabler behind #108.
+    #
+    # A pass that authored no new persistent artifact has nothing to add to the state (clips are
+    # never part of it), so it leaves the shared object untouched rather than overwriting it from
+    # a partial view. The state key it reports is the existing object the keyframe pass wrote (it
+    # still exists in R2); None only if there is genuinely no prior state to point at.
+    authored_state = bool(outputs.loras or outputs.keyframes)
+    if authored_state:
+        result.state_key = store.put_dir_as_tar(bundle.root, keys.state_key(project), metadata=owner_meta)
+        progress.emit("upload_done", key=result.state_key)
+    else:
+        existing = keys.state_key(project)
+        result.state_key = existing if store.exists(existing) else None
+        progress.emit("state_unchanged", key=result.state_key)
     return result
 
 

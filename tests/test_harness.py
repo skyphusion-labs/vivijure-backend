@@ -372,3 +372,45 @@ def test_restore_prior_state_returns_empty_on_missing_state(tmp_path):
     workdir.mkdir()
     trained, existing = _restore_prior_state(FailingStore(), "fresh-project", workdir)
     assert trained == set() and existing == {}
+
+
+# -------------------------------------------------- shared-state write isolation (#108 enabler)
+
+def test_clips_only_shard_does_not_rewrite_shared_state(tmp_path):
+    """A clips-only / finalize scatter shard generates no keyframe and trains no LoRA, so it must
+    NOT rewrite the shared per-project state.tar.gz. Rewriting the whole restored tree from a
+    partial view is last-writer-wins against concurrent shards -- the latent enabler behind #108.
+    It reports the existing state key (the keyframe pass wrote it) without re-uploading."""
+    store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    res = run_job(_job(action="finalize", render_overrides={"finish_offloaded": True}),
+                  pipeline=FakePipeline(), store=store, workdir=tmp_path / "work")
+    # finalize is i2v-only: clips emitted, but no keyframe/LoRA authored...
+    assert [c["shot_id"] for c in res["clips"]] == ["shot_01", "shot_02"]
+    # ...so the shared state tar is left untouched (no put_dir_as_tar)...
+    assert store.tars == [], f"clips-only shard must not rewrite shared state, wrote: {store.tars}"
+    # ...while still reporting the existing state object so the response shape is unchanged.
+    assert res["state_key"] == "projects/neon/state.tar.gz"
+
+
+def test_clips_only_shard_reports_none_state_when_no_prior(tmp_path):
+    """If a clips-only shard runs with no prior state object in R2, it reports state_key=None
+    rather than a phantom key (it didn't write one, and none exists)."""
+    class NoStateStore(FakeStore):
+        def exists(self, key):
+            return False  # nothing in R2 at the state key
+
+    store = NoStateStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    res = run_job(_job(action="finalize", render_overrides={"finish_offloaded": True}),
+                  pipeline=FakePipeline(), store=store, workdir=tmp_path / "work")
+    assert store.tars == []
+    assert res["state_key"] is None
+
+
+def test_keyframe_pass_still_writes_shared_state(tmp_path):
+    """Guard the other side: a pass that DOES author keyframes/LoRAs still persists the shared
+    state tar exactly once, so the next incremental render can restore it."""
+    store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    res = run_job(_job(action="preview"),  # preview draws keyframes, no i2v/ffmpeg
+                  pipeline=FakePipeline(), store=store, workdir=tmp_path / "work")
+    assert store.tars == ["projects/neon/state.tar.gz"]
+    assert res["state_key"] == "projects/neon/state.tar.gz"
