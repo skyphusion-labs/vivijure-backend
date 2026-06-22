@@ -115,6 +115,9 @@ class FakeStore:
         shutil.copy(self.bundle_tar, dest)
         return dest
 
+    def exists(self, key):
+        return True  # default fake: any state-claimed artifact is treated as present in R2
+
     def put_file(self, path, key, *, content_type=None, metadata=None):
         assert Path(path).exists(), f"uploading a nonexistent file: {path}"
         self.puts.append(key)
@@ -288,6 +291,8 @@ def test_restore_prior_state_derives_sets_from_tar(tmp_path):
         def get_file(self, key, dest):
             shutil.copy(state_tar, dest)
             return dest
+        def exists(self, key):
+            return True  # keyframe is present in R2
 
     workdir = tmp_path / "work"
     workdir.mkdir()
@@ -318,11 +323,41 @@ def test_restore_prior_state_reads_hash_from_dot_hash_file(tmp_path):
     class StateFakeStore:
         def get_file(self, key, dest):
             import shutil; shutil.copy(tar_path, dest); return dest
+        def exists(self, key):
+            return True  # keyframe is present in R2
 
     workdir = tmp_path / "work"
     workdir.mkdir()
     trained, existing = _restore_prior_state(StateFakeStore(), "neon", workdir)
     assert existing == {"shot_01": "abcdef1234567890"}
+
+
+def test_restore_prior_state_skips_keyframe_absent_from_r2(tmp_path):
+    """#108 regression: a stale state tar names a keyframe whose R2 object is GONE (e.g. the
+    renders/ were cleared but the per-project state.tar.gz was not). That shot must NOT be marked
+    REUSE off the stale state -- it's omitted from existing_keyframes so the planner GENERATEs it,
+    instead of reporting a phantom keyframe key to a nonexistent object."""
+    from vivijure_backend.harness import keys
+    from vivijure_backend.harness.handler import _restore_prior_state
+
+    # State tar claims BOTH shots have keyframes...
+    state_tar = _make_state_tar(tmp_path / "state.tar.gz",
+                                slot_markers=["A"], kf_ids=["shot_01", "shot_02"])
+
+    class PartialR2FakeStore:
+        """...but R2 only actually has shot_01 (shot_02's object was cleared)."""
+        def get_file(self, key, dest):
+            shutil.copy(state_tar, dest)
+            return dest
+        def exists(self, key):
+            return key == keys.keyframe_key("neon", "shot_01")
+
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    trained, existing = _restore_prior_state(PartialR2FakeStore(), "neon", workdir)
+    assert trained == {"A"}
+    assert "shot_01" in existing            # present in R2 -> reusable
+    assert "shot_02" not in existing        # absent from R2 -> GENERATE, never a phantom
 
 
 def test_restore_prior_state_returns_empty_on_missing_state(tmp_path):

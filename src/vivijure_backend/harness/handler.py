@@ -319,9 +319,18 @@ def _restore_prior_state(store, project: str, workdir: Path) -> tuple[set[str], 
             # as "reuse conservatively" so upgrading never forces a full regeneration.
             for png in kf_dir.iterdir():
                 if png.suffix == ".png":
+                    shot_id = png.stem
+                    # Trust R2, not the state tar. A stale/partial state can name a keyframe whose
+                    # R2 object was since cleared (e.g. a "clear renders before re-render" that did
+                    # not also clear the per-project state.tar.gz). Marking such a shot REUSE skips
+                    # its keyframe render and reports a phantom key to a nonexistent object, hanging
+                    # the shard (#108). Only honor a state-claimed keyframe that is actually present
+                    # in R2; an absent one is omitted so the planner GENERATEs it (self-healing).
+                    if not store.exists(keys.keyframe_key(project, shot_id)):
+                        continue
                     hash_file = png.with_suffix(".hash")
                     stored = hash_file.read_text().strip() if hash_file.is_file() else None
-                    existing_keyframes[png.stem] = stored
+                    existing_keyframes[shot_id] = stored
     except Exception:  # noqa: BLE001 -- any fetch/extract failure -> fresh render (safe default)
         pass
     return trained_slots, existing_keyframes
