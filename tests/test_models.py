@@ -54,3 +54,31 @@ def test_default_specs_cover_every_role():
     for role, spec in DEFAULT_SPECS.items():
         assert spec.role is role
         assert spec.repo_id  # a real, non-empty HF id
+
+
+# ----------------------------------------------------------------- RIFE 64-divisible padding (#245)
+
+def test_pad_to_multiple_aligns_to_64():
+    from vivijure_backend.models import _pad_to_multiple
+    # already-aligned dims need no padding (multiples of 64)
+    for n in (64, 128, 768, 960, 1280, 1344, 1920):
+        assert n % 64 == 0 and _pad_to_multiple(n) == 0, n
+    # the next-multiple-of-64 padding is in [1, 63]
+    assert _pad_to_multiple(1) == 63
+    assert _pad_to_multiple(65) == 63
+    assert _pad_to_multiple(1080) == 8  # 1080 -> 1088 (not itself 64-aligned; pad+crop is a safe no-op visually)
+
+
+def test_pad_to_multiple_rescues_every_non64_backend():
+    """Each i2v backend that pulled for Monday (#246) emits a non-64 dim at 16:9; padding lifts it
+    to the next multiple of 64 so RIFE stops crashing (#245)."""
+    from vivijure_backend.models import _pad_to_multiple
+    pad = _pad_to_multiple
+    # alibaba-wan 1270x726 -> 1280x768 (the exact crash in #245: 1270 -> +10 -> 1280)
+    assert (pad(726), pad(1270)) == (42, 10)
+    # seedance / google-veo / vidu-q3 1280x720 -> width aligned, height 720 -> 768
+    assert (pad(720), pad(1280)) == (48, 0)
+    # minimax-hailuo 1364x768 -> width 1364 -> 1408, height aligned
+    assert (pad(768), pad(1364)) == (0, 44)
+    # and a square non-64 case stays handled (no aspect-ratio assumption)
+    assert pad(726) == 42

@@ -566,9 +566,23 @@ def _nested_module(root, dotted_key: str):
     return mod
 
 
+def _pad_to_multiple(n: int, multiple: int = 64) -> int:
+    """Pixels to add to a spatial dimension `n` so it becomes a multiple of `multiple` (0 if already
+    aligned). RIFE's flownet downsamples then concatenates skip features, so each of H and W must be a
+    multiple of 64; a non-aligned i2v resolution otherwise throws inside inference, e.g. Wan 2.6's
+    1270x726 -> 'tensor a (1270) must match tensor b (1280) at non-singleton dimension 3' (#245). This
+    rescues every non-64 backend at any aspect ratio (seedance/veo/vidu 1280x720, hailuo 1364x768)."""
+    return (multiple - n % multiple) % multiple
+
+
 class _RifeInterpolator:
     """RIFE recursive-2x interpolator. `interpolate(a, b)` returns the synthesized midpoint frame
-    for the adjacent pair `(a, b)` (HxWx3 uint8 in, same out). The model loads once in __init__."""
+    for the adjacent pair `(a, b)` (HxWx3 uint8 in, same out). The model loads once in __init__.
+
+    RIFE requires 64-divisible H/W, so `interpolate` pads the pair up to the next multiple of 64,
+    runs the flownet, and crops the result back to the original dims -- the pad never reaches the
+    encoded clip. Without it any non-64 i2v output (Wan 2.6 1270x726, etc.) crashes the finish chain
+    at step 0, silently shipping the raw clip (#245)."""
 
     def __init__(self, weight_path: str):
         import os  # deferred
@@ -586,12 +600,23 @@ class _RifeInterpolator:
 
     def interpolate(self, frame_a, frame_b):
         torch = self._torch
+        import torch.nn.functional as F  # deferred: keep this module CPU-importable
+
+        h, w = int(frame_a.shape[0]), int(frame_a.shape[1])
+        ph, pw = _pad_to_multiple(h), _pad_to_multiple(w)
         a = torch.from_numpy(frame_a).permute(2, 0, 1).float().div(255.0).unsqueeze(0).cuda()
         b = torch.from_numpy(frame_b).permute(2, 0, 1).float().div(255.0).unsqueeze(0).cuda()
+        if ph or pw:
+            # Pad bottom/right up to the next multiple of 64 so RIFE accepts any i2v resolution
+            # (#245). Replicate the edge rather than zero-pad: a hard black seam would pull the
+            # optical flow toward it; replicate keeps the synthesized motion stable. F.pad's 4D
+            # order is (W_left, W_right, H_top, H_bottom), so we extend only right and bottom.
+            a = F.pad(a, (0, pw, 0, ph), mode="replicate")
+            b = F.pad(b, (0, pw, 0, ph), mode="replicate")
         with torch.no_grad():
             mid = self._model.inference(a, b)
         out = (mid[0].clamp(0, 1) * 255.0).byte().permute(1, 2, 0).cpu().numpy()
-        return out
+        return out[:h, :w]  # crop the pad back off -> exactly the original dims
 
 
 class _GfpganRestorer:
