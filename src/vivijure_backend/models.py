@@ -62,6 +62,12 @@ class ModelSpec:
     subfolder: str | None = None
     note: str = ""
     weight_name: str | None = None   # specific file within repo_id (e.g. a per-step LoRA variant)
+    # The pre-quantized fp8 (e4m3fn) variant of this role IN DIFFUSERS LAYOUT, baked into the image.
+    # When set AND the image is baked, the loader reads these fp8 weights directly (no runtime
+    # torchao quantize) and applies the dynamic-activation wrapper at compute. None => no baked fp8
+    # variant (load repo_id + runtime-quantize, the legacy path). The bf16 bake (next-week upgrade)
+    # is a one-line manifest swap: point this at the bf16 repo and the load path is identical.
+    fp8_repo_id: str | None = None
 
 
 # Default model set. These are public Hugging Face repo ids; swap per project via overrides.
@@ -79,6 +85,10 @@ DEFAULT_SPECS: dict[ModelRole, ModelSpec] = {
     ),
     ModelRole.I2V: ModelSpec(
         ModelRole.I2V, "Wan-AI/Wan2.2-I2V-A14B-Diffusers", ModelFamily.VIDEO_DIT,
+        # fp8 variant baked into the image (diffusers layout, e4m3fn shards <10GB each). The bake
+        # seeds it from r2:vivijure/models-fp8 into the HF cache as this repo id, so a baked worker
+        # loads it offline by name. repo_id (bf16) stays the FINAL-tier (B) lazy-pull source.
+        fp8_repo_id="Wan-AI/Wan2.2-I2V-A14B-Diffusers-fp8",
     ),
     ModelRole.I2V_DISTILL: ModelSpec(
         ModelRole.I2V_DISTILL, "lightx2v/Wan2.2-Lightning", ModelFamily.AUX,
@@ -273,46 +283,73 @@ class ModelServer:
                   "full-step keyframes only.")
 
     def i2v_pipeline(self):
-        """Wan 2.2 image-to-video: load bf16, quantize the MoE transformers to fp8 with torchao on
-        the cards that support it, attach the Lightning distill LoRA for few-step sampling, set the
-        attention backend. Final-tier rendering toggles the distill LoRA off (handled by i2v.py);
-        here we load the warm baseline."""
+        """Wan 2.2 image-to-video. Three weight sources, picked by (baked image?, render tier):
+
+          - BAKED + draft/standard (the A1 default): load the PRE-QUANTIZED fp8 diffusers weights
+            (spec.fp8_repo_id) straight from the baked HF cache and apply the dynamic-activation
+            wrapper at compute -- NO runtime torchao quantize (the weights are already fp8_e4m3fn).
+          - BAKED + final (the B seam, bf16-lazy-on-final): lazy-pull the bf16 diffusers shards from
+            R2 and load THEM at full bf16 (no quant) for the hero clip. Gated on the tier, so the
+            baked default never pulls.
+          - NOT baked (legacy / pre-bake image): load bf16 from the R2 mirror and runtime-quantize to
+            fp8 with torchao, exactly as before.
+
+        The distill LoRA (few-step) attaches on draft/standard and is dropped on final, same as before
+        (final = VJ_I2V_DISTILL=0). Wan 2.2 A14B is a ~28B two-expert MoE; below ~120GB VRAM the
+        inactive expert is CPU-offloaded. The bf16 bake (next-week upgrade) is a manifest swap: point
+        spec.fp8_repo_id at the bf16 repo and this exact branch structure carries it unchanged."""
         if "i2v" in self._cache:
             return self._cache["i2v"]
-        # Lazy mirror: the heavy Wan i2v weights (~120GB) are kept out of the cold-start pull and
-        # fetched from R2 here, on first i2v use, so keyframe/preview workers never pay for them.
-        # No-op when already present or when there are no R2 creds (weights pre-provisioned / HF).
-        from .harness.models_mirror import ensure_i2v_models
-        ensure_i2v_models()
         import os
         import torch
         from diffusers import WanImageToVideoPipeline
+        from .harness.models_mirror import ensure_i2v_models, is_baked
 
         spec = self.specs[ModelRole.I2V]
-        # The Wan repo ships only bf16 weights (no fp8 variant), so load bf16 and quantize to fp8
-        # in place with torchao -- the same path as the SDXL keyframe, not a from_pretrained
-        # variant. Wan 2.2 A14B is a ~28B two-expert MoE, too large to hold resident on the tighter
-        # cards (and an 80GB H100, where it OOMs), so CPU-offload the inactive expert below the
-        # big-VRAM tiers; the H200/B200 keep it resident and quantize to fp8 for full speed.
+        final_tier = os.environ.get("VJ_I2V_DISTILL", "1") == "0"
+        baked = is_baked()
+        # Decide the weight source + whether the weights are ALREADY fp8 (skip runtime quant).
+        if baked and spec.fp8_repo_id and not final_tier:
+            repo, weights_are_fp8 = spec.fp8_repo_id, True      # A1 default: baked pre-fp8
+        elif baked and final_tier:
+            ensure_i2v_models()                                 # B: bf16-lazy-on-final from R2
+            repo, weights_are_fp8 = spec.repo_id, False
+        else:
+            ensure_i2v_models()                                 # legacy: R2 bf16 + runtime quant
+            repo, weights_are_fp8 = spec.repo_id, False
+
+        load_dtype = torch.float8_e4m3fn if weights_are_fp8 else torch.bfloat16
         pipe = WanImageToVideoPipeline.from_pretrained(
-            spec.repo_id, torch_dtype=torch.bfloat16, local_files_only=True)
+            repo, torch_dtype=load_dtype, local_files_only=True)
         offload = bool(self.device.vram_gb) and self.device.vram_gb < 120
         if not offload:
             pipe.to("cuda")
 
-        # The distill LoRA must be FUSED before fp8 quant: a LoRA cannot load onto torchao-quantized
-        # linears (#12535 -> TorchaoLoraLinear), so bake it into the base weights here and then
-        # quantize the plain fused model. The few-step distill is the draft/standard speed path; a
-        # final-tier worker sets VJ_I2V_DISTILL=0 to keep full steps.
-        if os.environ.get("VJ_I2V_DISTILL", "1") != "0":
+        # The distill LoRA must be FUSED before any fp8 step: a LoRA cannot load onto torchao-quantized
+        # linears (#12535 -> TorchaoLoraLinear). Few-step distill is the draft/standard speed path; a
+        # final-tier worker sets VJ_I2V_DISTILL=0 to keep full steps (and never gets here for distill).
+        if not final_tier:
             _load_i2v_distill(pipe, self.specs[ModelRole.I2V_DISTILL])
         else:
             pipe._vj_i2v_distill_loaded = False
             pipe._vj_i2v_distill_fused = False
 
-        use_fp8 = (self.device.supports_fp8 and not offload
-                   and os.environ.get("VJ_I2V_FP8", "1") != "0")
-        if use_fp8:
+        fp8_enabled = (self.device.supports_fp8 and not offload
+                       and os.environ.get("VJ_I2V_FP8", "1") != "0")
+        if weights_are_fp8:
+            # Baked weights are already fp8_e4m3fn; apply dynamic-activation fp8 over them (no quantize_
+            # of bf16). Card-agnostic: e4m3fn storage loads on Hopper + Blackwell; the activation
+            # scaling stays runtime, so torchao still picks MXFP8 (Blackwell) vs plain fp8 (Hopper).
+            if fp8_enabled:
+                for name in ("transformer", "transformer_2"):
+                    module = getattr(pipe, name, None)
+                    if module is not None:
+                        try:
+                            _apply_fp8_dynamic_activation(module)
+                        except Exception as e:  # noqa: BLE001
+                            print(f"i2v fp8 dynamic-activation on {name} failed ({e}); using baked fp8 weights as-is.")
+        elif fp8_enabled:
+            # Legacy / final-not-taken path: bf16 weights, runtime-quantize the experts to fp8.
             for name in ("transformer", "transformer_2"):  # both MoE experts, after the distill fuse
                 module = getattr(pipe, name, None)
                 if module is not None:
@@ -399,6 +436,19 @@ def _quantize_fp8(module) -> None:
     """Quantize a diffusers module to fp8 in place via torchao. Blackwell gets MXFP8, Hopper
     plain fp8; torchao selects the kernel from the device. Verified against the diffusers
     torchao quantization guide."""
+    from torchao.quantization import quantize_  # deferred
+    from torchao.quantization import Float8DynamicActivationFloat8WeightConfig
+
+    quantize_(module, Float8DynamicActivationFloat8WeightConfig())
+
+
+def _apply_fp8_dynamic_activation(module) -> None:
+    """Wire fp8 dynamic-activation compute over a module whose WEIGHTS ARE ALREADY fp8_e4m3fn (the
+    baked path). Same torchao config as `_quantize_fp8`: the weight side is already fp8 so quantizing
+    it is effectively idempotent, and the value of the call is the dynamic per-token activation
+    scaling + the card-selected fp8 kernel (MXFP8 on Blackwell, plain fp8 on Hopper). Keeping ONE
+    torchao config across the baked-fp8 and runtime-quant paths means both render through the exact
+    same fp8 compute, so the bake cannot drift from the validated runtime-quant numerics."""
     from torchao.quantization import quantize_  # deferred
     from torchao.quantization import Float8DynamicActivationFloat8WeightConfig
 
