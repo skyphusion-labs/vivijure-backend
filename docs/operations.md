@@ -32,16 +32,16 @@ Build and deploy are deliberately separate steps: a build does not touch the liv
 
 ```mermaid
 flowchart LR
-    TAG["git tag<br/>backend-vX.Y.Z"] --> JENK["Jenkins<br/>(tag discovery)"]
-    JENK --> BUILD["docker build<br/>deploy/Dockerfile"]
+    TAG["git tag<br/>backend-vX.Y.Z"] --> GHA["GitHub Actions<br/>(release.yml, tag trigger)"]
+    GHA --> BUILD["docker build<br/>deploy/Dockerfile"]
     BUILD --> SMOKE["import smoke<br/>(CPU, in-image)"]
     SMOKE --> PUSH["docker push<br/>GHCR :X.Y.Z + :latest"]
     PUSH -. "manual, deliberate" .-> PIN["pin-runpod-template.py"]
     PIN --> POD["RunPod endpoint<br/>(pulls on next cold start)"]
 ```
 
-**Build (Jenkins, on a git tag).** A `backend-vX.Y.Z` tag triggers the fleet Jenkins; a plain
-commit is a no-op. It builds `deploy/Dockerfile`, runs an in-image CPU import smoke test
+**Build (GitHub Actions, on a git tag).** A pushed `backend-vX.Y.Z` tag triggers
+`.github/workflows/release.yml`; a plain commit is a no-op. It builds `deploy/Dockerfile`, runs an in-image CPU import smoke test
 (`deploy/smoke_imports.py`, which catches a missing finishing-stage dep in seconds rather than
 after a 30-minute GPU render), and on success pushes
 `ghcr.io/skyphusion-labs/vivijure-backend:X.Y.Z` and `:latest` (the image tag drops the
@@ -67,8 +67,8 @@ RUNPOD_API_KEY=... RUNPOD_TEMPLATE_ID=... \
 The pin script preserves the template's `containerRegistryAuthId` (the GHCR pull credential);
 dropping it would make RunPod fail the image pull even for a public image.
 
-A CPU test gate (`pytest`) runs on every push / PR via GitHub Actions, independent of the
-Jenkins image build. See [development.md](development.md).
+A CPU test gate (`pytest`) runs on every push / PR via GitHub Actions (`tests.yml`), independent of the
+tag-triggered release image build (`release.yml`). See [development.md](development.md).
 
 ## Environment
 

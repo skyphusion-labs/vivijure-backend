@@ -1,15 +1,23 @@
 # Releases -- vivijure-backend
 
 Render backend for RunPod serverless. A release is an annotated git tag
-`backend-v<semver>` **pushed to origin**; the fleet Jenkins (tag discovery) builds and
-pushes a Docker image to `ghcr.io/skyphusion-labs/vivijure-backend:<semver>` (the image
-tag drops the `backend-v` prefix).
+`backend-v<semver>` **pushed to origin**; that tag push triggers GitHub Actions
+(`.github/workflows/release.yml`), which builds and pushes a Docker image to
+`ghcr.io/skyphusion-labs/vivijure-backend:<semver>` (the image tag drops the `backend-v`
+prefix). Through backend-v0.2.24 this build ran on the fleet Jenkins; it was ported to
+GitHub Actions in backend-v0.2.25 (#107) when Jenkins was decommissioned.
 
 > **Lesson (2026-06-12):** the release step MUST push tags to origin. See the 0.2.1-0.2.3
 > gap below -- those tags were cut on mindcrimes local clone, never pushed, and lost when
 > the box was released.
 
 | git tag | GHCR image | source commit | built | notes |
+|---|---|---|---|---|
+| backend-v0.2.27 | 0.2.27 | c25edc8 | 2026-06-22 (GHA) | fix(finish): pad RIFE input to a multiple of 64, crop back (#245, PR #113). RIFE's flownet downsamples then concatenates skip features, so each spatial dimension must be a multiple of 64; a non-64-divisible i2v output (Wan 2.6 emits 1270x726) crashed the finish chain at step 0 ("tensor a (1270) must match tensor b (1280) ... dimension 3") before lip-sync/upscale, and the raw clip shipped with applied=[] (the umbrella behind #246, which pulled five motion backends for Monday). _RifeInterpolator.interpolate now pads the pair (replicate, bottom/right) up to the next multiple of 64, runs the flownet, and crops back to the original dims so the pad never reaches the encoded clip -- rescues every non-64 resolution at any aspect ratio in one place. own-gpu/kling already emit 64-divisible dims (pad 0). _pad_to_multiple unit-tested against all five backends' resolutions; the torch path validated by a live verify render. |
+|---|---|---|---|---|
+| backend-v0.2.26 | 0.2.26 | 5afd66a | 2026-06-21 (GHA) | fix(harness): verify keyframe presence in R2 before honoring a state-claimed REUSE (#108, PR #110). A stale or partial per-project state.tar.gz could name a keyframe whose R2 object was since cleared; _restore_prior_state trusted the state tar, so the planner marked the shot REUSE, skipped its keyframe render, and reported a phantom keyframe key to a nonexistent R2 object -- the shard then hung to the deadline, silently shipping a scatter render with one shot unrendered (hung shot_02 on the musetalk showcase). New R2.exists check verifies each state-claimed keyframe is actually present; an absent one is omitted from existing_keyframes so the planner GENERATEs it (self-healing), absent-on-failure being the safe default. Regression test added. FIX B (per-render/per-shard state isolation) is a separate follow-up. |
+|---|---|---|---|---|
+| backend-v0.2.25 | 0.2.25 | a73cc67 | 2026-06-20 (GHA) | ci: port the image build from Jenkins to GitHub Actions (#107) + keyframe distill CFG fix (#106). Jenkins was decommissioned in the fleet consolidation but the image-build pipeline was never ported (the repo had only tests.yml + stale.yml), so this release tag would have built nothing. Adds .github/workflows/release.yml, a faithful port of the Jenkinsfile build+push: triggers on a pushed backend-v<X.Y.Z> tag only, build context = repo ROOT with deploy/Dockerfile, runs deploy/smoke_imports.py AFTER build BEFORE push, pushes :<X.Y.Z> AND :latest. The deploy/RunPod pin stays a SEPARATE manual step (scripts/pin-runpod-template.py), same boundary Jenkins kept. Runner: GitHub-hosted ubuntu-latest (public repo, fork-safe); GHCR auth uses the built-in GITHUB_TOKEN (packages:write), no long-lived PAT. FIRST GitHub-Actions-built release. |
 |---|---|---|---|---|
 | backend-v0.2.24 | 0.2.24 | 93d1976 | (pending) | fix(models-mirror): never crash when VJ_VOLUME_ROOT is set but not mounted (#55, PR #96). 0.2.23's self-preload would os.open() the lock on a non-existent dir -> uncaught FileNotFoundError -> worker crash if VJ_VOLUME_SELF_PRELOAD was on while /runpod-volume wasn't mounted (the env-set-before-attach window). Now _resolve_volume returns a clean R2 fallback when VJ_VOLUME_ROOT isn't a mounted dir, and _acquire_volume_lock catches OSError broadly. SUPERSEDES 0.2.23 (do not pin 0.2.23). This is the image pinned to the prod endpoint for the network-volume rollout. 363 passed, 3 skipped. |
 |---|---|---|---|---|
