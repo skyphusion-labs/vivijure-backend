@@ -15,9 +15,9 @@ worker.handler})`. Per job the handler builds a `GpuPipeline` from the request's
 `RenderConfig`, registers it on the harness seam, and delegates to `harness.handler` (model
 mirror, R2 in, plan, GPU stages, off-GPU finish, results out).
 
-## Build (Jenkins, on a git tag)
+## Build (GitHub Actions, on a git tag)
 
-Build + push happen on a `backend-vX.Y.Z` tag (see `../Jenkinsfile`); a plain commit is a no-op.
+Build + push happen on a `backend-vX.Y.Z` tag (see `../.github/workflows/release.yml`); a plain commit is a no-op.
 
 ```bash
 git push origin main

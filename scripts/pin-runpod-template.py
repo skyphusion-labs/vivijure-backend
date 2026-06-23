@@ -2,7 +2,7 @@
 """Pin the RunPod endpoint template to a built GHCR image (the "deploy" step).
 
 Decoupled from the image build (which happens on a `backend-vX.Y.Z` git tag, build + push only,
-see ../Jenkinsfile). Run this deliberately when you want the live RunPod endpoint to start
+see ../.github/workflows/release.yml). Run this deliberately when you want the live RunPod endpoint to start
 pulling a new image on its next cold start.
 
   RUNPOD_API_KEY=...  RUNPOD_TEMPLATE_ID=...  \\
