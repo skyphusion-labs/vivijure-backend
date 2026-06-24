@@ -153,6 +153,36 @@ def test_preview_reuses_ready_lora_instead_of_retraining():
     assert p.shots_to_animate == 0
 
 
+def test_keyframes_only_render_short_circuits_before_i2v():
+    # Issue #119: a `render` carrying keyframes_only:true must draw its keyframes (training the
+    # LoRAs they need) but STOP before any i2v/finish -- the cost door. The render never reaches
+    # the GPU motion stage, so no shot animates and no i2v GPU tier is reserved.
+    p = plan(_req(keyframes_only=True), _sb(TWO_SCENES))
+    assert p.action is Action.RENDER                   # intent preserved (still a render, not a preview)
+    assert sorted(p.lora.train) == ["A", "B"]          # keyframes still need their LoRAs
+    assert p.keyframes_to_generate == 2                # all keyframes drawn
+    assert p.shots_to_animate == 0                     # but NOTHING animated -- short-circuit
+    assert all(not s.needs_i2v for s in p.scenes)
+    assert all(s.i2v_tier is None for s in p.scenes)   # no GPU tier reserved for motion
+
+
+def test_keyframes_only_costs_no_more_than_a_preview():
+    # The whole point is the cost drop: a keyframes_only render must estimate the SAME GPU-seconds
+    # as the equivalent preview (keyframes + training only), never the full render's i2v seconds.
+    only = plan(_req(keyframes_only=True), _sb(TWO_SCENES))
+    preview = plan(_req(action="preview"), _sb(TWO_SCENES))
+    full = plan(_req(), _sb(TWO_SCENES))
+    assert only.estimated_gpu_seconds == preview.estimated_gpu_seconds
+    assert only.estimated_gpu_seconds < full.estimated_gpu_seconds
+
+
+def test_keyframes_only_parsed_off_the_request():
+    # The flag is part of the typed contract now, not silently dropped (the #119 root cause).
+    assert _req(keyframes_only=True).keyframes_only is True
+    assert _req().keyframes_only is False
+    assert RenderRequest.from_dict({"action": "render", "keyframes_only": "true"}).keyframes_only is True
+
+
 def test_regen_shot_is_keyframe_only_no_i2v():
     p = plan(_req(action="regen_shot"), _sb(TWO_SCENES))
     assert p.shots_to_animate == 0
