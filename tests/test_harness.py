@@ -11,8 +11,8 @@ import pytest
 import yaml
 
 from vivijure_backend.harness import keys
-from vivijure_backend.harness.handler import HarnessError, Outputs, run_job
-from vivijure_backend.contract import RenderRequest
+from vivijure_backend.harness.handler import HarnessError, Outputs, run_job, restore_from_r2
+from vivijure_backend.contract import RenderRequest, Storyboard
 from vivijure_backend.harness.models_mirror import mirror_cmd, rclone_conf
 from vivijure_backend.harness.r2 import R2Config
 
@@ -105,24 +105,41 @@ def _bundle_tar(path: Path) -> Path:
 
 
 class FakeStore:
-    """Records puts; serves the prebuilt bundle for any get. No network."""
-    def __init__(self, bundle_tar: Path):
+    """In-memory R2 fake. Serves the prebuilt bundle for the bundle key, and models per-key PRESENCE
+    for every object the worker puts (keyframes, hashes, loras) so the R2-authoritative restore (#112)
+    sees a realistic store. `seed` pre-populates objects a prior render would have left. No network."""
+    def __init__(self, bundle_tar: Path, *, seed: dict | None = None):
         self.bundle_tar = bundle_tar
         self.puts: list[str] = []
         self.tars: list[str] = []
         self.meta: dict[str, dict | None] = {}  # key -> customMetadata recorded at put time
+        self.blobs: dict[str, bytes] = dict(seed or {})  # key -> bytes for objects present in R2
 
     def get_file(self, key, dest):
-        shutil.copy(self.bundle_tar, dest)
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        if key in self.blobs:
+            Path(dest).write_bytes(self.blobs[key])
+        else:
+            shutil.copy(self.bundle_tar, dest)  # the bundle key (only un-seeded get in these tests)
         return dest
 
+    def get_bytes(self, key):
+        return self.blobs[key]
+
     def exists(self, key):
-        return True  # default fake: any state-claimed artifact is treated as present in R2
+        return key in self.blobs
 
     def put_file(self, path, key, *, content_type=None, metadata=None):
         assert Path(path).exists(), f"uploading a nonexistent file: {path}"
         self.puts.append(key)
         self.meta[key] = metadata
+        self.blobs[key] = Path(path).read_bytes()
+        return key
+
+    def put_bytes(self, data, key, *, content_type=None, metadata=None):
+        self.puts.append(key)
+        self.meta[key] = metadata
+        self.blobs[key] = data
         return key
 
     def put_dir_as_tar(self, src_dir, key, *, metadata=None):
@@ -143,6 +160,7 @@ class FakePipeline:
         for s in plan.scenes:
             if s.keyframe_mode.value == "generate":
                 p = workdir / f"{s.shot_id}.png"; p.write_bytes(b"x"); out.keyframes[s.shot_id] = p
+                p.with_suffix(".hash").write_text("hash-" + s.shot_id)  # mirror pipeline._finish hash
             if s.needs_i2v:
                 p = workdir / f"{s.shot_id}.mp4"; p.write_bytes(b"x"); out.clips.append((s.shot_id, p))
         return out
@@ -168,7 +186,9 @@ def test_run_job_offloaded_emits_clips_and_manifest(tmp_path):
     assert [c["shot_id"] for c in res["clips"]] == ["shot_01", "shot_02"]
     assert res["output_key"] is None
     assert any(k.endswith("manifest.json") for k in store.puts)
-    assert res["state_key"] == "projects/neon/state.tar.gz"
+    # #112: no shared state tar is written -- nothing for concurrent shards to clobber.
+    assert res["state_key"] is None
+    assert store.tars == []
     # keyframes uploaded for both generated shots
     assert {k["shot_id"] for k in res["keyframes"]} == {"shot_01", "shot_02"}
 
@@ -185,7 +205,7 @@ def test_run_job_never_stamps_submitter_identity(tmp_path):
     assert store.puts, "expected uploads"
     assert all(store.meta[k] is None for k in store.puts), \
         "no artifact may carry submitter identity metadata after the identity strip"
-    assert store.meta[res["state_key"]] is None
+    assert res["state_key"] is None  # #112: no shared state object exists to stamp
     # the injected user_email must not survive parsing onto the request
     assert not hasattr(RenderRequest.from_dict(_job(user_email="x@y.z")), "user_email")
 
@@ -234,138 +254,127 @@ def test_run_job_normal_merges_to_output_key(tmp_path):
 
 # ---------------------------------------------------------------- incremental reuse
 
-def _make_state_tar(path: Path, slot_markers: list[str], kf_ids: list[str]) -> Path:
-    """Build a minimal state.tar.gz with lora markers and keyframe PNGs."""
-    members: dict[str, bytes] = {
-        "storyboard.yaml": yaml.safe_dump(STORYBOARD).encode(),
-    }
-    for slot in slot_markers:
-        members[f"loras/{slot}/.trained"] = b""
-    for shot_id in kf_ids:
-        members[f"keyframes/{shot_id}.png"] = b"PNG"
-    with tarfile.open(path, "w:gz") as tf:
-        for name, data in members.items():
-            info = tarfile.TarInfo(name=name)
-            info.size = len(data)
-            tf.addfile(info, io.BytesIO(data))
-    return path
+# ----------------------------------------------- incremental reuse: R2-authoritative restore (#112)
+
+def _sb():
+    """The storyboard object restore_from_r2 walks (same STORYBOARD the fake bundle carries)."""
+    return Storyboard.from_dict(STORYBOARD)
 
 
-def test_run_job_copies_keyframes_into_bundle_root(tmp_path):
-    """After a render, generated keyframes must appear in bundle.root/keyframes/ so the next
-    incremental render can find them via _restore_prior_state."""
+def test_run_job_uploads_keyframes_and_hashes_per_shot(tmp_path):
+    """A render persists each keyframe AND its param-hash as its OWN per-shot R2 object (#112) -- the
+    next render restores from these, no shared state tar. (The old behavior staged copies into
+    bundle.root for a tarball; that shared object is gone.)"""
     store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"))
-    res = run_job(_job(action="preview"), pipeline=FakePipeline(), store=store,
-                  workdir=tmp_path / "work")
-    # FakePipeline generates keyframes for GENERATE shots; preview generates keyframes, no i2v
-    work = tmp_path / "work" / "project"
-    kf_dir = work / "keyframes"
-    assert kf_dir.is_dir(), "keyframes/ must be written into bundle.root after render"
-    kf_names = {p.stem for p in kf_dir.iterdir() if p.suffix == ".png"}
-    assert "shot_01" in kf_names and "shot_02" in kf_names
+    run_job(_job(action="preview"), pipeline=FakePipeline(), store=store, workdir=tmp_path / "work")
+    for shot in ("shot_01", "shot_02"):
+        assert keys.keyframe_key("neon", shot) in store.blobs
+        assert keys.keyframe_hash_key("neon", shot) in store.blobs
+    assert store.tars == []  # no shared mutable state object
 
 
-def test_run_job_writes_lora_markers_into_bundle_root(tmp_path):
-    """After a render, trained LoRA slots must have a .trained marker in bundle.root/loras/."""
+def test_run_job_uploads_lora_adapter_as_trained_signal(tmp_path):
+    """A trained slot's ADAPTER object in R2 (keys.lora_key) is the 'trained' signal the next render
+    reads (#112) -- there is no .trained marker in a shared state tar anymore."""
     store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"))
-    # Use finish_offloaded to skip the ffmpeg merge step (FakePipeline produces dummy MP4 bytes)
     run_job(_job(render_overrides={"finish_offloaded": True}),
             pipeline=FakePipeline(), store=store, workdir=tmp_path / "work")
-    work = tmp_path / "work" / "project"
     for slot in ("A", "B"):
-        marker = work / "loras" / slot / ".trained"
-        assert marker.is_file(), f"lora marker missing for slot {slot}: {marker}"
+        assert keys.lora_key("neon", slot) in store.blobs, f"adapter missing for slot {slot}"
 
 
-def test_restore_prior_state_derives_sets_from_tar(tmp_path):
-    """_restore_prior_state must extract the state tar and return the right sets."""
-    from vivijure_backend.harness.handler import _restore_prior_state
-
-    state_tar = _make_state_tar(tmp_path / "state.tar.gz",
-                                slot_markers=["A"], kf_ids=["shot_01"])
-
-    class StateFakeStore:
-        def get_file(self, key, dest):
-            shutil.copy(state_tar, dest)
-            return dest
-        def exists(self, key):
-            return True  # keyframe is present in R2
-
-    workdir = tmp_path / "work"
-    workdir.mkdir()
-    trained, existing = _restore_prior_state(StateFakeStore(), "neon", workdir)
-    assert trained == {"A"}
-    assert existing == {"shot_01": None}  # no .hash file in tar -> None value
-
-
-def test_restore_prior_state_reads_hash_from_dot_hash_file(tmp_path):
-    """A .hash file alongside the PNG in state is read back as the stored hash."""
-    from vivijure_backend.harness.handler import _restore_prior_state
-
-    import tarfile, io
-    # Build a state tar with a keyframe PNG AND a .hash file alongside it
-    tar_path = tmp_path / "state.tar.gz"
-    with tarfile.open(tar_path, "w:gz") as tf:
-        # keyframe PNG (no project/ prefix -- matches _make_state_tar convention)
-        png_data = b"PNG"
-        ti = tarfile.TarInfo("keyframes/shot_01.png")
-        ti.size = len(png_data)
-        tf.addfile(ti, io.BytesIO(png_data))
-        # .hash file alongside the PNG
-        h = b"abcdef1234567890"
-        hi = tarfile.TarInfo("keyframes/shot_01.hash")
-        hi.size = len(h)
-        tf.addfile(hi, io.BytesIO(h))
-
-    class StateFakeStore:
-        def get_file(self, key, dest):
-            import shutil; shutil.copy(tar_path, dest); return dest
-        def exists(self, key):
-            return True  # keyframe is present in R2
-
-    workdir = tmp_path / "work"
-    workdir.mkdir()
-    trained, existing = _restore_prior_state(StateFakeStore(), "neon", workdir)
-    assert existing == {"shot_01": "abcdef1234567890"}
+def test_restore_from_r2_happy_path_stages_keyframes_and_derives_sets(tmp_path):
+    """The subtle part of #112: restore runs AFTER bundle-extract and must still STAGE prior keyframes
+    on disk (so the pipeline can REUSE them) + derive trained_slots, with no shared state tar and no
+    #108 hang. Seed R2 as a prior render left it; restore reuses both keyframes + skips both LoRAs."""
+    seed = {
+        keys.keyframe_key("neon", "shot_01"): b"PNG01",
+        keys.keyframe_hash_key("neon", "shot_01"): b"hash-shot_01",
+        keys.keyframe_key("neon", "shot_02"): b"PNG02",
+        keys.keyframe_hash_key("neon", "shot_02"): b"hash-shot_02",
+        keys.lora_key("neon", "A"): b"adapterA",
+        keys.lora_key("neon", "B"): b"adapterB",
+    }
+    store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"), seed=seed)
+    bundle_root = tmp_path / "project"; bundle_root.mkdir()
+    trained, existing = restore_from_r2(store, "neon", _sb(), bundle_root)
+    assert trained == {"A", "B"}
+    assert existing == {"shot_01": "hash-shot_01", "shot_02": "hash-shot_02"}
+    # keyframe PNGs STAGED on disk where the pipeline's _resolve_keyframe reads them
+    assert (bundle_root / "keyframes" / "shot_01.png").read_bytes() == b"PNG01"
+    assert (bundle_root / "keyframes" / "shot_02.png").read_bytes() == b"PNG02"
 
 
-def test_restore_prior_state_skips_keyframe_absent_from_r2(tmp_path):
-    """#108 regression: a stale state tar names a keyframe whose R2 object is GONE (e.g. the
-    renders/ were cleared but the per-project state.tar.gz was not). That shot must NOT be marked
-    REUSE off the stale state -- it's omitted from existing_keyframes so the planner GENERATEs it,
-    instead of reporting a phantom keyframe key to a nonexistent object."""
-    from vivijure_backend.harness import keys
-    from vivijure_backend.harness.handler import _restore_prior_state
-
-    # State tar claims BOTH shots have keyframes...
-    state_tar = _make_state_tar(tmp_path / "state.tar.gz",
-                                slot_markers=["A"], kf_ids=["shot_01", "shot_02"])
-
-    class PartialR2FakeStore:
-        """...but R2 only actually has shot_01 (shot_02's object was cleared)."""
-        def get_file(self, key, dest):
-            shutil.copy(state_tar, dest)
-            return dest
-        def exists(self, key):
-            return key == keys.keyframe_key("neon", "shot_01")
-
-    workdir = tmp_path / "work"
-    workdir.mkdir()
-    trained, existing = _restore_prior_state(PartialR2FakeStore(), "neon", workdir)
-    assert trained == {"A"}
-    assert "shot_01" in existing            # present in R2 -> reusable
-    assert "shot_02" not in existing        # absent from R2 -> GENERATE, never a phantom
+def test_restore_from_r2_present_keyframe_without_hash_reads_none(tmp_path):
+    """A present keyframe with NO hash object reads None -> reuse conservatively (pre-hash state),
+    exactly as the old state-tar path did."""
+    seed = {keys.keyframe_key("neon", "shot_01"): b"PNG01"}  # no hash object
+    store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"), seed=seed)
+    bundle_root = tmp_path / "project"; bundle_root.mkdir()
+    _, existing = restore_from_r2(store, "neon", _sb(), bundle_root)
+    assert existing == {"shot_01": None}
 
 
-def test_restore_prior_state_returns_empty_on_missing_state(tmp_path):
-    """A project with no prior state (KeyError / fetch failure) returns empty sets."""
-    from vivijure_backend.harness.handler import _restore_prior_state
+def test_restore_from_r2_absent_keyframe_is_omitted_no_phantom(tmp_path):
+    """#108 regression, R2-authoritative form: a storyboard shot whose keyframe is ABSENT from R2 is
+    omitted (planner GENERATEs it) -- never a phantom reuse that hangs the shard. No state tar to be
+    stale against; R2 presence is the only truth."""
+    seed = {keys.keyframe_key("neon", "shot_01"): b"PNG01",
+            keys.keyframe_hash_key("neon", "shot_01"): b"h1"}  # shot_02 absent from R2
+    store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"), seed=seed)
+    bundle_root = tmp_path / "project"; bundle_root.mkdir()
+    trained, existing = restore_from_r2(store, "neon", _sb(), bundle_root)
+    assert "shot_01" in existing and "shot_02" not in existing
+    assert not (bundle_root / "keyframes" / "shot_02.png").exists()
 
-    class FailingStore:
-        def get_file(self, key, dest):
-            raise FileNotFoundError("no prior state")
 
-    workdir = tmp_path / "work"
-    workdir.mkdir()
-    trained, existing = _restore_prior_state(FailingStore(), "fresh-project", workdir)
+def test_restore_from_r2_empty_on_fresh_project(tmp_path):
+    """A fresh project (nothing in R2) restores empty sets -> a full render, no reuse."""
+    store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"))  # no seed
+    bundle_root = tmp_path / "project"; bundle_root.mkdir()
+    trained, existing = restore_from_r2(store, "fresh", _sb(), bundle_root)
     assert trained == set() and existing == {}
+
+
+def test_concurrent_shards_do_not_clobber_state(tmp_path):
+    """#112 -- the race the issue is about. Two concurrent scatter shards of ONE render, each scoped
+    (process_shot_ids) to a DIFFERENT shot's keyframe, write to the SAME store. Both keyframes must
+    survive and the next render must restore BOTH (regenerating neither).
+
+    Under the OLD single shared projects/<slug>/state.tar.gz this was last-writer-wins: each shard
+    tar'd only its own bundle.root, so the second write clobbered the first shard's keyframe out of
+    the persisted state and the next render wastefully re-GENERATED it. This test would FAIL there
+    (store.tars would hold two writes of the shared key, and a tar-based restore would see only the
+    last shard's shot). With the R2-authoritative restore there is NO shared mutable object: each
+    shard writes only its own stable per-shot key, so neither can clobber the other."""
+    store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    # Shard A renders only shot_01; shard B only shot_02 (concurrent, same project + store).
+    run_job(_job(action="preview", process_shot_ids=["shot_01"]),
+            pipeline=FakePipeline(), store=store, workdir=tmp_path / "shardA")
+    run_job(_job(action="preview", process_shot_ids=["shot_02"]),
+            pipeline=FakePipeline(), store=store, workdir=tmp_path / "shardB")
+
+    assert store.tars == []  # no shared mutable state object was ever written
+    assert keys.keyframe_key("neon", "shot_01") in store.blobs
+    assert keys.keyframe_key("neon", "shot_02") in store.blobs  # the loser under the old shared key
+
+    # The NEXT render restores from R2 and finds BOTH -> reuses both, regenerates neither.
+    bundle_root = tmp_path / "next" / "project"; bundle_root.mkdir(parents=True)
+    _, existing = restore_from_r2(store, "neon", _sb(), bundle_root)
+    assert set(existing) == {"shot_01", "shot_02"}
+
+
+def test_run_job_reuses_prior_keyframes_from_r2_no_regen(tmp_path):
+    """End to end: a render whose project already has both keyframes in R2 (a prior render) REUSES
+    them -- the planner generates no keyframe, so no fresh keyframe object is uploaded."""
+    seed = {
+        keys.keyframe_key("neon", "shot_01"): b"PNG01",  # no hash -> reuse conservatively (None)
+        keys.keyframe_key("neon", "shot_02"): b"PNG02",
+        keys.lora_key("neon", "A"): b"a", keys.lora_key("neon", "B"): b"b",
+    }
+    store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"), seed=seed)
+    res = run_job(_job(action="preview"), pipeline=FakePipeline(), store=store, workdir=tmp_path / "work")
+    assert {k["shot_id"] for k in res["keyframes"]} == {"shot_01", "shot_02"}  # both reported...
+    # ...but neither was re-GENERATED: no fresh keyframe PNG was uploaded this run.
+    assert [k for k in store.puts if k.startswith("renders/neon/keyframes/") and k.endswith(".png")] == []
+

@@ -277,14 +277,29 @@ def test_execute_finishes_clips_only_when_finish_is_enabled(tmp_path):
 # --------------------------------------------------------------------- run_job end to end
 
 class FakeStore:
-    def __init__(self, bundle_tar: Path):
+    def __init__(self, bundle_tar: Path, *, seed: dict | None = None):
         self.bundle_tar = bundle_tar; self.puts: list[str] = []; self.tars: list[str] = []
+        self.blobs: dict[str, bytes] = dict(seed or {})
 
     def get_file(self, key, dest):
-        shutil.copy(self.bundle_tar, dest); return dest
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        if key in self.blobs:
+            Path(dest).write_bytes(self.blobs[key])
+        else:
+            shutil.copy(self.bundle_tar, dest)
+        return dest
+
+    def get_bytes(self, key):
+        return self.blobs[key]
+
+    def exists(self, key):
+        return key in self.blobs
 
     def put_file(self, path, key, *, content_type=None, metadata=None):
-        assert Path(path).exists(); self.puts.append(key); return key
+        assert Path(path).exists(); self.puts.append(key); self.blobs[key] = Path(path).read_bytes(); return key
+
+    def put_bytes(self, data, key, *, content_type=None, metadata=None):
+        self.puts.append(key); self.blobs[key] = data; return key
 
     def put_dir_as_tar(self, src_dir, key, *, metadata=None):
         self.tars.append(key); return key
@@ -305,7 +320,7 @@ def test_run_job_drives_gpu_pipeline_offloaded(tmp_path):
     assert [c["shot_id"] for c in res["clips"]] == ["shot_01", "shot_02", "shot_03"]
     assert {k["shot_id"] for k in res["keyframes"]} == {"shot_01", "shot_02", "shot_03"}
     assert any(k.endswith("manifest.json") for k in store.puts)
-    assert res["state_key"] == "projects/neon/state.tar.gz"
+    assert res["state_key"] is None  # #112: no shared state tar
 
 
 # ----------------------------------------------------- pretrained-LoRA R2 staging (item B)

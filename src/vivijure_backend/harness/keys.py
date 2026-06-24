@@ -39,6 +39,13 @@ def keyframe_key(project: str, shot_id: str) -> str:
     return f"renders/{_slug(project)}/keyframes/{_slug(shot_id)}.png"
 
 
+def keyframe_hash_key(project: str, shot_id: str) -> str:
+    """The render-param hash for a keyframe, as its OWN per-shot R2 object (sibling of the PNG). The
+    incremental restore reads it to detect a param change without a shared state tarball -- so
+    concurrent scatter shards never clobber a single mutable state object (#112)."""
+    return f"renders/{_slug(project)}/keyframes/{_slug(shot_id)}.hash"
+
+
 def clip_key(project: str, shot_id: str) -> str:
     """A per-shot i2v clip, by shot (the offloaded/per-shot finish emits these)."""
     return f"renders/{_slug(project)}/clips/{_slug(shot_id)}.mp4"
