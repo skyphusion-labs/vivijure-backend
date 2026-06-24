@@ -34,6 +34,19 @@ def _str(v: Any, default: str = "") -> str:
     return v if isinstance(v, str) else default
 
 
+def _bool(v: Any, default: bool = False) -> bool:
+    """Coerce a request flag to bool. Accepts a real bool, a number (nonzero => True), or the
+    JSON-ish strings "true"/"1"/"yes"/"on" (case-insensitive); everything else falls back to
+    `default`. Used for the small set of routing flags a caller may send loosely typed."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v != 0
+    if isinstance(v, str):
+        return v.strip().lower() in ("true", "1", "yes", "on")
+    return default
+
+
 # --------------------------------------------------------------------------- storyboard
 
 @dataclass
@@ -235,6 +248,11 @@ class RenderRequest:
     overrides: dict[str, Any] = field(default_factory=dict)  # raw render_overrides; routing flags only
     pretrained_loras: dict[str, str] = field(default_factory=dict)
     process_shot_ids: list[str] | None = None  # finalize / regen subset
+    # Cost door: when set on a `render`, the pipeline draws keyframes (training the LoRAs they
+    # need) then SHORT-CIRCUITS before any i2v/finish GPU-seconds -- identical motion-skip to the
+    # `preview` action, but keeping the `render` action intent. Honored in orchestrator.plan().
+    # A caller asking for a cheap draft keyframe pass must never silently pay for a full render.
+    keyframes_only: bool = False
     # Optional audio bed: an R2 key the control plane staged (e.g. audio/<uuid>.m4a). The harness
     # fetches it and muxes it under the final video; None leaves the render silent.
     audio_key: str | None = None
@@ -260,6 +278,7 @@ class RenderRequest:
             process_shot_ids=d.get("process_shot_ids") if isinstance(d.get("process_shot_ids"), list) else None,
             audio_key=_str(d.get("audio_key")) or None,
             user_email=ue.strip() if isinstance(ue, str) and ue.strip() else None,
+            keyframes_only=_bool(d.get("keyframes_only")),
         )
 
 

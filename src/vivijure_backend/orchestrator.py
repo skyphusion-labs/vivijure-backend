@@ -212,7 +212,10 @@ def plan(
     # PREVIEW is RENDER minus motion: it draws keyframes (and trains the LoRAs they need, since
     # to_train above is only zeroed for FINALIZE) but never runs i2v, so `_finish` assembles no
     # MP4 (no clips) and the user gets a keyframe preview before committing GPU-seconds to Wan.
-    want_i2v = action in (Action.RENDER, Action.FINALIZE)
+    # keyframes_only (issue #119): a `render` (or finalize) carrying the flag draws its keyframes
+    # but STOPS before i2v/finish, the same motion-skip the PREVIEW action takes. Without this the
+    # flag is silently dropped and the caller pays a full ~27min render for a draft keyframe pass.
+    want_i2v = action in (Action.RENDER, Action.FINALIZE) and not request.keyframes_only
     want_keyframe = action in (Action.RENDER, Action.PREVIEW, Action.REGEN_SHOT)
     # A train-only job (neither keyframe nor i2v) has no per-scene render: building scene
     # plans would estimate keyframe GPU-seconds for work that never fires, which is exactly
