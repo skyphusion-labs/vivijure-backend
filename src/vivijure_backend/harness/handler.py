@@ -193,18 +193,15 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
     progress = progress or NullEmitter()
     project = req.project
     result = RenderResult(project=project)
-    # Stamp the owner on every uploaded artifact. The control plane's /api/artifact route 403s
-    # any object whose customMetadata.user_email != the caller, so without this the user cannot
-    # fetch back their own keyframes/clips/mp4 (they render fine, then show blank in the UI). The
-    # control plane sends user_email in the job input; the contract now parses it. None when absent
-    # (e.g. a local/test run) leaves uploads untagged exactly as before.
-    owner_meta = {"user_email": req.user_email} if req.user_email else None
+    # No owner stamp: the control plane completed the anti-SaaS identity strip (#292), so there is
+    # no submitter identity to stamp and /api/artifact is served by key (no per-row ownership check).
+    # Artifacts therefore carry no identity metadata. (See SECURITY.md.)
 
     # LoRA adapters: upload trained ones, pass pretrained through.
     # Also write a zero-byte marker into the project tree so the next incremental render's
     # state restore can derive trained_slots without an R2 list call.
     for slot, path in outputs.loras.items():
-        key = store.put_file(Path(path), keys.lora_key(project, slot), metadata=owner_meta)
+        key = store.put_file(Path(path), keys.lora_key(project, slot))
         result.lora[slot] = {"lora_id": key}
         marker = bundle.root / "loras" / slot / ".trained"
         marker.parent.mkdir(parents=True, exist_ok=True)
@@ -217,7 +214,7 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
     reported_shots: set[str] = set()
     for shot_id, path in outputs.keyframes.items():
         key = store.put_file(Path(path), keys.keyframe_key(project, shot_id),
-                             content_type="image/png", metadata=owner_meta)
+                             content_type="image/png")
         result.keyframes.append(Keyframe(shot_id=shot_id, key=key))
         reported_shots.add(shot_id)
         state_kf = bundle.root / "keyframes" / f"{shot_id}.png"
@@ -255,13 +252,13 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
         # Off-GPU finish elsewhere: emit per-shot clips + a manifest, no merge here.
         for c in ordered:
             key = store.put_file(c.path, keys.clip_key(project, c.shot_id),
-                                 content_type="video/mp4", metadata=owner_meta)
+                                 content_type="video/mp4")
             result.clips.append(Clip(shot_id=c.shot_id, key=key))
         manifest = build_manifest(ordered, output_name="full.mp4",
                                   audio=str(audio_path) if audio_path else None)
         man_path = write_manifest(manifest, workdir / "manifest.json")
         man_key = keys.join("renders", project, "manifest.json")
-        store.put_file(man_path, man_key, content_type="application/json", metadata=owner_meta)
+        store.put_file(man_path, man_key, content_type="application/json")
         progress.emit("assemble_done", offloaded=True, clips=len(ordered))
         progress.emit("upload_done", key=man_key)
     elif ordered or outputs.final_video:
@@ -270,14 +267,14 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
             assemble(ordered, workdir / "full.mp4", audio=audio_path).output_path
         from ..assemble import probe_duration, probe_has_audio
         result.output_key = store.put_file(final, keys.output_key(project),
-                                           content_type="video/mp4", metadata=owner_meta)
+                                           content_type="video/mp4")
         result.seconds = probe_duration(final)
         result.has_audio = probe_has_audio(final)
         progress.emit("assemble_done", offloaded=False, seconds=result.seconds)
         progress.emit("upload_done", key=result.output_key)
 
     # Project state for the next incremental render.
-    result.state_key = store.put_dir_as_tar(bundle.root, keys.state_key(project), metadata=owner_meta)
+    result.state_key = store.put_dir_as_tar(bundle.root, keys.state_key(project))
     progress.emit("upload_done", key=result.state_key)
     return result
 

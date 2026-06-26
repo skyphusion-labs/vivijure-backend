@@ -25,6 +25,18 @@ releases are summarized below from that history.
 
 ## Unreleased
 
+**security(identity): complete the anti-SaaS identity strip (#292) backend-side (#122).** The
+control plane stripped the submitter-identity primitive (the studio is single-operator: it sends no
+`user_email` and serves `/api/artifact` by key with no per-row ownership check), but this backend
+still parsed `user_email` from the job input and stamped it as `customMetadata.user_email` on every
+uploaded artifact, with docs describing an ownership-gated `/api/artifact` that does not exist.
+Removed the `user_email` field + parsing (`contract.py`) and the artifact owner-stamping
+(`harness/handler.py`); an injected `user_email` is now dropped, never persisted, so a stripped
+identity cannot resurface as R2 object metadata. The generic `metadata` passthrough on the store is
+retained (no caller) with a corrected, identity-free docstring. Aligned `SECURITY.md`,
+`docs/contract.md`, `docs/operations.md`. The stamping tests are replaced by a regression test that
+proves an injected identity is ignored. Full suite green.
+
 **perf(mirror): lazy-load the heavy i2v weights to cut cold-start startup ~5x.** The cold-start
 model mirror pulled the entire `r2:<bucket>/models/hf-cache` (~257 GiB after the prior skips) on
 every worker, but a keyframe/preview worker (the common cheap op) loads none of the i2v stack. Now:

@@ -115,7 +115,6 @@ routing flags it still reads off it (e.g. `finish_offloaded`).
 | `pretrained_loras` | dict[slot, str] | `{}` | Slot -> already-trained LoRA (R2 key or local path); skips that slot's training. |
 | `process_shot_ids` | list[str] \| null | null | Restrict `finalize` / `regen_shot` to a subset of shots. |
 | `audio_key` | str \| null | null | R2 key of an audio bed to mux under the final video. |
-| `user_email` | str \| null | null | Access-authenticated submitter; stamped on every artifact for the control plane's ownership-gated `/api/artifact` route. |
 
 ### Actions
 
@@ -318,7 +317,6 @@ scenes:
   "bundle_key": "bundles/the-long-walk-home/abc123.tar.gz",
   "quality_tier": "standard",
   "audio_key": "audio/the-long-walk-home/bed.m4a",
-  "user_email": "director@example.com",
   "render_overrides": {
     "keyframe": { "ip_adapter_scale": 0.7 },
     "i2v": { "flow_shift": 5.0 }

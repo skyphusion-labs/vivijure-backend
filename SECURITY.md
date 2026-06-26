@@ -38,8 +38,11 @@ The security boundary is:
   trust boundary in full.)
 - Render-job input arrives from the control plane; this backend does not authenticate end
   users itself (the control plane does, behind Cloudflare Access).
-- Generated artifacts are stamped with the requesting `user_email` so the control plane's
-  `/api/artifact` ownership check can gate them.
+- The studio is **single-operator** (the anti-SaaS identity strip, vivijure #292): the control
+  plane sends no submitter identity, and `/api/artifact` serves objects by key with no per-row
+  ownership check. This backend therefore stamps **no identity** onto artifacts; a job body that
+  still carries a `user_email` is ignored, so a stripped identity cannot resurface as object
+  metadata. There is no per-user ownership control to defeat (there are no users, only the operator).
 
 In-scope vulnerabilities include:
 
@@ -47,7 +50,8 @@ In-scope vulnerabilities include:
   keys) that read or write outside the intended job workspace or bucket prefix.
 - Server-side request forgery or arbitrary object access via attacker-influenced keys.
 - Code execution via crafted bundle contents (`storyboard.yaml`, registry, refs).
-- Leakage of the R2 credential, or writing artifacts under another user's ownership stamp.
+- Leakage of the R2 credential, or any reintroduction of submitter identity into artifact
+  metadata (the identity strip must hold; see Scope above).
 - Injection issues in any shell-out (ffmpeg, model tooling) driven by job input.
 
 Out-of-scope:
