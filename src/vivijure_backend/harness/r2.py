@@ -91,9 +91,10 @@ class R2:
 
     def put_file(self, path: Path, key: str, *, content_type: str | None = None,
                  metadata: dict[str, str] | None = None) -> str:
-        """Upload one file. `metadata` becomes S3 user metadata; the control plane's artifact
-        route reads `user_email` from it to gate ownership, so a downloadable artifact must
-        carry it."""
+        """Upload one file. `metadata`, when given, becomes generic S3 user metadata on the object.
+        It carries NO submitter identity: the control plane completed the identity strip (#292), so
+        the harness passes no owner tag (see handler._finish). The param is retained as a neutral
+        passthrough for any future non-identity metadata need."""
         extra: dict[str, object] = {}
         if content_type:
             extra["ContentType"] = content_type

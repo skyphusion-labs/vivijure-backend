@@ -256,17 +256,17 @@ class RenderRequest:
     # Optional audio bed: an R2 key the control plane staged (e.g. audio/<uuid>.m4a). The harness
     # fetches it and muxes it under the final video; None leaves the render silent.
     audio_key: str | None = None
-    # The Access-authenticated user who submitted the job. Stamped as customMetadata.user_email on
-    # every uploaded artifact so the control plane's ownership-gated /api/artifact route can serve
-    # them back; None for a local/test run leaves uploads untagged.
-    user_email: str | None = None
+    # NOTE: there is deliberately NO submitter-identity field. The control plane completed the
+    # anti-SaaS identity strip (vivijure #292): the studio is single-operator, sends no user_email,
+    # and serves /api/artifact by key with no per-row ownership check. A legacy/hostile job body that
+    # still carries `user_email` is IGNORED here (from_dict never reads it), so a stripped identity
+    # cannot resurface as artifact object metadata. See SECURITY.md.
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "RenderRequest":
         from .config import RenderConfig
         overrides = d.get("render_overrides") if isinstance(d.get("render_overrides"), dict) else {}
         quality_tier = _str(d.get("quality_tier"), "final")
-        ue = d.get("user_email")
         return cls(
             action=_str(d.get("action"), "render"),
             project=_str(d.get("project"), "untitled"),
@@ -277,7 +277,6 @@ class RenderRequest:
             pretrained_loras=d.get("pretrained_loras") if isinstance(d.get("pretrained_loras"), dict) else {},
             process_shot_ids=d.get("process_shot_ids") if isinstance(d.get("process_shot_ids"), list) else None,
             audio_key=_str(d.get("audio_key")) or None,
-            user_email=ue.strip() if isinstance(ue, str) and ue.strip() else None,
             keyframes_only=_bool(d.get("keyframes_only")),
         )
 

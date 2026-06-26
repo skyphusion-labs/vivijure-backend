@@ -12,6 +12,7 @@ import yaml
 
 from vivijure_backend.harness import keys
 from vivijure_backend.harness.handler import HarnessError, Outputs, run_job
+from vivijure_backend.contract import RenderRequest
 from vivijure_backend.harness.models_mirror import mirror_cmd, rclone_conf
 from vivijure_backend.harness.r2 import R2Config
 
@@ -172,25 +173,21 @@ def test_run_job_offloaded_emits_clips_and_manifest(tmp_path):
     assert {k["shot_id"] for k in res["keyframes"]} == {"shot_01", "shot_02"}
 
 
-def test_run_job_stamps_user_email_on_every_artifact(tmp_path):
+def test_run_job_never_stamps_submitter_identity(tmp_path):
+    # Identity strip (#292): the backend must not parse or persist a submitter identity. Even if a
+    # legacy/hostile job body injects `user_email`, from_dict drops it and NO artifact may carry it
+    # as object metadata -- otherwise a stripped identity leaks back into R2 in a single-operator
+    # self-host model. This locks the strip so it cannot silently regress.
     store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"))
-    res = run_job(_job(user_email="conrad@rockenhaus.net",
+    res = run_job(_job(user_email="director@example.com",
                        render_overrides={"finish_offloaded": True}),
                   pipeline=FakePipeline(), store=store, workdir=tmp_path / "work")
-    owner = {"user_email": "conrad@rockenhaus.net"}
-    # every uploaded artifact (trained LoRA, keyframes, clips, manifest) + the state tar carries
-    # the owner tag, so /api/artifact (which 403s a mismatched/absent tag) can serve them back.
     assert store.puts, "expected uploads"
-    untagged = {k: store.meta[k] for k in store.puts if store.meta[k] != owner}
-    assert not untagged, f"these uploads were not owner-stamped: {untagged}"
-    assert store.meta[res["state_key"]] == owner
-
-
-def test_run_job_without_user_email_leaves_artifacts_untagged(tmp_path):
-    store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"))
-    run_job(_job(render_overrides={"finish_offloaded": True}),
-            pipeline=FakePipeline(), store=store, workdir=tmp_path / "work")
-    assert store.puts and all(store.meta[k] is None for k in store.puts)
+    assert all(store.meta[k] is None for k in store.puts), \
+        "no artifact may carry submitter identity metadata after the identity strip"
+    assert store.meta[res["state_key"]] is None
+    # the injected user_email must not survive parsing onto the request
+    assert not hasattr(RenderRequest.from_dict(_job(user_email="x@y.z")), "user_email")
 
 
 def test_run_job_rejects_empty_bundle_key(tmp_path):

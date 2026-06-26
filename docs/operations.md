@@ -146,8 +146,9 @@ the control plane's artifact routes. Project and shot names are slugified to saf
 | Progress snapshot | `renders/<project>/progress/<job_id>.json` | The latest-state snapshot a `/status` route polls. |
 | Models (mirror) | `models/hf-cache/...` | The HF weight mirror the cold start pulls. |
 
-Every uploaded artifact is stamped with `customMetadata.user_email` from the request, so the
-control plane's ownership-gated `/api/artifact` route can serve it back only to its owner.
+Uploaded artifacts carry **no submitter identity**: the studio is single-operator (the identity
+strip, vivijure #292), so the control plane sends no `user_email` and `/api/artifact` serves by key
+with no per-row ownership check. Artifacts are addressed purely by their R2 key (see the layout above).
 
 ## The progress channel
 
