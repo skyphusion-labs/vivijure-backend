@@ -23,7 +23,7 @@ releases are summarized below from that history.
 - **i2v_tier mismatch warning** (`pipeline.py`): emits a `tier_mismatch` progress event when the running GPU card doesn't match the planned i2v tier.
 - Test bundles updated to include fake ref images; 5 new tests. 324 tests total.
 
-## Unreleased
+## [0.2.28] -- 2026-06-27
 
 **security(identity): complete the anti-SaaS identity strip (#292) backend-side (#122).** The
 control plane stripped the submitter-identity primitive (the studio is single-operator: it sends no
