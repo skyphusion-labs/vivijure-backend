@@ -18,12 +18,15 @@ name: Release worker image to GHCR
 # then, after the image is in GHCR, pin RunPod by hand:
 #   python scripts/pin-runpod-template.py --image ghcr.io/skyphusion-labs/vivijure-backend:0.2.26 ...
 #
-# Runner choice: GitHub-hosted ubuntu-latest (NOT a self-hosted fleet box). Per our runner policy
-# public repos build on GitHub-hosted, fork-safe runners. This is a heavy CUDA 12.8 + torch cu128 +
-# diffusers from-scratch build (tens of GB), so the hosted runner needs a disk-cleanup step to fit;
-# see "Free disk space" below. The build is tag-push-only (only a maintainer with push access can
-# create a backend-v* tag -- a fork PR cannot), so it never runs untrusted code; keeping it
-# GitHub-hosted means zero fleet exposure.
+# Runner choice: GitHub-hosted larger runner "heavy-runner" (8-core / 32 GB / 300 GB SSD), NOT a
+# self-hosted fleet box. vivijure-backend is a PUBLIC repo, so a self-hosted fleet runner is off the
+# table (a fork PR could run untrusted code on a fleet box); GitHub-hosted runners are fork-safe.
+# This is a heavy CUDA 12.8 + torch cu128 + diffusers from-scratch build whose image layers + buildx
+# cache exceed the ~150 GB ubuntu-latest provides, so it builds on heavy-runner's 300 GB disk -- no
+# disk-cleanup hack needed. The build is tag-push-only (only a maintainer with push access can create
+# a backend-v* tag -- a fork PR cannot), so it never runs untrusted code; keeping it GitHub-hosted
+# means zero fleet exposure. (heavy-runner is an org larger runner in the Default group with
+# allows_public_repositories=true; note larger-runner minutes are billed even on a public repo.)
 
 on:
   push:
@@ -47,7 +50,7 @@ env:
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
+    runs-on: heavy-runner
     timeout-minutes: 120
     steps:
       - name: Checkout repository
@@ -68,21 +71,6 @@ jobs:
             echo "::error::Tag '${TAG}' is not a backend-vX.Y.Z release tag; nothing to build."
             exit 1
           fi
-
-      # CUDA + torch cu128 + diffusers is a tens-of-GB from-scratch build. ubuntu-latest ships
-      # with ~14GB free; reclaim ~25-30GB by dropping preinstalled toolchains this image never uses.
-      - name: Free disk space
-        run: |
-          set -eu
-          echo "--- before ---"; df -h /
-          sudo rm -rf /usr/share/dotnet || true
-          sudo rm -rf /usr/local/lib/android || true
-          sudo rm -rf /opt/ghc || true
-          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
-          sudo rm -rf /usr/local/share/boost || true
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
-          sudo docker image prune -af || true
-          echo "--- after ---"; df -h /
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
