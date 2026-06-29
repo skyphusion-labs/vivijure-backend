@@ -13,7 +13,8 @@ name: RunPod pod-staging verify + promote
 # an image onto the serverless endpoint IS shipping to prod.
 #
 # SPEND GATE: this is the ONLY workflow that fires GPU $. It runs ONLY on a deliberate manual
-# workflow_dispatch or after a release tag's build completes -- NEVER on a PR or an ordinary push.
+# workflow_dispatch -- NEVER on a PR or an ordinary push. (The auto-chain after a release build is
+# DISABLED until the verify engine exists; see the commented-out workflow_run trigger below.)
 # That trigger IS the spend control, by design. Defence in depth on the pod itself: the harness
 # creates it with a HARD TTL + cost ceiling (auto-stop), so a forgotten debug pod cannot bleed GPU.
 #
@@ -57,11 +58,16 @@ on:
         required: true
         default: false
         type: boolean
-  # Chained path: run after a release build completes (no race -- the image is pushed first). The
-  # job below proceeds only on a successful release run and verifies the just-pushed :latest.
-  workflow_run:
-    workflows: ['Release worker image to GHCR (baked)']
-    types: [completed]
+  # Chained/auto path: DISABLED until the verify engine (up/verify/promote/down in
+  # deploy/runpod_verify.py) is implemented. Re-enabling before the harness exists would hard-crash
+  # at `up` (argparse SystemExit) on every release build -- no pod, no spend, but a misleading red X
+  # (a phantom gate) hanging off the tag. Path A is manual-first: drive the pod by hand via
+  # workflow_dispatch, build the automated gate, THEN restore this block. The job's chained-path
+  # logic (the else branch + the workflow_run clause in `if:`) is left dormant so re-enabling is one
+  # diff: uncomment the three lines below.
+  # workflow_run:
+  #   workflows: ['Release worker image to GHCR (baked)']
+  #   types: [completed]
 
 permissions:
   contents: read
