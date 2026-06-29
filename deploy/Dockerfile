@@ -92,7 +92,10 @@ RUN SITE=$(python -c "import site; print(site.getsitepackages()[0])") \
 # are baked here; ~25KB of inference code only. Source: THUDM/CogVideo (Apache 2.0) commit
 # 7a1af7154511e0ce4e4be8d62faa8c5e5a3532d2, which carries forward the hzwer/Practical-RIFE HDv3
 # lineage (MIT, Megvii Inc.; the HDv3 files were released alongside model weights and were not
-# tracked in the hzwer git repo directly). License: deploy/rife/LICENSE (MIT, Megvii Inc.).
+# tracked in the hzwer git repo directly). Code license: deploy/rife/ ships Apache-2.0 (CogVideo's
+# own modifications) plus the restored Megvii/hzwer MIT lineage -- see deploy/rife/NOTICE. The
+# matching flownet.pkl WEIGHTS are a separate artifact at deploy/licenses/imaginairy/rife/LICENSE
+# (MIT, Megvii Inc.).
 # Supersedes the svjack/CogVideoX-5B-Space curl-fetch (unlicensed, moving ref at VJ_RIFE_REV=main).
 COPY deploy/rife /opt/vivijure/rife
 
