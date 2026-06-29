@@ -1,0 +1,181 @@
+name: RunPod pod-staging verify + promote
+
+# The STAGING GATE before production (docs/release-gate.md). An image reaches the production
+# serverless endpoint ONLY by passing an automated verify on a GPU POD:
+#
+#   build+push (release.yml, on vivijure-bake)  ->  THIS: spin GPU pod on the image -> verify
+#     -> PASS: promote the image onto the prod serverless endpoint, then TERMINATE the pod
+#     -> FAIL: STOP the pod (state preserved for SSH debug), surface the debug handle, FAIL the
+#              build, do NOT promote.
+#
+# WHY A POD, NOT SERVERLESS: a pod is the only place we debug -- shell in, inspect the baked weights,
+# watch the cu128 kernels load, read VRAM. Serverless is PRODUCTION; we never debug there. Promoting
+# an image onto the serverless endpoint IS shipping to prod.
+#
+# SPEND GATE: this is the ONLY workflow that fires GPU $. It runs ONLY on a deliberate manual
+# workflow_dispatch or after a release tag's build completes -- NEVER on a PR or an ordinary push.
+# That trigger IS the spend control, by design. Defence in depth on the pod itself: the harness
+# creates it with a HARD TTL + cost ceiling (auto-stop), so a forgotten debug pod cannot bleed GPU.
+#
+# This control job runs on a STOCK runner (ubuntu-latest): it only drives the RunPod API; the GPU is
+# the POD, not the runner. Tier-aware GPU: H200/B200 for the datacenter bf16 image (full Wan), a
+# cheap consumer GPU for the homelab-lite images.
+#
+# CONTRACT into the verify harness (deploy/runpod_verify.py, owned by the backend lane). This
+# workflow calls exactly these subcommands; keep them stable:
+#   up      --image <ref> --gpu-tier <tier> --ttl-minutes <n> --cost-ceiling-usd <n>
+#               -> create a pod on <image> with a hard auto-stop TTL + cost ceiling; print the pod id
+#                  to $GITHUB_OUTPUT as pod_id=... (and an ssh/debug handle).
+#   verify  --pod <id>      -> run the structured @event assertions + pod-only insight checks on the
+#                              pod; exit 0 on PASS, non-zero on any assertion failure.
+#   promote --image <ref> --endpoint <id>
+#               -> update the prod serverless endpoint/template to <image> (ship to prod).
+#   down    --pod <id> [--terminate | --stop]
+#               -> terminate (PASS path, reclaim $) or stop (FAIL path, preserve for SSH debug).
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag in GHCR to verify (e.g. 0.2.30). Defaults to :latest.'
+        required: false
+        default: latest
+        type: string
+      gpu_tier:
+        description: 'Pod GPU tier. h200/b200 = datacenter bf16 (full Wan); rtx4090 = homelab-lite.'
+        required: true
+        default: h200
+        type: choice
+        options: [h200, b200, rtx4090, rtx3090]
+      ttl_minutes:
+        description: 'Hard pod TTL (auto-stop). Bounds GPU spend even if the job hangs.'
+        required: true
+        default: '30'
+        type: string
+      promote:
+        description: 'On PASS, promote the image onto the prod serverless endpoint.'
+        required: true
+        default: false
+        type: boolean
+  # Chained path: run after a release build completes (no race -- the image is pushed first). The
+  # job below proceeds only on a successful release run and verifies the just-pushed :latest.
+  workflow_run:
+    workflows: ['Release worker image to GHCR (baked)']
+    types: [completed]
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: runpod-verify-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: skyphusion-labs
+  WORKER_IMAGE: vivijure-backend
+  # Prod serverless endpoint promotion target (the vivijure-backend serverless endpoint).
+  PROD_ENDPOINT_ID: t9wcvlxh8rc5la
+  COST_CEILING_USD: '5'
+
+jobs:
+  pod-verify:
+    # Skip the chained path unless the upstream release build actually succeeded.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve image + tier
+        id: cfg
+        run: |
+          set -eu
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.image_tag }}"
+            TIER="${{ inputs.gpu_tier }}"
+            TTL="${{ inputs.ttl_minutes }}"
+            PROMOTE="${{ inputs.promote }}"
+          else
+            # Chained after a release build: verify the freshly pushed :latest on the datacenter tier.
+            TAG="latest"; TIER="h200"; TTL="30"; PROMOTE="true"
+          fi
+          IMG="${REGISTRY}/${OWNER}/${WORKER_IMAGE}:${TAG}"
+          echo "image=${IMG}"   >> "$GITHUB_OUTPUT"
+          echo "tier=${TIER}"   >> "$GITHUB_OUTPUT"
+          echo "ttl=${TTL}"     >> "$GITHUB_OUTPUT"
+          echo "promote=${PROMOTE}" >> "$GITHUB_OUTPUT"
+          echo "Verifying ${IMG} on ${TIER} (TTL ${TTL}m, promote=${PROMOTE})."
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install verify-harness deps
+        run: |
+          pip install --upgrade pip
+          pip install -r deploy/requirements-verify.txt
+
+      # RUNPOD_API_KEY is an encrypted Actions secret (RunPod is an account-wide credential -- not
+      # per-function scopeable -- so one guarded CI secret, never a tracked file).
+      - name: Spin GPU pod on the image (hard TTL + cost ceiling)
+        id: up
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          set -eu
+          : "${RUNPOD_API_KEY:?missing RUNPOD_API_KEY secret}"
+          python deploy/runpod_verify.py up \
+            --image '${{ steps.cfg.outputs.image }}' \
+            --gpu-tier '${{ steps.cfg.outputs.tier }}' \
+            --ttl-minutes '${{ steps.cfg.outputs.ttl }}' \
+            --cost-ceiling-usd "${COST_CEILING_USD}"
+
+      # Verify never fails the job directly; we branch on its result so the FAIL path can preserve the
+      # pod for debug before the build fails.
+      - name: Verify on the pod (structured @event assertions + pod-only insight)
+        id: verify
+        continue-on-error: true
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          set -eu
+          python deploy/runpod_verify.py verify --pod '${{ steps.up.outputs.pod_id }}'
+
+      - name: Promote to prod + terminate pod (PASS)
+        if: ${{ steps.verify.outcome == 'success' }}
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          set -eu
+          if [ "${{ steps.cfg.outputs.promote }}" = "true" ]; then
+            echo "PASS -> promoting ${{ steps.cfg.outputs.image }} onto prod endpoint ${PROD_ENDPOINT_ID}."
+            python deploy/runpod_verify.py promote \
+              --image '${{ steps.cfg.outputs.image }}' --endpoint "${PROD_ENDPOINT_ID}"
+          else
+            echo "PASS -> promote=false; image NOT shipped to prod (verify-only run)."
+          fi
+          python deploy/runpod_verify.py down --pod '${{ steps.up.outputs.pod_id }}' --terminate
+
+      - name: Preserve pod for debug + fail the build (FAIL)
+        if: ${{ steps.verify.outcome != 'success' }}
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          set -eu
+          echo "::error::pod verify FAILED -- NOT promoting. Pod STOPPED (state preserved) for SSH debug."
+          python deploy/runpod_verify.py down --pod '${{ steps.up.outputs.pod_id }}' --stop || true
+          echo "debug pod id: ${{ steps.up.outputs.pod_id }} (its hard TTL auto-stops it -- no GPU bleed)."
+          exit 1
+
+      # Backstop: if the job is cancelled/times out before the branch steps run, stop the pod so the
+      # control plane never leaves it running. (The pod's own hard TTL is the ultimate auto-stop.)
+      - name: Always-stop backstop
+        if: ${{ always() && steps.up.outputs.pod_id != '' }}
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          python deploy/runpod_verify.py down --pod '${{ steps.up.outputs.pod_id }}' --stop || true

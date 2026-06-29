@@ -1,40 +1,44 @@
-name: Release worker image to GHCR
+name: Release worker image to GHCR (baked)
 
-# Port of the (decommissioned-Jenkins) image-build pipeline to GitHub Actions.
-#
-# Mirrors the old Jenkinsfile release mechanics exactly: the image + version come from a git TAG,
-# not a parsed commit subject. One release track:
+# Build + push the BAKED worker image (the "one singular baked image": the curated model set is
+# baked in, so a worker is datacenter-agnostic and pays no R2 cold-pull tax). Image + version come
+# from a git TAG, not a parsed commit subject. One release track:
 #
 #   backend-vX.Y.Z  ->  ghcr.io/skyphusion-labs/vivijure-backend:X.Y.Z (+ :latest)
 #
-# A plain commit/branch push is a NO-OP: this workflow only triggers on backend-v* tags, so an
-# ordinary push to main builds nothing. This pipeline BUILDS + PUSHES only; deploying (pinning the
-# RunPod endpoint template to a built image) is a separate, deliberate, MANUAL step --
-# scripts/pin-runpod-template.py -- so an iteration tag never re-pins the live endpoint by surprise.
+# A plain commit/branch push is a NO-OP: this workflow only triggers on backend-v* tags (or a manual
+# workflow_dispatch). This pipeline BUILDS + PUSHES only. SHIPPING TO PROD IS SEPARATE: an image
+# reaches the production serverless endpoint ONLY by passing the pod-staging verify (.github/
+# workflows/runpod-verify.yml) -- see docs/release-gate.md. An iteration tag never re-pins prod.
 #
-# Release flow (tag the commit you want released, normally current main HEAD):
-#   git push origin main
-#   git tag backend-v0.2.26 && git push origin backend-v0.2.26
-# then, after the image is in GHCR, pin RunPod by hand:
-#   python scripts/pin-runpod-template.py --image ghcr.io/skyphusion-labs/vivijure-backend:0.2.26 ...
-#
-# Runner choice: GitHub-hosted larger runner "heavy-runner" (8-core / 32 GB / 300 GB SSD), NOT a
-# self-hosted fleet box. vivijure-backend is a PUBLIC repo, so a self-hosted fleet runner is off the
+# Runner: the org GitHub-hosted larger runner "vivijure-bake" (32-core / 128 GB / 1200 GB SSD,
+# runner group Default). vivijure-backend is a PUBLIC repo, so a self-hosted fleet runner is off the
 # table (a fork PR could run untrusted code on a fleet box); GitHub-hosted runners are fork-safe.
-# This is a heavy CUDA 12.8 + torch cu128 + diffusers from-scratch build whose image layers + buildx
-# cache exceed the ~150 GB ubuntu-latest provides, so it builds on heavy-runner's 300 GB disk -- no
-# disk-cleanup hack needed. The build is tag-push-only (only a maintainer with push access can create
-# a backend-v* tag -- a fork PR cannot), so it never runs untrusted code; keeping it GitHub-hosted
-# means zero fleet exposure. (heavy-runner is an org larger runner in the Default group with
-# allows_public_repositories=true; note larger-runner minutes are billed even on a public repo.)
+# This build STAGES the curated weight seed (~90 GB fp8 / ~117 GB bf16) from R2, bin-packs it into
+# <10GB layers, builds the CUDA 12.8 + cu128 image with the weights baked in, and pushes. Peak
+# transient disk is ~3x the payload (staged seed + buildkit snapshot + loaded image) + the base
+# stack, i.e. ~290 GB (fp8) / ~370 GB (bf16) -- which is why this needs the 1200 GB runner, NOT the
+# 300 GB heavy-runner the thin image used (bf16 does NOT fit 300 GB; see docs/cold-start-design.md).
+# The build is tag-push / dispatch only (only a maintainer can create a backend-v* tag -- a fork PR
+# cannot), so it never runs untrusted code; keeping it GitHub-hosted means zero fleet exposure.
 
 on:
   push:
     tags:
       - 'backend-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Image version X.Y.Z (manual build; tag builds derive it from the tag).'
+        required: true
+        type: string
+      precision:
+        description: 'Baked weight precision (selects the R2 bake-seed prefix).'
+        required: true
+        default: fp8
+        type: choice
+        options: [fp8, bf16]
 
-# Only the tag-push event reaches here. Guard the version parse in the job so a malformed tag
-# (e.g. backend-vfoo) is a clean no-op rather than a bad image push.
 permissions:
   contents: read
   packages: write
@@ -47,39 +51,103 @@ env:
   REGISTRY: ghcr.io
   OWNER: skyphusion-labs
   WORKER_IMAGE: vivijure-backend
+  R2_BUCKET: vivijure
+  # Bump when the baked model set changes so a deploy's workers re-stamp the version. Paired with a
+  # re-staged seed; written into the image's .vj-baked marker.
+  VJ_MODEL_VERSION: '1'
 
 jobs:
   build-and-push:
-    runs-on: heavy-runner
-    timeout-minutes: 120
+    runs-on: vivijure-bake
+    timeout-minutes: 180
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Derive image version from tag
-        id: ver
+      - name: Resolve version + precision
+        id: cfg
         run: |
           set -eu
-          # github.ref_name is the tag name on a tag push, e.g. "backend-v0.2.25".
-          TAG="${GITHUB_REF_NAME}"
-          echo "ref tag: ${TAG}"
-          if [[ "${TAG}" =~ ^backend-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            VER="${BASH_REMATCH[1]}"
-            echo "worker version: ${VER}"
-            echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            VER="${{ inputs.version }}"
+            PREC="${{ inputs.precision }}"
           else
-            echo "::error::Tag '${TAG}' is not a backend-vX.Y.Z release tag; nothing to build."
-            exit 1
+            # github.ref_name is the tag on a tag push, e.g. "backend-v0.2.30".
+            TAG="${GITHUB_REF_NAME}"
+            if [[ "${TAG}" =~ ^backend-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+              VER="${BASH_REMATCH[1]}"
+            else
+              echo "::error::Tag '${TAG}' is not a backend-vX.Y.Z release tag; nothing to build."
+              exit 1
+            fi
+            # Precision for a tag build comes from a repo variable (default fp8). Set vars.VJ_BAKE_PRECISION=bf16 to cut a bf16 release.
+            PREC="${{ vars.VJ_BAKE_PRECISION }}"
+            [ -n "${PREC}" ] || PREC="fp8"
           fi
+          case "${PREC}" in fp8|bf16) ;; *) echo "::error::precision must be fp8 or bf16"; exit 1;; esac
+          echo "version=${VER}"   >> "$GITHUB_OUTPUT"
+          echo "precision=${PREC}" >> "$GITHUB_OUTPUT"
+          echo "seed_prefix=bake-seed-${PREC}/" >> "$GITHUB_OUTPUT"
+          echo "Building ${WORKER_IMAGE}:${VER} (precision=${PREC}, seed=bake-seed-${PREC}/)."
+
+      - name: Install rclone
+        run: curl -fsSL https://rclone.org/install.sh | sudo bash
+
+      # R2 credentials arrive as encrypted Actions secrets (NEVER a tracked file). A read-only,
+      # per-CI R2 token scoped to the vivijure bucket is the right credential here (per-function key);
+      # set R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT as repo or org Actions secrets.
+      - name: Configure rclone for R2
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        run: |
+          set -eu
+          : "${R2_ACCESS_KEY_ID:?missing R2_ACCESS_KEY_ID secret}"
+          : "${R2_SECRET_ACCESS_KEY:?missing R2_SECRET_ACCESS_KEY secret}"
+          : "${R2_ENDPOINT:?missing R2_ENDPOINT secret}"
+          mkdir -p "$HOME/.config/rclone"
+          umask 077
+          {
+            printf '[r2]\n'
+            printf 'type = s3\n'
+            printf 'provider = Cloudflare\n'
+            printf 'access_key_id = %s\n' "$R2_ACCESS_KEY_ID"
+            printf 'secret_access_key = %s\n' "$R2_SECRET_ACCESS_KEY"
+            printf 'endpoint = %s\n' "$R2_ENDPOINT"
+            printf 'acl = private\nno_check_bucket = true\n'
+          } > "$HOME/.config/rclone/rclone.conf"
+          echo "rclone configured (R2 creds present)."
+
+      # Stage the curated, precision-selected bake seed, then rebuild the HF-cache symlinks from the
+      # .rclonelink markers rclone leaves (same convention as the runtime R2 mirror).
+      - name: Stage bake seed from R2
+        run: |
+          set -eu
+          PREFIX='${{ steps.cfg.outputs.seed_prefix }}'
+          echo "Staging r2:${R2_BUCKET}/${PREFIX} -> ./_seed ..."
+          rclone copy "r2:${R2_BUCKET}/${PREFIX}" ./_seed \
+            --links --transfers 16 --checkers 16 \
+            --multi-thread-streams 8 --multi-thread-cutoff 100M \
+            --stats 30s --stats-one-line
+          python deploy/bake_layers.py reconstruct-symlinks --root ./_seed
+          du -sh ./_seed || true
+
+      # Bin-pack the seed into <10GB layers. HARD GATE (pre-build): any single file >=10GB is fatal.
+      - name: Bin-pack seed into <10GB layers
+        run: |
+          set -eu
+          python deploy/bake_layers.py bin --src ./_seed --out deploy/seed-bins --bins 24 --ceiling-gb 9.0
+          cat deploy/seed-bins/bake-bins.json
+          # Free the pre-bin staging copy; the bins (hardlinked) are what the build context needs.
+          rm -rf ./_seed
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # GHCR auth uses the workflow's built-in GITHUB_TOKEN, not a long-lived PAT. The package
-      # ghcr.io/skyphusion-labs/vivijure-backend is already linked to THIS repo, so a GITHUB_TOKEN
-      # with packages:write (granted in the permissions block above) can push to it. This is the
-      # least-privilege path: nothing to provision or rotate, and the credential's blast radius is
-      # one workflow run -- strictly better than the old Jenkins ghcr-skyphusion PAT.
+      # GHCR auth uses the workflow's built-in GITHUB_TOKEN (packages:write above), not a long-lived
+      # PAT. The package is linked to THIS repo, so GITHUB_TOKEN can push it -- least-privilege, blast
+      # radius of one workflow run.
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -87,10 +155,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Build context is the repo ROOT (so `COPY src/...` and `COPY deploy/...` resolve);
-      # the Dockerfile lives in deploy/. Load the image into the local docker daemon (not pushed
-      # yet) so the import smoke can run against it before we publish.
-      - name: Build worker image
+      # Build context is the repo ROOT (so COPY src/, COPY deploy/seed-bins/... resolve). Load into the
+      # local docker daemon (not pushed yet) so the per-layer gate + import smoke run before publish.
+      - name: Build baked worker image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -99,26 +166,38 @@ jobs:
           pull: true
           load: true
           push: false
+          build-args: |
+            VJ_BAKE_PRECISION=${{ steps.cfg.outputs.precision }}
+            VJ_MODEL_VERSION=${{ env.VJ_MODEL_VERSION }}
           tags: |
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WORKER_IMAGE }}:${{ steps.ver.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WORKER_IMAGE }}:${{ steps.cfg.outputs.version }}
             ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WORKER_IMAGE }}:latest
 
-      # Import smoke runs AFTER build and BEFORE push: a missing runtime dep (gfpgan, basicsr, rife,
-      # av) fails here in seconds rather than after a 33-min GPU render. CPU-only; no GPU / weights.
-      - name: Import smoke (CPU, no GPU / weights)
+      # Authoritative per-layer gate (post-build): assert no image layer is >=10GB, so GHCR will accept
+      # the push. The bin step predicts this; this confirms it on the real image.
+      - name: Verify image layers under the 10GB GHCR ceiling
         run: |
           set -eu
-          IMG="${REGISTRY}/${OWNER}/${WORKER_IMAGE}:${{ steps.ver.outputs.version }}"
+          IMG="${REGISTRY}/${OWNER}/${WORKER_IMAGE}:${{ steps.cfg.outputs.version }}"
+          python deploy/bake_layers.py verify-image --image "${IMG}" --ceiling-gb 10.0
+
+      # Import smoke AFTER build, BEFORE push: a missing runtime dep fails here in seconds rather than
+      # after a 33-min GPU render. CPU-only; touches no GPU. (The baked weights' RENDER correctness is
+      # validated separately on a GPU pod by runpod-verify.yml -- the staging gate before prod.)
+      - name: Import smoke (CPU, no GPU)
+        run: |
+          set -eu
+          IMG="${REGISTRY}/${OWNER}/${WORKER_IMAGE}:${{ steps.cfg.outputs.version }}"
           docker run --rm "${IMG}" \
             conda run --no-capture-output -n vivijure \
             python /opt/vivijure/smoke_imports.py
 
-      # Smoke passed; publish both tags. Push the already-built local images (no rebuild).
       - name: Push :X.Y.Z and :latest to GHCR
         run: |
           set -eu
           IMG="${REGISTRY}/${OWNER}/${WORKER_IMAGE}"
-          docker push "${IMG}:${{ steps.ver.outputs.version }}"
+          docker push "${IMG}:${{ steps.cfg.outputs.version }}"
           docker push "${IMG}:latest"
-          echo "Pushed ${WORKER_IMAGE}:${{ steps.ver.outputs.version }} and :latest to GHCR."
-          echo "Deploy is SEPARATE + MANUAL: scripts/pin-runpod-template.py pins RunPod to a built image."
+          echo "Pushed ${WORKER_IMAGE}:${{ steps.cfg.outputs.version }} and :latest to GHCR."
+          echo "PROMOTION TO PROD IS SEPARATE: runpod-verify.yml verifies on a GPU pod (staging), then"
+          echo "promotes the passing image onto the production serverless endpoint. See docs/release-gate.md."
