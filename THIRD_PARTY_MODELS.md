@@ -39,6 +39,11 @@ is what we redistribute:
   module): MIT, Copyright (c) Megvii Inc. Upstream:
   https://github.com/hzwer/ECCV2022-RIFE (`LICENSE`). The model card and the loader
   comment both record these weights as MIT and redistribution-clean.
+  The inference code (`deploy/rife/`) is the HDv3 package from THUDM/CogVideo (Apache 2.0)
+  commit `7a1af7154511e0ce4e4be8d62faa8c5e5a3532d2`, which carries forward the
+  hzwer/Practical-RIFE HDv3 lineage. License for the inference code: `deploy/rife/LICENSE`
+  (MIT, Megvii Inc.). The HDv3 inference files were distributed alongside hzwer model
+  weights and were not committed to the hzwer tracked repos directly.
 - **GFPGAN** (`GFPGANv1.4.pth`): Apache-2.0, Copyright (C) 2021 THL A29 Limited (a
   Tencent company). Upstream: https://github.com/TencentARC/GFPGAN (`LICENSE`). The
   shipped LICENSE is the full upstream file, which is Apache-2.0 plus the upstream
