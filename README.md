@@ -23,16 +23,16 @@ them.
         |                      |                       |
         v                      v                       v
   vivijure-local-        vivijure-backend         cloud i2v modules
-  backend                (RunPod serverless)      (sora / veo / kling /
-  your own GPU,          Wan2.2-A14B,              hailuo / seedance /
-  LTX-Video, 16GB Ada    B200 / H200               vidu / alibaba-wan)
+  backend (two tiers)    (RunPod serverless)      (sora / veo / kling /
+  your own GPU:          Wan2.2-A14B,              hailuo / seedance /
+  LTX 16GB / Cog 24GB    B200 / H200               vidu / alibaba-wan)
 
   finish modules (any rung): vivijure-musetalk (lip-sync),
   vivijure-upscale (video upscale), vivijure-audio-upscale (speech enhance)
 ```
 
 The render backend is a **ladder you choose your rung on**: self-host on your own Ada-class GPU
-(`vivijure-local-backend`, LTX-Video), escalate to a rented datacenter GPU running the same stack
+(`vivijure-local-backend`, LTX or CogVideoX, two homelabber tiers), escalate to a rented datacenter GPU running the same stack
 (`vivijure-backend`, Wan2.2 on RunPod), or hand a shot to a cloud motion API -- your call, per shot.
 The full engine / tier / GPU-class matrix is in [docs/render-backends.md](docs/render-backends.md).
 
@@ -41,7 +41,7 @@ The full engine / tier / GPU-class matrix is in [docs/render-backends.md](docs/r
 | [slate](https://github.com/skyphusion-labs/slate) | Collaborative AI screenwriter assistant for Discord. Friends and Slate co-author a film in-channel; Slate then submits it to the studio entirely through the vivijure JSON API. |
 | [vivijure](https://github.com/skyphusion-labs/vivijure) | The studio control plane (a Cloudflare Worker): planner, cast, and render UI plus the JSON API. A thin module host that orchestrates render jobs behind a typed hook contract. |
 | [vivijure-backend](https://github.com/skyphusion-labs/vivijure-backend) | The GPU render backend (RunPod serverless): SDXL keyframes, Wan image-to-video, and ffmpeg assembly. The half that turns a storyboard bundle into a film. |
-| [vivijure-local-backend](https://github.com/skyphusion-labs/vivijure-local-backend) | The self-host render backend: LTX-Video image-to-video on your own Ada-class GPU (RTX 4060 Ti 16GB floor). Same `i2v_clip` contract as the datacenter backend, so the control plane drives either door. |
+| [vivijure-local-backend](https://github.com/skyphusion-labs/vivijure-local-backend) | The self-host render backend, two homelabber tiers on your own Ada GPU: LTX-Video (16GB floor) and CogVideoX (24GB-class). Same `i2v_clip` contract as the datacenter backend, so the control plane drives either door. |
 | [vivijure-musetalk](https://github.com/skyphusion-labs/vivijure-musetalk) | MuseTalk audio-driven lip-sync GPU module (finish-class). Syncs a character's mouth to dialogue audio. |
 | [vivijure-upscale](https://github.com/skyphusion-labs/vivijure-upscale) | Real-ESRGAN CUDA video-upscale GPU module (finish-class). Raises the assembled film's resolution. |
 | [vivijure-audio-upscale](https://github.com/skyphusion-labs/vivijure-audio-upscale) | CUDA speech-audio enhancement (resemble-enhance) GPU module. The GPU half of the cost-aware audio finish path. |

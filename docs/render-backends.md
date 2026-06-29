@@ -14,8 +14,10 @@ picked. It is reproducible from this page alone.
 **Self-host first. Escalate only if you choose to, and only as far as you choose.**
 
 - **Rung 0 -- your own GPU.** Run the whole pipeline on your own Ada-class card via
-  `vivijure-local-backend`. No subscription, no account wall, no metering. You bring the GPU and the
-  keys; the studio brings the pipeline. This is the default the project is built around.
+  `vivijure-local-backend`. Two engines live on this rung: **LTX-Video** (the light, fast default
+  that fits the 16 GB floor) and **CogVideoX** (the higher-fidelity option when your card has the
+  headroom). No subscription, no account wall, no metering. You bring the GPU and the keys; the
+  studio brings the pipeline. This is the default the project is built around.
 - **Rung 1 -- rent a bigger GPU, still your stack.** Point the `own-gpu` module at a RunPod
   serverless endpoint running `vivijure-backend` (the datacenter Wan2.2 engine). Same code, same
   contract, your RunPod account and keys. You rent seconds of a B200, you do not rent a SaaS.
@@ -34,7 +36,7 @@ flowchart TD
     CP -->|motion.backend hook| LADDER
     subgraph LADDER["the sovereignty ladder -- your call, per shot"]
         direction TB
-        R0["Rung 0: your own GPU<br/>vivijure-local-backend -- LTX-Video<br/>Ada, RTX 4060 Ti 16GB floor"]
+        R0["Rung 0: your own GPU<br/>vivijure-local-backend, two tiers (Ada)<br/>T1 LTX-Video 16GB . T2 CogVideoX 24GB"]
         R1["Rung 1: rented GPU, your stack<br/>vivijure-backend -- Wan2.2-A14B<br/>Blackwell H200/B200 on RunPod"]
         R2["Rung 2: cloud motion API<br/>sora / veo / kling / hailuo / seedance / vidu / wan<br/>your account, your key"]
         R0 -.->|escalate if you choose| R1
@@ -47,17 +49,32 @@ flowchart TD
 | | Rung 0 -- local | Rung 1 -- datacenter | Rung 2 -- cloud API |
 |---|---|---|---|
 | **Repo** | `vivijure-local-backend` | `vivijure-backend` | control-plane modules (in `vivijure`) |
-| **Engine** | LTX-Video | Wan2.2-A14B (two-expert MoE) | provider model (Sora, Veo, Kling, ...) |
+| **Engine** | LTX-Video + CogVideoX (two tiers, below) | Wan2.2-A14B (two-expert MoE) | provider model (Sora, Veo, Kling, ...) |
 | **GPU class** | Ada (consumer) | Blackwell (datacenter) | provider-hosted |
 | **CUDA arch** | sm_89 / cu124 | sm_120 / cu128 | n/a |
-| **VRAM floor** | RTX 4060 Ti **16 GB** | H200 / B200 (141 GB+) | n/a |
+| **VRAM target** | 16 GB (LTX) / 24 GB-class (CogVideoX) | H200 / B200 (141 GB+) | n/a |
 | **Where it runs** | your box, via tunnel | RunPod serverless (yours) | provider cloud |
-| **License posture** | LTX Open Weights (free commercial < $10M) | Apache/community model weights | provider terms |
-| **Next tier up** | CogVideoX (future `cogvideo-local`) | -- (this is the quality ceiling) | -- |
+| **License posture** | LTX Open Weights (< $10M); CogVideoX (2B Apache, 5B register) | Apache/community model weights | provider terms |
+| **Escalation** | rent (Rung 1) or call (Rung 2) | the quality ceiling | swap provider/model |
 
 The datacenter Wan2.2 engine is the **quality ceiling** and never runs at home: it is a ~28B
-two-expert MoE that needs H200+ (even an H100-80GB OOMs). A serious homelabber who wants more than a
-16 GB card delivers escalates to Rung 1 (rent it) or Rung 2 (call it), not to "run Wan on my 4060."
+two-expert MoE that needs H200+ (even an H100-80GB OOMs). A serious homelabber who wants more than
+the local rung delivers escalates to Rung 1 (rent it) or Rung 2 (call it), not to "run Wan on my 4060."
+
+### Rung 0: the two homelabber target tiers
+
+Self-host is itself a two-tier ladder, so a homelabber picks the rung their card fits:
+
+| Local tier | Engine | GPU target | Character |
+|---|---|---|---|
+| **Tier 1 -- entry** | LTX-Video | Ada, RTX 4060 Ti **16 GB** floor | lightest real i2v, few-step distilled, sub-minute class; the fast default |
+| **Tier 2 -- higher** | CogVideoX | Ada, **24 GB-class** headroom | higher fidelity (strong first-frame identity + coherent motion + text control), slower |
+
+Tier 1 (LTX) is the validated floor (peak ~10.4 GB on a 16 GB card). Tier 2 (CogVideoX) is the
+higher-quality local option for cards with the headroom; it can run tighter but trades a lot of speed
+(community reports ~15 min/clip on a 12-16 GB card), so 24 GB-class is the comfortable target. Both
+are self-host on your own Ada silicon -- Tier 2 is "more fidelity on a bigger card," not "leave your
+box." The exact ceilings per tier are benchmark-finalized on real silicon, same as the LTX numbers below.
 
 ## Quality tiers (the same three names, honest per rung)
 
@@ -75,7 +92,7 @@ declare, so every backend keeps the same enum; the honesty is in the mapping, no
 | `standard` | Hyper-SD 8-step | full 20-step + EasyCache | interpolate 2x | H200 |
 | `final` | full 30-step | full 40-step + MixCache | interpolate 2x + face restore | B200 |
 
-**Rung 0 -- local (`vivijure-local-backend`, LTX-Video, validated on a 16 GB Ada card, peak ~10.4 GB):**
+**Rung 0, Tier 1 -- local LTX (`vivijure-local-backend`, validated on a 16 GB Ada card, peak ~10.4 GB):**
 
 | Tier | Model | Steps | Resolution | Max frames | Intent |
 |---|---|---|---|---|---|
@@ -83,9 +100,10 @@ declare, so every backend keeps the same enum; the honesty is in the mapping, no
 | `standard` | LTX-Video (base) | 40 | 704x512 | 121 (~5s @ 24fps) | the comfortable middle |
 | `final` | LTX-Video (base) | 50 | 768x512 | 121 | the card's honest ceiling |
 
-(Full local rationale -- why LTX over CogVideoX / SVD / AnimateDiff on a 16 GB card -- is in
-`vivijure-local-backend/docs/i2v-model-selection.md`. CogVideoX-5B is the quality leader but ~15
-min/clip on a 12-16 GB card, so it is the planned next-tier-up module, not the default.)
+Tier 2 (CogVideoX) maps the same three tier names at higher fidelity on a 24 GB-class card; its
+per-tier ceilings are benchmark-pending. (Full local rationale -- why LTX is the entry tier and
+CogVideoX the higher one, over SVD / AnimateDiff -- is in
+`vivijure-local-backend/docs/i2v-model-selection.md`.)
 
 ## One contract, either door
 
