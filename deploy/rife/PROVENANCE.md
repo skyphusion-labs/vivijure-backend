@@ -52,8 +52,11 @@ blob SHA-1s at that revision (verify with `git hash-object <file>`):
 
 ## Modifications
 
-**None.** The `.py` files are vendored verbatim, unmodified, at the pinned
-revision. No source edits are made, so Apache-2.0 Section 4(b) ("carry prominent
+**None by us.** The `.py` files are vendored verbatim, unmodified by
+skyphusion-labs, at the pinned revision. (Note: the upstream CogVideo copy is
+itself a modified redistribution of the original hzwer/Megvii RIFE code; those
+are CogVideo's Apache-2.0 changes, distinct from our verbatim vendoring. See
+NOTICE.) No source edits are made, so Apache-2.0 Section 4(b) ("carry prominent
 notices stating that You changed the files") does not apply. If any vendored file
 is ever edited, add a prominent change notice to that file and update this
 section in the same change.

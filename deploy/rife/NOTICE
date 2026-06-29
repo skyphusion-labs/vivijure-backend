@@ -16,6 +16,16 @@ Two layers of attribution apply to this code.
    license text is in ./LICENSE. CogVideo ships no NOTICE file of its own;
    this NOTICE is authored by skyphusion-labs for the vendored subset.
 
+   These files are CogVideo's redistribution of the RIFE reference code and
+   include modifications made by the CogVideo team relative to the original
+   hzwer/Megvii sources (for example, warplayer.py differs from the hzwer
+   original). Those modifications are CogVideo's own work of authorship,
+   licensed under Apache-2.0. Because the vendored files therefore carry both
+   CogVideo's Apache-2.0 contributions AND the underlying Megvii MIT code, the
+   Apache-2.0 license (./LICENSE) is the governing license for this directory
+   as received, and the Megvii MIT notice (below) is preserved alongside it.
+   Shipping the MIT text alone would be insufficient.
+
 2. Original authorship of the RIFE algorithm and reference code (MIT)
 --------------------------------------------------------------------
    Copyright (c) 2021 hzwer (Practical-RIFE / ECCV2022-RIFE)
