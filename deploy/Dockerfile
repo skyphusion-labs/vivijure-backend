@@ -167,6 +167,11 @@ RUN printf 'baked_utc=%s\nprecision=%s\nmodel_version=%s\n' \
         > /opt/models/.vj-baked \
     && echo "bake: wrote $VJ_MODELS_ROOT/.vj-baked ($(tr '\n' ' ' < /opt/models/.vj-baked))"
 
+# Third-party model licenses (Apache-2.0 Sec 4(b), MIT, CreativeML RAIL++-M). Baked alongside
+# the weights so the image is redistribution-compliant by construction. Full license text at
+# /opt/models/licenses/<repo_id>/LICENSE; manifest: THIRD_PARTY_MODELS.md in the repo root.
+COPY deploy/licenses /opt/models/licenses
+
 # Our package. src/ layout -> /opt/vivijure/vivijure_backend, on PYTHONPATH.
 WORKDIR /opt/vivijure
 COPY src/vivijure_backend /opt/vivijure/vivijure_backend
