@@ -1,0 +1,49 @@
+RIFE frame-interpolation inference code (vendored)
+==================================================
+
+This directory vendors the RIFE (Real-Time Intermediate Flow Estimation)
+HDv3 inference code used by the vivijure-backend finishing stage. It is
+redistributed inside the public image ghcr.io/skyphusion-labs/vivijure-backend.
+
+Two layers of attribution apply to this code.
+
+1. Immediate redistribution source (governing license: Apache-2.0)
+------------------------------------------------------------------
+   Copyright 2024 CogVideo Model Team @ Zhipu AI
+
+   The files here were taken from the CogVideo repository, which distributes
+   this RIFE inference code under the Apache License, Version 2.0. The full
+   license text is in ./LICENSE. CogVideo ships no NOTICE file of its own;
+   this NOTICE is authored by skyphusion-labs for the vendored subset.
+
+   These files are CogVideo's redistribution of the RIFE reference code and
+   include modifications made by the CogVideo team relative to the original
+   hzwer/Megvii sources (for example, warplayer.py differs from the hzwer
+   original). Those modifications are CogVideo's own work of authorship,
+   licensed under Apache-2.0. Because the vendored files therefore carry both
+   CogVideo's Apache-2.0 contributions AND the underlying Megvii MIT code, the
+   Apache-2.0 license (./LICENSE) is the governing license for this directory
+   as received, and the Megvii MIT notice (below) is preserved alongside it.
+   Shipping the MIT text alone would be insufficient.
+
+2. Original authorship of the RIFE algorithm and reference code (MIT)
+--------------------------------------------------------------------
+   Copyright (c) 2021 hzwer (Practical-RIFE / ECCV2022-RIFE)
+   Copyright (c) Megvii Inc.
+
+   The RIFE architecture and reference implementation originate with hzwer
+   and Megvii Inc. under the MIT License (ECCV2022-RIFE / Practical-RIFE).
+   The CogVideo copy carries no in-file copyright header, so that MIT notice
+   is restored here for completeness and is reproduced in full in
+   ./LICENSE.RIFE-MIT. The MIT copyright notice is preserved as that license
+   requires.
+
+Provenance, exact source revision, and the unmodified-vendoring statement
+are recorded in ./PROVENANCE.md.
+
+Relationship to the RIFE model weights
+--------------------------------------
+This is INFERENCE CODE only; no model weights are vendored here. The RIFE
+network weights (flownet.pkl) are a separate artifact with their own MIT
+(Megvii Inc.) attribution recorded at
+deploy/licenses/imaginairy/rife/LICENSE and in THIRD_PARTY_MODELS.md.

@@ -6,9 +6,20 @@ fan-out, and which structural fix to take. This is the decision doc the 0.2.20 t
 weighs **preloaded network volumes** vs **bake-into-image** vs **pre-warm pool** vs **staged
 cold-starts** with numbers instead of vibes.
 
-> **Status:** proposal. Phase A (instrument) shipped in 0.2.20. **Recommendation: preloaded
-> per-datacenter network volumes** (Option D) -- they remove the cold-mirror entirely for cents
-> on the dollar versus a warm GPU. The R2 mirror stays as the universal fallback.
+> **Status: DECIDED (revised 2026-06-29) -- BAKE THE WEIGHTS INTO THE IMAGE (Option A), at
+> half precision.** The original recommendation (preloaded per-datacenter network volumes, Option D)
+> is NOT taken. Two things moved that the first pass did not have: (1) **half-precision weights** --
+> the i2v MoE drops to half size and the curated set drops the dead-weight repos, so the baked set is
+> ~90 GB (fp8, prod-only) / ~87 GB (the self-contained bf16, after a free fp32->bf16 re-cast of the
+> experts -- they ship FP32), not the 223 GB that made baking look unwieldy; (2) a
+> **1200 GB GitHub-hosted build runner** (`vivijure-bake`, 32-core/128 GB/1200 GB) that builds the
+> bf16 set with disk headroom. A baked worker carries its weights, so it is **datacenter-agnostic**
+> (no per-DC volume pinning it to a provisioned region -- that pinning throttled spill to free GPUs
+> elsewhere) and pays **no R2 cold-pull tax and no R2 egress at all**. Sequencing: **fp8 ships
+> first** (smaller, proven CPU-quantize); **bf16 is a precision swap** on the same runner once
+> validated. The R2 mirror is **demoted to the fallback** for a non-baked/legacy image (the
+> `.vj-baked` marker selects the path). See "Recommendation (sequenced)" below for the revised plan
+> and "Option A" for why it is now the structural fix; Option D's analysis is kept for the record.
 
 ## The problem
 
@@ -83,9 +94,49 @@ Ship the weights in a content-addressed Docker layer instead of mirroring from R
 - **Hybrid bake (base only):** bake the stable 55 GB base into its own layer (it changes rarely),
   keep the 168 GB Wan on lazy R2. But this saves the *smaller* half (88 s) and leaves the dominant
   Wan pull (367 s) untouched, while still shipping a 55 GB image layer. Low leverage for the cost.
-- **Verdict:** **reject for now.** It attacks the cheap half and makes the image unwieldy; baking
-  the expensive half (Wan) is exactly the layer GHCR won't take. Revisit only if telemetry shows
-  hosts re-pulling the *base* image frequently (a different, registry-side problem).
+- **Verdict (original pass): reject for now.** It attacks the cheap half and makes the image
+  unwieldy; baking the expensive half (Wan) is exactly the layer GHCR won't take.
+- **Verdict (REVISED 2026-06-29): TAKE THIS -- it is the structural fix.** Three facts overturn the
+  original reject:
+  - **The "~223 GB" was gross, not what we bake.** The bake ships the *curated, loaded* set, not the
+    raw R2 mirror. Dropping the dead-weight repos (T2V 126 GB, SDXL-base 62 GB, sdxl-turbo 34 GB --
+    all in `DEFAULT_SKIP_REPOS`, never loaded) and trimming to the spec is the first big cut.
+  - **Half precision, and the right half.** Two distinct shrinks, not the same one:
+    - *fp8* (the PARTIAL image, prod-only): the i2v MoE experts quantize to fp8 on CPU
+      (free, no GPU), giving a **~90 GB** fp8 baked set. This is the 0.2.28 prod image. Its FINAL
+      tier still lazy-pulls bf16 from our R2 (see the sovereignty note in docs/release-gate.md), so
+      it is not self-contained.
+    - *bf16 re-cast* (the SELF-CONTAINED public datacenter image): the official
+      Wan2.2-I2V-A14B experts ship as **FP32** on the Hub / in our R2 (confirmed via the safetensors
+      headers; corroborated by the 126 GB raw repo = ~56 GB/expert x2 + encoders). Baking the RAW
+      fp32 experts would be a **~140 GB image (~440 GB build transient)** -- at/over even a 300 GB
+      runner. A one-time **CPU fp32->bf16 re-cast** halves each expert (56->28 GB, ~-53 GiB) at
+      **ZERO quality cost** (the loader casts to bf16 at load anyway), landing the self-contained
+      bf16 image at **~87 GB**. The bake targets the bf16 RE-CAST seed, NOT raw fp32 and NOT the fp8
+      seed. (Baking full bf16 is what kills the R2 final-tier lazy-pull entirely.)
+  - **The GHCR per-layer limit is handled, and the build runner fits comfortably.** GHCR rejects a
+    >=10 GB layer, so the bake bin-packs the curated set into many <10 GB layers
+    (`deploy/bake_layers.py`: pre-build assert + post-build `docker history` gate). Peak BUILD disk
+    is ~3x the payload (staged seed + buildkit snapshot + loaded image) + the base stack, so
+    **~280-290 GB** for either the bf16-recast (~87 GB) or fp8 (~90 GB) image -- which the
+    **1200 GB `vivijure-bake` larger runner** builds at ~4x headroom. On a serverless HOST the baked
+    layers are content-addressed and cached after the first pull per physical host, and a baked
+    worker on a fresh host pulls from GHCR (fast, regional, free egress) instead of mirroring 168 GB
+    from R2. (Serve-side disk is a non-issue: the RunPod worker container disk is 500 GB.)
+  - **It kills the per-DC volume ops AND the R2 egress.** Datacenter-agnostic placement means no
+    volume to provision/refresh per DC (Option D's whole operational burden) and zero R2 cold-pull
+    egress on the common path. The R2 mirror stays only as the fallback for a non-baked image.
+
+  **DISK-BUDGET NOTE (the number that sized the runner):** peak transient build disk is dominated by
+  three coexisting copies of the weight payload -- the staged seed in the build context, the BuildKit
+  snapshot the `COPY` layers write, and the image loaded into the docker daemon for the pre-push
+  smoke -- plus the ~18 GB CUDA/torch/conda base. So peak ~= 3 x payload + 18 GB. With the bf16
+  RE-CAST seed (~87 GB) or the fp8 seed (~90 GB) the peak is **~280-290 GB**; the 1200 GB
+  `vivijure-bake` tier builds that at ~4x headroom. The number that drove the runner choice is the
+  RAW-fp32 contingency: baking un-re-cast fp32 experts is a ~140 GB image / **~440 GB transient**,
+  which does NOT fit a 300 GB runner and only ~1.4x a 600 GB one -- so 1200 GB (~2.7x even on raw
+  fp32, ~4x on the re-cast) is the right-sized, comfortable choice. The re-cast is the primary fix;
+  the runner headroom is the safety margin behind it.
 
 ### B. Pre-warm pool (RunPod active/min workers)
 
@@ -155,24 +206,40 @@ Attack the *contention* specifically (the load-test killer: N workers hammering 
   pull but meaningfully spreads the 16xN concurrent transfers.
 - **Verdict:** **take the jitter** (small code change, low risk); skip true staggering.
 
-## Recommendation (sequenced)
+## Recommendation (sequenced) -- REVISED 2026-06-29
 
-1. **Preloaded per-datacenter network volumes (D)** -- *the structural fix.* Provision one volume
-   in each H200+ datacenter the endpoint scales into, preload the weight set, attach them
-   (one-per-DC), and point `HF_HOME` / `VJ_MODELS_ROOT` at `/runpod-volume`. ~0 s staging in every
-   covered DC, no idle GPU, no R2 contention, for ~$210-315/mo total. The R2 mirror stays as the
-   fallback for any uncovered placement.
-2. **Keep the jitter knob (C) as the fallback's safety net** -- *small code, low risk.* A bounded
-   random pre-mirror sleep in `ensure_models` (env-tunable, default 0 = off) so that *if* a worker
-   ever falls back to the R2 mirror in an uncovered DC during a fan-out, the egress spike is still
-   de-staggered. Cheap insurance, not the main act.
-3. **Do NOT pre-warm (B)** -- ~$3,600/mo per idle H200 buys one hot worker; a volume makes a whole
-   DC hot for ~$21/mo. Wrong place to spend.
-4. **Do NOT bake (A)** -- the expensive half (Wan, 168 GB) won't fit GHCR and the cheap half isn't
-   worth a 55 GB image. Revisit only on registry-pull evidence.
+The structural fix is now **A (bake), at half precision**, not D (volumes). The pivot: half-precision
++ the curated set make the image fit, the 1200 GB `vivijure-bake` runner builds it, and
+datacenter-agnostic placement removes the per-DC volume ops AND the R2 egress entirely.
 
-This keeps the lazy split + prefetch + R2-mirror correctness exactly as-is, and layers preloaded
-volumes on top so the common path -- and the fan-out path -- start hot, at storage prices.
+1. **Bake the curated model set into the image (A) -- the structural fix.** fp8 first
+   (~90 GB baked, prod-only); the self-contained bf16 RE-CAST image (~87 GB, fp32->bf16) is the
+   public datacenter target once it validates on a GPU pod.
+   The bake stages a curated, precision-selected seed from R2, bin-packs it into <10 GB layers
+   (`deploy/bake_layers.py` + the release workflow on `vivijure-bake`), writes the `.vj-baked`
+   marker, and ships. `harness/models_mirror` short-circuits volume + R2 when the marker is present.
+   Result: **datacenter-agnostic, ~0 s staging on a warm host, no R2 egress, no per-DC ops.**
+2. **R2 mirror -- DEMOTED to fallback (kept, not deleted).** A non-baked / legacy image (no
+   `.vj-baked`) still mirrors from R2 exactly as before, so correctness degrades gracefully. The
+   lazy split + prefetch + symlink reconstruction all stay as-is for that path.
+3. **Keep the jitter knob (C) as the fallback's safety net** -- *small code, low risk.* A bounded
+   random pre-mirror sleep in `ensure_models` (env-tunable, default 0 = off) so an uncovered
+   fallback fan-out still de-staggers its R2 egress. Cheap insurance; the bake is the main act.
+4. **Do NOT pre-warm (B)** -- ~$3,600/mo per idle H200 buys one hot worker; the bake makes *every*
+   worker on *every* host start hot for the price of GHCR storage + a build runner's minutes.
+5. **Do NOT provision network volumes (D)** -- superseded. Its per-DC provisioning/refresh burden
+   and R2-preload egress are exactly what the bake removes; volumes also re-pin placement to
+   provisioned DCs (the throttle we are escaping). The analysis above is kept for the record.
+
+This keeps the lazy split + prefetch + R2-mirror correctness intact as the fallback, and makes the
+baked image the hot common path -- on every host, in every datacenter, with no R2 egress.
+
+> **Build + ship pipeline (see `deploy/`, the release + verify workflows, and
+> `docs/release-gate.md`):** `release.yml` builds + pushes the baked image on `vivijure-bake`
+> (stage seed -> reconstruct symlinks -> bin-pack -> build -> per-layer gate -> CPU import smoke ->
+> push). `runpod-verify.yml` is the **staging gate**: it spins a GPU **pod** on the image, runs the
+> structured-`@event` verify, and **only a passing image is promoted onto the production serverless
+> endpoint**. Pod = staging/debug; serverless = production.
 
 ## Open questions to settle before building
 

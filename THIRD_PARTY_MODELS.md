@@ -38,7 +38,12 @@ is what we redistribute:
 - **RIFE** (`flownet.pkl`, the ECCV2022-RIFE HDv3 weights vendored as the `rife`
   module): MIT, Copyright (c) Megvii Inc. Upstream:
   https://github.com/hzwer/ECCV2022-RIFE (`LICENSE`). The model card and the loader
-  comment both record these weights as MIT and redistribution-clean.
+  comment both record these weights as MIT and redistribution-clean. The RIFE
+  inference *code* (the importable `rife/` package) is a SEPARATE artifact,
+  vendored at `deploy/rife/` from THUDM/CogVideo at a pinned revision
+  (Apache-2.0, with hzwer/Megvii MIT lineage); see the "Third-party inference
+  code" section below. It is no longer fetched at build time from the
+  unlicensed `svjack/CogVideoX-5B-Space` Space.
 - **GFPGAN** (`GFPGANv1.4.pth`): Apache-2.0, Copyright (C) 2021 THL A29 Limited (a
   Tencent company). Upstream: https://github.com/TencentARC/GFPGAN (`LICENSE`). The
   shipped LICENSE is the full upstream file, which is Apache-2.0 plus the upstream
@@ -125,6 +130,26 @@ You agree not to use the Model or Derivatives of the Model:
     as predicting an individual will commit fraud/crime commitment (e.g. by text
     profiling, drawing causal relationships between assertions made in documents,
     indiscriminate and arbitrarily-targeted use).
+
+## Third-party inference code (not a model weight)
+
+One third-party CODE component is vendored into the image alongside the model
+weights: the RIFE frame-interpolation inference code (the importable `rife/`
+package). It is code, not weights, so it is tracked here separately from the
+model table above.
+
+| Component | Vendored source | Pinned revision | License | Path |
+|---|---|---|---|---|
+| RIFE HDv3 inference code | THUDM/CogVideo (`zai-org/CogVideo`), path `inference/gradio_composite_demo/rife/` | `7a1af7154511e0ce4e4be8d62faa8c5e5a3532d2` | Apache-2.0 (code), with hzwer/Megvii MIT lineage | `deploy/rife/` |
+
+Only the loader import closure (`RIFE_HDv3.py`, `IFNet_HDv3.py`, `warplayer.py`,
+`loss.py`, `__init__.py`) is vendored, byte-for-byte and unmodified. Full
+attribution and reproducibility detail live in `deploy/rife/`: the Apache-2.0
+`LICENSE` (verbatim from the source repo), the restored Megvii/hzwer
+`LICENSE.RIFE-MIT`, the `NOTICE`, and `PROVENANCE.md` (exact source revision,
+the vendored file list with per-file git blob SHA-1s, and the unmodified
+statement). This replaces the previous build-time fetch of the same code from
+the unlicensed `svjack/CogVideoX-5B-Space` Space.
 
 ## Maintenance
 
