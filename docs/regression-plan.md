@@ -1,6 +1,8 @@
 # Vivijure Baked-Image Pod Regression Suite -- Design Plan
 
-**Status:** PLAN -- awaiting Conrad/Mackaye sign-off before implementation.
+**Status:** BUILT -- plan signed off (Conrad's 4 answers below), suite implemented in
+`deploy/runpod_verify.py` (`RegressionConfig` + `evaluate_regression` + `REGRESSION_EVENTS`)
+and tested CPU-only in `tests/test_regression.py`. Pod validation is Task #4 (after the bake).
 **Scope:** extends `deploy/runpod_verify.py` (#131 harness) from a single-render smoke
 to a FULL capability regression that gates both Phase C (serverless promote) and any
 public "it works" claim.
@@ -330,15 +332,19 @@ validated adapter. CAP-5 is not in scope for the current baked-image sprint.
 
 ---
 
-## Open questions / items requiring Conrad sign-off
+## Open questions / items requiring Conrad sign-off -- RESOLVED
 
-1. **16:9 framing assertion**: is a codec-level aspect-ratio probe (ffprobe on the
-   finished clip) required for Phase C, or is it deferred? Adds ~10s of probe work per clip.
-2. **FP8 hard-fail vs warn**: should `i2v_dtype != "float8_e4m3fn"` fail the run or
-   warn? Currently proposed as warn. If Conrad wants a hard fp8 gate, change to fail.
-3. **Audio in CAP-6**: is a synthetic 440Hz sine track acceptable as the audio source to
-   prove the mux path, or does the regression need a real audio file asset?
-4. **CAP-4 GFPGAN face restore**: GFPGAN requires a face in the frame to restore. If the
-   draft-tier i2v clip produces no detectable face (abstract prompt), `face_restored` may
-   be False not due to a bug but due to no face. Mitigation: use a portrait prompt for
-   CAP-4 specifically ("close-up portrait of a person, cinematic"). Flag for decision.
+Conrad's answers (locked 2026-06-29), as built:
+
+1. **16:9 framing assertion**: DEFERRED. No codec-level aspect probe in the suite for the
+   Phase C gate now. (CAP-4 comment marks the deferral; no `cap4` aspect check is emitted.)
+2. **FP8 hard-fail vs warn**: WARN, not hard-fail. PRECISION CHANGE: prod is now **bf16-only**
+   (`bfloat16`); fp8 is dropped off the datacenter path. The suite stays precision-aware
+   (`bak4_precision_valid` passes any `valid_precisions` = {`float8_e4m3fn`, `bfloat16`};
+   `float32` fails), the probe EXPECTS bf16 (`expected_precision`), and a valid-but-different
+   precision records a WARNING that never flips `passed`. The shipping gate run targets bf16.
+3. **Audio in CAP-6**: a synthetic 440Hz sine track is acceptable to prove the mux path; no
+   real audio asset required. `cap6_e2e_audio` asserts `has_audio == True`.
+4. **CAP-4 GFPGAN face restore**: portrait-prompt mitigation adopted ("close-up portrait of a
+   person, cinematic") so GFPGAN has a face to restore; `cap4_finish_face_restored` asserts
+   `face_restored == True`.
