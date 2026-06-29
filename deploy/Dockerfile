@@ -84,23 +84,20 @@ RUN SITE=$(python -c "import site; print(site.getsitepackages()[0])") \
          {} +; \
        done
 
-# RIFE (ECCV2022 HDv3 lineage): not on PyPI, and the upstream GitHub repos do NOT ship an
-# importable `rife/` package (Practical-RIFE's tree is demo/ + model/, no rife/RIFE_HDv3.py). We
-# vendor a complete, self-consistent `rife/` package so `from rife.RIFE_HDv3 import Model`
-# (models.py) resolves on PYTHONPATH. Source: the svjack/CogVideoX-5B-Space HF space, whose rife/
-# package is the ECCV2022-RIFE HDv3 code with clean intra-package relative imports
-# (RIFE_HDv3 -> .IFNet_HDv3 / .warplayer / .loss). This is the SAME RIFE_HDv3/IFNet(c=90) lineage
-# as the seeded varnish flownet.pkl (models mirror -> $VJ_MODELS_ROOT/rife/flownet.pkl), so the
-# state_dict loads without a key mismatch (the loader passes rank=-1 to strip the `module.` prefix).
-# No model weights are baked here; only the ~25KB of inference code. Pinned to a HF revision so the
-# layer is reproducible.
-ARG VJ_RIFE_REPO=https://huggingface.co/spaces/svjack/CogVideoX-5B-Space
-ARG VJ_RIFE_REV=main
-RUN mkdir -p /opt/vivijure/rife \
-    && for f in __init__.py RIFE_HDv3.py IFNet_HDv3.py warplayer.py loss.py; do \
-         curl -fsSL "${VJ_RIFE_REPO}/resolve/${VJ_RIFE_REV}/rife/${f}" -o "/opt/vivijure/rife/${f}"; \
-       done \
-    && touch /opt/vivijure/rife/__init__.py
+# RIFE (ECCV2022 HDv3 lineage): vendored from the build context at deploy/rife/ -- no runtime
+# fetch, immutably pinned. The inference package (RIFE_HDv3.py / IFNet_HDv3.py / warplayer.py /
+# loss.py) implements IFNet with three IFBlock(c=90) blocks, the architecture the flownet.pkl
+# weights expect (models mirror -> $VJ_MODELS_ROOT/rife/flownet.pkl); the loader passes rank=-1
+# to strip the `module.` prefix so the state_dict loads without a key mismatch. No model weights
+# are baked here; ~25KB of inference code only. Source: THUDM/CogVideo (Apache 2.0) commit
+# 7a1af7154511e0ce4e4be8d62faa8c5e5a3532d2, which carries forward the hzwer/Practical-RIFE HDv3
+# lineage (MIT, Megvii Inc.; the HDv3 files were released alongside model weights and were not
+# tracked in the hzwer git repo directly). Code license: deploy/rife/ ships Apache-2.0 (CogVideo's
+# own modifications) plus the restored Megvii/hzwer MIT lineage -- see deploy/rife/NOTICE. The
+# matching flownet.pkl WEIGHTS are a separate artifact at deploy/licenses/imaginairy/rife/LICENSE
+# (MIT, Megvii Inc.).
+# Supersedes the svjack/CogVideoX-5B-Space curl-fetch (unlicensed, moving ref at VJ_RIFE_REV=main).
+COPY deploy/rife /opt/vivijure/rife
 
 # Bake HF repo config files (no weights) into the image and write .no_exist stubs for the 3
 # offline-fatal from_pretrained probes (shard-index + adapter_config). Weights arrive at render
