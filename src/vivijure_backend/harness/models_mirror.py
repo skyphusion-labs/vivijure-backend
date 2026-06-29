@@ -58,6 +58,27 @@ _INCOMPLETE_GLOB = "**/*.incomplete"
 # Written under the models root only after the pull fully succeeds (see module docstring).
 SENTINEL = ".vj-mirror-complete"
 
+# Baked-image marker: present at VJ_MODELS_ROOT/.vj-baked when the model weights are BAKED INTO THE
+# IMAGE (the fp8-diffusers bake; later the bf16 bake). It is written by the Dockerfile at build time,
+# NOT by any pull. When present, every mirror entry point early-returns BEFORE touching the volume
+# resolve or the R2 pull: a baked worker carries its weights, so it is datacenter-agnostic (no network
+# volume pinning it to a provisioned DC) and never pays the R2 cold-pull tax. The R2 mirror stays the
+# fallback ONLY when this marker is absent (a non-baked / legacy image), so this is purely additive.
+# B (bf16-lazy-on-final) is the one exception that still pulls: the FINAL-tier i2v path deliberately
+# fetches bf16 shards from R2 even on a baked worker (see models.ModelServer.i2v_pipeline); that pull
+# is gated on the tier, not on this marker, so the baked default stays pull-free.
+BAKED_SENTINEL = ".vj-baked"
+
+
+def is_baked(env: dict | None = None) -> bool:
+    """True iff the model weights are baked into the image (the BAKED_SENTINEL marker is present at
+    VJ_MODELS_ROOT). Pure: a filesystem check, no I/O beyond stat. Callers use it to skip every
+    volume/R2 path. A baked worker is datacenter-agnostic and never pulls (except B's final-tier
+    bf16 lazy-pull, which is gated on the render tier, not on this)."""
+    e = env if env is not None else os.environ
+    models_root = Path(e.get("VJ_MODELS_ROOT", "/opt/models"))
+    return (models_root / BAKED_SENTINEL).exists()
+
 # Bump this constant (or set VJ_MODEL_VERSION in the worker env) whenever the model set
 # in R2 changes so warm workers re-pull instead of silently using a stale cache.
 _DEFAULT_MODEL_VERSION = "1"
@@ -317,6 +338,14 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     e = env if env is not None else os.environ
     model_version = e.get("VJ_MODEL_VERSION") or _DEFAULT_MODEL_VERSION
 
+    # Baked image: weights are in the image at VJ_MODELS_ROOT; never touch a volume or R2. This is
+    # the fp8-diffusers bake (datacenter-agnostic, no volume pinning, no cold-pull tax). Checked
+    # FIRST so a baked worker short-circuits before the volume-resolve / R2 path entirely.
+    if is_baked(e):
+        log("models_mirror: baked image (.vj-baked present); skipping volume + R2 (weights baked in).")
+        log(_skip_event("baked"))
+        return False
+
     # Preloaded per-datacenter network volume (issue #55 Phase C): if one is mounted and current,
     # read weights straight off it and skip the R2 copy entirely. Falls through to the mirror below
     # on any miss, so the R2 path stays the universal fallback. Repoints HF_HOME/VJ_MODELS_ROOT.
@@ -417,6 +446,13 @@ def ensure_i2v_models(*, env: dict | None = None, log: Callable[[str], None] = p
     models_root = Path(e.get("VJ_MODELS_ROOT", "/opt/models"))
     bucket = e.get("R2_BUCKET", "vivijure")
     sentinel = models_root / I2V_SENTINEL
+
+    # Baked image: the fp8 i2v weights are in the image; never pull. (The B final-tier path that DOES
+    # want bf16 calls the dedicated R2 fetch directly with a tier flag, not this default entry point.)
+    if is_baked(e):
+        log("models_mirror: baked image (.vj-baked present); skipping i2v R2 pull (fp8 weights baked in).")
+        log(_skip_event("baked", event="i2v_mirror_skipped"))
+        return False
 
     # Join the background prefetch thread (if started by start_i2v_prefetch) before checking
     # the sentinel so its result is visible. If the thread failed, fall through to pull normally.

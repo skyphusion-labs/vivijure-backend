@@ -13,6 +13,9 @@ from vivijure_backend.harness.models_mirror import (
     _DEFAULT_MODEL_VERSION,
     _PRELOAD_LOCK,
     SENTINEL,
+    BAKED_SENTINEL,
+    is_baked,
+    ensure_models,
     _acquire_volume_lock,
     _dir_bytes,
     _jitter_seconds,
@@ -424,3 +427,52 @@ def test_overwrites_a_stale_nonsymlink(tmp_path):
     _reconstruct_symlinks(tmp_path, log=lambda *_: None)
     assert (tmp_path / "x.json").is_symlink()
     assert (tmp_path / "x.json").read_text() == "real"
+
+
+
+# --------------------------------------------------------------------------- baked-image early-return
+
+def _baked_root(tmp_path):
+    """A models root that looks BAKED: the .vj-baked marker present, NO R2 creds, NO volume."""
+    root = tmp_path / "opt-models"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / BAKED_SENTINEL).write_text("")
+    return root
+
+
+def test_is_baked_true_when_marker_present(tmp_path):
+    root = _baked_root(tmp_path)
+    assert is_baked({"VJ_MODELS_ROOT": str(root)}) is True
+
+
+def test_is_baked_false_when_marker_absent(tmp_path):
+    root = tmp_path / "opt-models"
+    root.mkdir()
+    assert is_baked({"VJ_MODELS_ROOT": str(root)}) is False
+
+
+def test_ensure_models_baked_skips_everything(tmp_path):
+    # A baked worker MUST early-return (no pull) even with a volume set + no R2 creds: the weights
+    # are in the image. We set VJ_VOLUME_ROOT to a bogus path to prove the volume path is not taken
+    # (if it were, _resolve_volume would run before our early-return).
+    root = _baked_root(tmp_path)
+    e = {"VJ_MODELS_ROOT": str(root), "HF_HOME": str(root / "hf-cache"),
+         "VJ_VOLUME_ROOT": str(tmp_path / "nonexistent-vol")}
+    assert ensure_models(env=e) is False  # skipped, no raise (no rclone, no R2 needed)
+
+
+def test_ensure_i2v_models_baked_skips_pull(tmp_path):
+    root = _baked_root(tmp_path)
+    e = {"VJ_MODELS_ROOT": str(root), "HF_HOME": str(root / "hf-cache")}
+    assert ensure_i2v_models(env=e) is False  # baked fp8 i2v already present; no R2 pull
+
+
+def test_not_baked_without_creds_does_not_falsely_skip_as_baked(tmp_path):
+    # Negative: absent the marker, a no-creds worker takes the EXISTING no_creds path, not the baked
+    # one -- baked must be a distinct, marker-gated decision.
+    root = tmp_path / "opt-models"
+    (root / "hf-cache" / "hub").mkdir(parents=True)
+    (root / "hf-cache" / "hub" / "something").write_text("x")
+    e = {"VJ_MODELS_ROOT": str(root), "HF_HOME": str(root / "hf-cache")}
+    assert is_baked(e) is False
+    assert ensure_models(env=e) is False  # no_creds skip, but NOT via the baked branch
