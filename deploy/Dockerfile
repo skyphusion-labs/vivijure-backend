@@ -160,9 +160,17 @@ COPY deploy/seed-bins/bin-23/ /opt/models/
 # Baked-image marker (harness/models_mirror.BAKED_SENTINEL = .vj-baked). is_baked() checks its
 # EXISTENCE to short-circuit volume + R2; the contents are operator-facing metadata. Bumping
 # VJ_MODEL_VERSION re-stamps the marker (and, paired with a re-staged seed, signals a new model set).
-ARG VJ_BAKE_PRECISION=fp8
+# Precision defaults to bf16 (the self-contained public/prod track); the release workflow passes it
+# explicitly. fp8 stays selectable for the partial-prod image.
+ARG VJ_BAKE_PRECISION=bf16
 ARG VJ_MODEL_VERSION=1
-RUN printf 'baked_utc=%s\nprecision=%s\nmodel_version=%s\n' \
+# SELF-DEFENDING GATE (the #4 empty-bake fix): never stamp .vj-baked over an empty/stub weight tree.
+# assert-weights HARD-FAILS the build unless VJ_MODELS_ROOT really holds the curated set (byte floor
+# for the precision + at least one real shard). is_baked() trusts this sentinel to skip the R2 pull,
+# so the sentinel must NOT be able to lie: the AND below writes it only after the assert passes.
+COPY deploy/bake_layers.py /tmp/bake_layers.py
+RUN python /tmp/bake_layers.py assert-weights --root "$VJ_MODELS_ROOT" --precision "${VJ_BAKE_PRECISION}" \
+    && printf 'baked_utc=%s\nprecision=%s\nmodel_version=%s\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${VJ_BAKE_PRECISION}" "${VJ_MODEL_VERSION}" \
         > /opt/models/.vj-baked \
     && echo "bake: wrote $VJ_MODELS_ROOT/.vj-baked ($(tr '\n' ' ' < /opt/models/.vj-baked))"
