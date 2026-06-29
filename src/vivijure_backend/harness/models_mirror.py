@@ -39,12 +39,15 @@ I2V_LAZY_REPOS = (
 )
 
 # Repos NOT pulled at cold start: the lazy i2v repos above, plus dead weight nothing in the model
-# spec loads (T2V is never used; the two stray SDXL repos are not in the spec). Storage in R2 is kept
+# spec loads (T2V is never used; the stray SDXL repos are not in the spec). Storage in R2 is kept
 # (cheap, safer); these are pull-time excludes only. Tune per the live model set, the deploy's call.
+# This list MUST agree with the bake keep/drop set (deploy/bake-manifest.json): runtime and bake
+# derive the same model set from the same source, so neither pulls/bakes a repo the other ignores.
 DEFAULT_SKIP_REPOS = I2V_LAZY_REPOS + (
     "models--Wan-AI--Wan2.2-T2V-A14B-Diffusers",          # text-to-video: never loaded
     "models--stabilityai--stable-diffusion-xl-base-1.0",  # not in the model spec (dead weight)
     "models--stabilityai--sdxl-turbo",                    # not in the model spec (dead weight)
+    "models--cagliostrolab--animagine-xl-4.0",            # anime alt in a note only; not loaded (#13)
     "spaces--InstantX--InstantID",                        # the HF Space, not the model repo
 )
 

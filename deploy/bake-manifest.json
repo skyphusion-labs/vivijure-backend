@@ -1,0 +1,77 @@
+{
+  "_comment": "Change-controlled bake seed manifest for the bf16 baked image (#13). The seed staged to R2 (deploy/stage_bake_seed.py) and the worker's runtime model set are derived from ONE source of truth -- models.py specs + harness/models_mirror keep-set -- so 'baked == what the worker loads, no more'. A second hand-maintained list would drift; that drift (in spirit) is how the :0.3.0 empty bake happened. Revisions are the HF snapshot SHAs pinned in r2:vivijure/models. Sizes are approximate (post-recast for recast repos). The drop-set is recorded with a reason each so this file is the auditable record of BOTH sides.",
+  "precision": "bf16",
+  "model_version": 1,
+  "source": "r2:vivijure/models",
+  "dest": "r2:vivijure/bake-seed-bf16",
+  "hub_subpath": "hf-cache/hub",
+  "keep_repos": [
+    {
+      "repo": "models--Wan-AI--Wan2.2-I2V-A14B-Diffusers",
+      "rev": "596658fd9ca6b7b71d5057529bbf319ecbc61d74",
+      "role": "I2V",
+      "recast_fp32_to_bf16": true,
+      "approx_gb_bf16": 63,
+      "note": "Wan2.2 i2v experts; stored fp32 (~117.5 GiB), recast to bf16 (the precision from_pretrained(torch_dtype=bfloat16) loads at). Largest fp32 shard 4.98 GiB -> ~2.49 GiB bf16, well under the 10 GB GHCR layer limit."
+    },
+    {
+      "repo": "models--SG161222--RealVisXL_V5.0",
+      "rev": "ac93e0dda1f6d448cae19bbfab8c5e720a5e48bc",
+      "role": "KEYFRAME_BASE",
+      "recast_fp32_to_bf16": true,
+      "approx_gb_bf16": 14,
+      "note": "SDXL keyframe base. Loaded via from_pretrained(torch_dtype=bfloat16) with NO variant= arg, so it reads the non-variant fp32 files (incl unet shard 00001-of-00002 at 9.99 GiB). Recast non-variant fp32 -> bf16: halves the 9.99 GiB shard (which would NOT fit a 9 GB bin) and matches the runtime load precision exactly. The .fp16 variant files are kept untouched (not loaded, harmless)."
+    },
+    {
+      "repo": "models--lightx2v--Wan2.2-Lightning",
+      "rev": "18bccf8884ec0a078eed79785eb4ef13ea16ce1e",
+      "role": "I2V_DISTILL",
+      "include_only": [
+        "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/high_noise_model.safetensors",
+        "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/low_noise_model.safetensors"
+      ],
+      "approx_gb_bf16": 2,
+      "note": "LoRA collection (NOT a diffusers from_pretrained repo), so file-level trim is safe. The spec pins the 4-step Seko-V1 i2v LoRA; keep BOTH the high_noise + low_noise pair. The repo's other ~37 GiB (T2V variants, a 28.5 GiB single file, other step counts) is never loaded -> dropped."
+    },
+    {
+      "repo": "models--ByteDance--Hyper-SD",
+      "rev": "bc08d970a87c74c71209491d64e3525845698863",
+      "role": "KEYFRAME_FEWSTEP",
+      "approx_gb_bf16": 0.8,
+      "note": "Hyper-SDXL few-step distill LoRA (spec weight_name Hyper-SDXL-8steps-lora.safetensors). Small repo, kept whole."
+    },
+    {
+      "repo": "models--InstantX--InstantID",
+      "rev": "57b32dfee076092ad2930c71fd6d439c2c3b1820",
+      "role": "INSTANTID",
+      "approx_gb_bf16": 4,
+      "note": "InstantID identity model repo (ip-adapter.bin + ControlNet). Kept whole (diffusers/HF structure)."
+    },
+    {
+      "repo": "models--h94--IP-Adapter",
+      "rev": "018e402774aeeddd60609b4ecdb7e298259dc729",
+      "role": "IP_ADAPTER",
+      "approx_gb_bf16": 19,
+      "note": "IP-Adapter identity. Multi-variant repo kept WHOLE (robust): from_pretrained reads a subfolder; trimming risks dropping a needed config (the #4 class). Disk is free per Conrad; VRAM still loads only the used variant."
+    },
+    {
+      "repo": "models--xinsir--controlnet-openpose-sdxl-1.0",
+      "rev": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+      "role": "CONTROLNET",
+      "approx_gb_bf16": 2.5,
+      "note": "SDXL openpose ControlNet (loaded via ControlNetModel.from_pretrained torch_dtype=bfloat16). Already <10 GB max file; kept whole."
+    }
+  ],
+  "finish_dirs": [
+    {"dir": "antelopev2", "approx_gb": 0.4, "note": "InstantID insightface antelopev2 pack (read directly from VJ_MODELS_ROOT/antelopev2)."},
+    {"dir": "rife", "approx_gb": 0.05, "note": "FRAME_INTERP RIFE flownet.pkl (read from VJ_MODELS_ROOT/rife/flownet.pkl)."},
+    {"dir": "GFPGANv1.4", "approx_gb": 0.3, "note": "FACE_RESTORE GFPGANv1.4.pth (read from VJ_MODELS_ROOT/GFPGANv1.4/GFPGANv1.4.pth)."}
+  ],
+  "drop_repos": [
+    {"repo": "models--Wan-AI--Wan2.2-T2V-A14B-Diffusers", "reason": "text-to-video; never loaded (DEFAULT_SKIP_REPOS). ~117.5 GiB saved."},
+    {"repo": "models--stabilityai--stable-diffusion-xl-base-1.0", "reason": "not in the model spec; dead weight (DEFAULT_SKIP_REPOS). ~57.6 GiB saved."},
+    {"repo": "models--stabilityai--sdxl-turbo", "reason": "not in the model spec; dead weight (DEFAULT_SKIP_REPOS). ~32 GiB saved."},
+    {"repo": "spaces--InstantX--InstantID", "reason": "the HF Space, not the model repo (DEFAULT_SKIP_REPOS)."},
+    {"repo": "models--cagliostrolab--animagine-xl-4.0", "reason": "only an 'anime alt' mentioned in a KEYFRAME_BASE note; NOT loaded by the spec. Added to the runtime DEFAULT_SKIP_REPOS in this PR so runtime and bake derive the same set."}
+  ]
+}
