@@ -1,5 +1,6 @@
-# The worker image COPYs only src/vivijure_backend + deploy/requirements.txt; everything else is
-# build-context noise. Keep the context tiny (fast uploads, no secrets/weights leaking into a layer).
+# The worker image COPYs src/vivijure_backend, deploy/requirements.txt + the deploy/*.py helpers, and
+# the staged bake seed bins. Keep the rest of the context out (fast uploads, no secrets/stray weights
+# leaking into a layer).
 .git
 .venv
 **/__pycache__
@@ -15,3 +16,9 @@ Jenkinsfile
 *.png
 *.mp4
 *.tar.gz
+
+# Bake seed bins: CI (the release workflow) stages the curated, precision-selected weight seed and
+# bin-packs it under deploy/seed-bins/. The per-bin COPY layers need these files IN the build context,
+# so re-include them AFTER the global weight/image excludes above (last match wins in .dockerignore).
+!deploy/seed-bins
+!deploy/seed-bins/**
