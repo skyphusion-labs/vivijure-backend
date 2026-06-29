@@ -1,0 +1,22 @@
+MODIFICATIONS NOTICE (Apache License 2.0, Section 4(b))
+
+Original work: Wan-AI/Wan2.2-I2V-A14B-Diffusers (image-to-video DiT)
+Original license: Apache License 2.0 (see LICENSE in this directory)
+Modified by: skyphusion-labs
+
+The Wan2.2 I2V weights redistributed in this image have been modified by
+skyphusion-labs as follows:
+
+  1. Numeric recast from fp32 to bf16.
+  2. Numeric recast from bf16 to fp8 (float8_e4m3fn), produced for the baked
+     image as the "Wan-AI/Wan2.2-I2V-A14B-Diffusers-fp8" variant.
+
+These changes are precision/quantization recasts of the tensor values only.
+No change was made to the model architecture, layer topology, configuration,
+or to any accompanying source code. The recasts preserve the original
+diffusers layout and are intended to reduce VRAM footprint and load time.
+
+This notice is provided to satisfy Apache License 2.0 Section 4(b), which
+requires modified files to carry prominent notices stating that they were
+changed. All original copyright, patent, trademark, and attribution notices
+from the upstream work are retained.
