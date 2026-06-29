@@ -44,6 +44,11 @@ HERE = Path(__file__).resolve().parent
 MANIFEST = HERE / "bake-manifest.json"
 STAGE = Path(os.environ.get("VJ_BAKE_STAGE", str(Path.home() / "bake-seed-bf16-stage")))
 
+# Ride out R2's intermittent 501 NotImplemented on copy (seen on small objects); rclone retries clear it.
+RETRY = ["--retries", "8", "--low-level-retries", "20"]
+# Local-only resume markers must never reach the seed (and R2 501s on them otherwise abort the upload).
+EXCLUDE_MARKERS = ["--exclude", ".vj-recast-done", "--exclude", ".vj-*"]
+
 
 def sh(cmd: list[str], *, capture: bool = False) -> str:
     """Run a command; raise on failure. Never logs env (no secret exposure)."""
@@ -99,19 +104,29 @@ def recast_repo_inplace(local_repo: Path) -> dict:
 
 def stage_recast_repo(repo: str, rev: str, src_hub: str, dst_hub: str, dry: bool) -> None:
     local = STAGE / repo
+    marker = local / ".vj-recast-done"
     print(f"[recast] {repo}")
     if dry:
         print(f"    would: rclone copy -l {src_hub}/{repo} {local}; recast fp32->bf16; "
               f"rclone copy -l {local} {dst_hub}/{repo}")
         return
     local.mkdir(parents=True, exist_ok=True)
-    sh(["rclone", "copy", "-l", f"{src_hub}/{repo}", str(local),
-        "--transfers", "16", "--checkers", "16", "--multi-thread-streams", "8",
-        "--multi-thread-cutoff", "100M", "--stats", "30s", "--stats-one-line"])
-    summary = recast_repo_inplace(local)
-    print(f"    recast summary: {summary}")
+    # Resume: once the local recast is complete (marker present), do NOT re-download. The local
+    # blobs are now bf16 (smaller than the R2 fp32), so a plain `rclone copy -l` would see a size
+    # mismatch and CLOBBER the recast with fp32 again. The marker is the single source of "done".
+    if marker.exists():
+        print("    recast already complete (marker present); skipping download + recast.")
+    else:
+        sh(["rclone", "copy", "-l", f"{src_hub}/{repo}", str(local),
+            "--transfers", "16", "--checkers", "16", "--multi-thread-streams", "8",
+            "--multi-thread-cutoff", "100M", "--stats", "30s", "--stats-one-line"] + RETRY)
+        summary = recast_repo_inplace(local)
+        print(f"    recast summary: {summary}")
+        marker.write_text("recast fp32->bf16 complete\n")
+    # Upload is idempotent/resumable (rclone skips files already in dest); the local marker is excluded.
     sh(["rclone", "copy", "-l", str(local), f"{dst_hub}/{repo}",
-        "--transfers", "16", "--checkers", "16", "--stats", "30s", "--stats-one-line"])
+        "--transfers", "16", "--checkers", "16", "--stats", "30s", "--stats-one-line"]
+       + EXCLUDE_MARKERS + RETRY)
 
 
 def stage_copy_repo(repo: str, src_hub: str, dst_hub: str, dry: bool) -> None:
@@ -120,7 +135,7 @@ def stage_copy_repo(repo: str, src_hub: str, dst_hub: str, dry: bool) -> None:
         print(f"    would: rclone copy {src_hub}/{repo} {dst_hub}/{repo}")
         return
     sh(["rclone", "copy", f"{src_hub}/{repo}", f"{dst_hub}/{repo}",
-        "--transfers", "32", "--checkers", "32", "--stats", "30s", "--stats-one-line"])
+        "--transfers", "32", "--checkers", "32", "--stats", "30s", "--stats-one-line"] + RETRY)
 
 
 def stage_include_only(repo: str, rev: str, files: list[str], src_hub: str, dst_hub: str,
@@ -136,7 +151,7 @@ def stage_include_only(repo: str, rev: str, files: list[str], src_hub: str, dst_
         return
     local.mkdir(parents=True, exist_ok=True)
     # refs/main (HF resolution needs it)
-    sh(["rclone", "copy", f"{src_hub}/{repo}/refs", str(local / "refs"), "--stats-one-line"])
+    sh(["rclone", "copy", f"{src_hub}/{repo}/refs", str(local / "refs"), "--stats-one-line"] + RETRY)
     for rel in files:
         marker = f"{src_hub}/{repo}/snapshots/{rev}/{rel}.rclonelink"
         blobrel = subprocess.run(["rclone", "cat", marker], check=True, text=True,
@@ -144,8 +159,9 @@ def stage_include_only(repo: str, rev: str, files: list[str], src_hub: str, dst_
         bhash = blobrel.rsplit("/", 1)[-1]
         dest = local / "snapshots" / rev / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
-        sh(["rclone", "copyto", f"{src_hub}/{repo}/blobs/{bhash}", str(dest), "--stats-one-line"])
-    sh(["rclone", "copy", "-l", str(local), f"{dst_hub}/{repo}", "--stats-one-line"])
+        sh(["rclone", "copyto", f"{src_hub}/{repo}/blobs/{bhash}", str(dest), "--stats-one-line"] + RETRY)
+    sh(["rclone", "copy", "-l", str(local), f"{dst_hub}/{repo}", "--stats-one-line"]
+       + EXCLUDE_MARKERS + RETRY)
 
 
 def main() -> int:
@@ -183,7 +199,7 @@ def main() -> int:
             print(f"[copy]   finish/{d}  (server-side R2->R2)")
             if not args.dry_run:
                 sh(["rclone", "copy", f"{src}/{d}", f"{dst}/{d}",
-                    "--transfers", "32", "--checkers", "32", "--stats-one-line"])
+                    "--transfers", "32", "--checkers", "32", "--stats-one-line"] + RETRY)
 
     print("\n=== dest size ===")
     if not args.dry_run:
