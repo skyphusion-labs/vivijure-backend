@@ -11,8 +11,12 @@
 # the precision-selected seed from R2 and bin-packs it (deploy/bake_layers.py) into
 # deploy/seed-bins/bin-NN/, each bin < a 9GB target; the fixed COPY list below makes ONE layer per bin,
 # and every bin COPYs to VJ_MODELS_ROOT so their union reconstructs the cache + finish-model tree.
-#   fp8 baked set  ~90 GB   (Wan i2v fp8 + bf16 base set)        -- shipping now
-#   bf16 baked set ~117 GB  (Wan i2v bf16 + bf16 base set)       -- precision swap, builds on vivijure-bake
+#   fp8 baked set  ~90 GB   (Wan i2v fp8 + base set)   -- the PARTIAL prod image (final tier still
+#                                                          R2-pulls bf16; depends on our R2 creds)
+#   bf16 baked set ~87 GB   (Wan i2v bf16 + base set)  -- the SELF-CONTAINED public image. The Wan
+#                                                          experts ship FP32; a free CPU fp32->bf16
+#                                                          re-cast halves them (raw fp32 would be
+#                                                          ~140 GB). Point the seed at the RE-CAST.
 #
 # CUDA target: 12.8 + torch cu128. Blackwell-safe (RTX PRO 6000 / B200, sm_120/sm_100): older cu124
 # builds raise "no kernel image is available for execution on the device" on those cards, a failure
@@ -124,7 +128,7 @@ RUN HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 HF_DATASETS_OFFLINE=0 \
 # VJ_MODELS_ROOT, so all bins COPY to /opt/models and their union is the full HF-cache (hf-cache/hub/
 # ...) + finish-model tree (antelopev2/, rife/, GFPGANv1.4/) the loaders read offline.
 #
-# 24 bins = ~216GB capacity at the 9GB target -- generous headroom over the bf16 set (~117GB). Empty
+# 24 bins = ~216GB capacity at the 9GB target -- generous headroom over the bf16 re-cast set (~87GB). Empty
 # bins are harmless zero-byte layers (bake_layers.py pre-creates all 24 so this fixed list never
 # references a missing path). Placed BEFORE `COPY src/` so a code-only change never busts the weight
 # layers. CHANGING THE MODEL SET / PRECISION = re-stage the seed + bump VJ_MODEL_VERSION (below).

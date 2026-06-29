@@ -13,9 +13,12 @@ short-circuits the volume-resolve + R2 mirror entirely. The R2 mirror stays only
 for a non-baked / legacy image (no marker). See [../docs/cold-start-design.md](../docs/cold-start-design.md)
 for why the bake replaced the network-volume plan.
 
-The baked set ships at half precision: **fp8 first (~90 GB)**, **bf16 as a precision swap (~117 GB)**.
-The weights are baked as many <10 GB layers (GHCR rejects a >=10 GB layer): CI stages the curated
-seed from R2, bin-packs it (`deploy/bake_layers.py`), and the Dockerfile COPYs one layer per bin.
+Two baked variants: the **fp8 PARTIAL** prod image (~90 GB; final tier still R2-pulls bf16, so
+prod-only) and the **self-contained bf16** public image (~87 GB). The Wan i2v experts ship **FP32**,
+so the bf16 seed is a free CPU **fp32->bf16 re-cast** (zero quality cost; the loader casts to bf16 at
+load anyway) -- point the bake at the RE-CAST seed, not raw fp32 (~140 GB) and not the fp8 seed. The
+weights are baked as many <10 GB layers (GHCR rejects a >=10 GB layer): CI stages the curated seed
+from R2, bin-packs it (`deploy/bake_layers.py`), and the Dockerfile COPYs one layer per bin.
 
 Entry: `python -m vivijure_backend.worker` -> `worker.main` -> `runpod.serverless.start({"handler":
 worker.handler})`. Per job the handler builds a `GpuPipeline` from the request's typed
@@ -26,8 +29,9 @@ load, R2 job I/O, plan, GPU stages, off-GPU finish, results out).
 
 Build + push happen on a `backend-vX.Y.Z` tag (see `../.github/workflows/release.yml`); a plain
 commit is a no-op. The build runs on the **`vivijure-bake` larger runner** (32-core / 128 GB /
-**1200 GB SSD**), NOT the 300 GB `heavy-runner` the thin image used: the bf16 bake's peak build disk
-is ~370 GB (staged seed + buildkit snapshot + loaded image + base stack), which does not fit 300 GB.
+**1200 GB SSD**), NOT the 300 GB `heavy-runner` the thin image used: peak build disk is ~280 GB for
+the bf16 re-cast (~87 GB) / fp8 (~90 GB) image (staged seed + buildkit snapshot + loaded image + base
+stack), and the raw-fp32 contingency (~440 GB) needs the 1200 GB headroom.
 
 ```bash
 git push origin main

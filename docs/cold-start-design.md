@@ -9,8 +9,9 @@ cold-starts** with numbers instead of vibes.
 > **Status: DECIDED (revised 2026-06-29) -- BAKE THE WEIGHTS INTO THE IMAGE (Option A), at
 > half precision.** The original recommendation (preloaded per-datacenter network volumes, Option D)
 > is NOT taken. Two things moved that the first pass did not have: (1) **half-precision weights** --
-> the i2v MoE quantizes to fp8 (~half size) and the curated set drops the dead-weight repos, so the
-> baked set is ~90 GB (fp8) / ~117 GB (bf16), not the 223 GB that made baking look unwieldy; (2) a
+> the i2v MoE drops to half size and the curated set drops the dead-weight repos, so the baked set is
+> ~90 GB (fp8, prod-only) / ~87 GB (the self-contained bf16, after a free fp32->bf16 re-cast of the
+> experts -- they ship FP32), not the 223 GB that made baking look unwieldy; (2) a
 > **1200 GB GitHub-hosted build runner** (`vivijure-bake`, 32-core/128 GB/1200 GB) that builds the
 > bf16 set with disk headroom. A baked worker carries its weights, so it is **datacenter-agnostic**
 > (no per-DC volume pinning it to a provisioned region -- that pinning throttled spill to free GPUs
@@ -99,19 +100,29 @@ Ship the weights in a content-addressed Docker layer instead of mirroring from R
   original reject:
   - **The "~223 GB" was gross, not what we bake.** The bake ships the *curated, loaded* set, not the
     raw R2 mirror. Dropping the dead-weight repos (T2V 126 GB, SDXL-base 62 GB, sdxl-turbo 34 GB --
-    all in `DEFAULT_SKIP_REPOS`, never loaded) and trimming to the spec leaves ~117 GB at bf16.
-  - **Half precision halves the expensive half.** The i2v MoE experts quantize bf16->fp8 on CPU
-    (free, no GPU; `deploy/quantize_i2v_fp8.py`), so the fp8 baked set is **~90 GB**. fp8 ships
-    first; bf16 (**~117 GB**) is a one-line precision swap (re-stage the seed) once validated.
-  - **The GHCR per-layer limit is handled, and the build runner now fits.** GHCR rejects a >=10 GB
-    layer, so the bake bin-packs the curated set into many <10 GB layers (`deploy/bake_layers.py`:
-    pre-build assert + post-build `docker history` gate). The peak BUILD disk is ~3x the payload
-    (staged seed + buildkit snapshot + loaded image) + the base stack, i.e. ~290 GB (fp8) / ~370 GB
-    (bf16) -- which does NOT fit the 300 GB hosted runner the thin image used, but builds with
-    headroom on the **1200 GB `vivijure-bake` larger runner** (~3-4x headroom; see the disk-budget
-    note below). On a serverless HOST the baked layers are content-addressed and cached after the
-    first pull per physical host, and -- unlike the original worry -- a baked worker that lands on a
-    fresh host pulls from GHCR (fast, regional, free egress) instead of mirroring 168 GB from R2.
+    all in `DEFAULT_SKIP_REPOS`, never loaded) and trimming to the spec is the first big cut.
+  - **Half precision, and the right half.** Two distinct shrinks, not the same one:
+    - *fp8* (the PARTIAL image, prod-only): the i2v MoE experts quantize to fp8 on CPU
+      (free, no GPU), giving a **~90 GB** fp8 baked set. This is the 0.2.28 prod image. Its FINAL
+      tier still lazy-pulls bf16 from our R2 (see the sovereignty note in docs/release-gate.md), so
+      it is not self-contained.
+    - *bf16 re-cast* (the SELF-CONTAINED public datacenter image): the official
+      Wan2.2-I2V-A14B experts ship as **FP32** on the Hub / in our R2 (confirmed via the safetensors
+      headers; corroborated by the 126 GB raw repo = ~56 GB/expert x2 + encoders). Baking the RAW
+      fp32 experts would be a **~140 GB image (~440 GB build transient)** -- at/over even a 300 GB
+      runner. A one-time **CPU fp32->bf16 re-cast** halves each expert (56->28 GB, ~-53 GiB) at
+      **ZERO quality cost** (the loader casts to bf16 at load anyway), landing the self-contained
+      bf16 image at **~87 GB**. The bake targets the bf16 RE-CAST seed, NOT raw fp32 and NOT the fp8
+      seed. (Baking full bf16 is what kills the R2 final-tier lazy-pull entirely.)
+  - **The GHCR per-layer limit is handled, and the build runner fits comfortably.** GHCR rejects a
+    >=10 GB layer, so the bake bin-packs the curated set into many <10 GB layers
+    (`deploy/bake_layers.py`: pre-build assert + post-build `docker history` gate). Peak BUILD disk
+    is ~3x the payload (staged seed + buildkit snapshot + loaded image) + the base stack, so
+    **~280-290 GB** for either the bf16-recast (~87 GB) or fp8 (~90 GB) image -- which the
+    **1200 GB `vivijure-bake` larger runner** builds at ~4x headroom. On a serverless HOST the baked
+    layers are content-addressed and cached after the first pull per physical host, and a baked
+    worker on a fresh host pulls from GHCR (fast, regional, free egress) instead of mirroring 168 GB
+    from R2. (Serve-side disk is a non-issue: the RunPod worker container disk is 500 GB.)
   - **It kills the per-DC volume ops AND the R2 egress.** Datacenter-agnostic placement means no
     volume to provision/refresh per DC (Option D's whole operational burden) and zero R2 cold-pull
     egress on the common path. The R2 mirror stays only as the fallback for a non-baked image.
@@ -119,11 +130,13 @@ Ship the weights in a content-addressed Docker layer instead of mirroring from R
   **DISK-BUDGET NOTE (the number that sized the runner):** peak transient build disk is dominated by
   three coexisting copies of the weight payload -- the staged seed in the build context, the BuildKit
   snapshot the `COPY` layers write, and the image loaded into the docker daemon for the pre-push
-  smoke -- plus the ~18 GB CUDA/torch/conda base. So peak ~= 3 x payload + 18 GB: **~290 GB at fp8,
-  ~370 GB at bf16.** bf16 therefore does NOT build on a 300 GB runner; the 1200 GB `vivijure-bake`
-  tier gives ~3.3x headroom for bf16 and ~4x for fp8 (enough to build multiple image variants in one
-  job). A 600 GB tier would be only ~1.6x for bf16 -- workable but not comfortable -- so 1200 GB is
-  the right-sized choice, not overkill.
+  smoke -- plus the ~18 GB CUDA/torch/conda base. So peak ~= 3 x payload + 18 GB. With the bf16
+  RE-CAST seed (~87 GB) or the fp8 seed (~90 GB) the peak is **~280-290 GB**; the 1200 GB
+  `vivijure-bake` tier builds that at ~4x headroom. The number that drove the runner choice is the
+  RAW-fp32 contingency: baking un-re-cast fp32 experts is a ~140 GB image / **~440 GB transient**,
+  which does NOT fit a 300 GB runner and only ~1.4x a 600 GB one -- so 1200 GB (~2.7x even on raw
+  fp32, ~4x on the re-cast) is the right-sized, comfortable choice. The re-cast is the primary fix;
+  the runner headroom is the safety margin behind it.
 
 ### B. Pre-warm pool (RunPod active/min workers)
 
@@ -200,7 +213,8 @@ The structural fix is now **A (bake), at half precision**, not D (volumes). The 
 datacenter-agnostic placement removes the per-DC volume ops AND the R2 egress entirely.
 
 1. **Bake the curated model set into the image (A) -- the structural fix.** fp8 first
-   (~90 GB baked), bf16 as a precision swap (~117 GB) once the fp8 image validates on a GPU pod.
+   (~90 GB baked, prod-only); the self-contained bf16 RE-CAST image (~87 GB, fp32->bf16) is the
+   public datacenter target once it validates on a GPU pod.
    The bake stages a curated, precision-selected seed from R2, bin-packs it into <10 GB layers
    (`deploy/bake_layers.py` + the release workflow on `vivijure-bake`), writes the `.vj-baked`
    marker, and ships. `harness/models_mirror` short-circuits volume + R2 when the marker is present.

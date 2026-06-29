@@ -62,16 +62,17 @@ home VRAM buys better stills, training, and finish, never local full-Wan motion.
 
 | Image | Target card | Bakes | Runs | Build runner | Motion |
 |---|---|---|---|---|---|
-| **DATACENTER** (bf16 Wan 2.2) | H200 / B200 (>=141 GB) | full curated set incl. **bf16 Wan** | hosted serverless = **production**; full-step i2v at full fidelity | `vivijure-bake` (1200 GB) | local, full Wan |
+| **DATACENTER** (bf16 Wan 2.2) | H200 / B200 (>=141 GB) | full curated set incl. **bf16 Wan** (the experts ship FP32; a free CPU **fp32->bf16 re-cast** halves them at zero quality cost) | hosted serverless = **production**; full-step i2v at full fidelity | `vivijure-bake` (1200 GB) | local, full Wan |
 | **HOMELAB T1** | 12 GB VRAM (3060 / 4070 class) | **small set only**: SDXL fp16 keyframes + finish models, **NO Wan** | local SDXL keyframes + light finish | stock hosted runner | cloud-passthrough / hosted datacenter endpoint |
 | **HOMELAB T2** | 24 GB VRAM (3090 / 4090 class) | **small set only** (same, no Wan) | higher-res keyframes + refiner pass, comfortable LoRA training, higher-factor local upscale/finish | stock hosted runner | cloud-passthrough / hosted datacenter endpoint |
 
 Build facts:
 
-- **Only the datacenter bf16 image needs the big `vivijure-bake` runner** (~117 GB baked, ~370 GB
-  peak build disk). The homelab images bake the SMALL set (SDXL fp16 + finish models, no Wan: a
-  sub-141 GB card cannot run Wan, so shipping it would be dead weight) and **build fine on stock
-  runners.**
+- **Only the datacenter bf16 image needs the big `vivijure-bake` runner** (~87 GB baked after the
+  fp32->bf16 re-cast, ~280 GB peak build disk; baking the RAW fp32 experts would be ~140 GB /
+  ~440 GB transient, which is why we re-cast). The homelab images bake the SMALL set (SDXL fp16 +
+  finish models, no Wan: a sub-141 GB card cannot run Wan, so shipping it would be dead weight) and
+  **build fine on stock runners.**
 - **All three are self-contained / baked.** Homelabbers have no R2-near-GPU, so the homelab images
   carry their weights with no mirror dependency -- same `.vj-baked` short-circuit as the datacenter
   image, just a smaller set.
@@ -110,7 +111,7 @@ entirely (the #118 "B-seam" bf16-lazy-on-final becomes obsolete). No R2 dependen
 egress -- the renter runs it standalone. That is the public-release / sovereignty win the bake exists
 for; the fp8 image is the prod-only stepping stone.
 
-(Serve-side disk is a non-issue: the RunPod worker container disk is 500 GB, so a ~117 GB full-bf16
+(Serve-side disk is a non-issue: the RunPod worker container disk is 500 GB, so a ~87 GB full-bf16
 image fits with room to spare. The only disk constraint is the BUILD runner -- see the disk budget.)
 
 ## See also

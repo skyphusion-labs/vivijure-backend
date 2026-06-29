@@ -14,11 +14,12 @@ name: Release worker image to GHCR (baked)
 # Runner: the org GitHub-hosted larger runner "vivijure-bake" (32-core / 128 GB / 1200 GB SSD,
 # runner group Default). vivijure-backend is a PUBLIC repo, so a self-hosted fleet runner is off the
 # table (a fork PR could run untrusted code on a fleet box); GitHub-hosted runners are fork-safe.
-# This build STAGES the curated weight seed (~90 GB fp8 / ~117 GB bf16) from R2, bin-packs it into
-# <10GB layers, builds the CUDA 12.8 + cu128 image with the weights baked in, and pushes. Peak
-# transient disk is ~3x the payload (staged seed + buildkit snapshot + loaded image) + the base
-# stack, i.e. ~290 GB (fp8) / ~370 GB (bf16) -- which is why this needs the 1200 GB runner, NOT the
-# 300 GB heavy-runner the thin image used (bf16 does NOT fit 300 GB; see docs/cold-start-design.md).
+# This build STAGES the curated weight seed (~90 GB fp8 / ~87 GB bf16 RE-CAST) from R2, bin-packs it
+# into <10GB layers, builds the CUDA 12.8 + cu128 image with the weights baked in, and pushes. The
+# bf16 seed must be the fp32->bf16 RE-CAST (the Wan experts ship FP32; raw fp32 would be ~140 GB /
+# ~440 GB transient). Peak transient disk is ~3x the payload (staged seed + buildkit snapshot +
+# loaded image) + the base stack, i.e. ~280-290 GB -- which the 1200 GB runner builds at ~4x headroom
+# (the raw-fp32 contingency, ~440 GB, is why we size to 1200, not 600; see docs/cold-start-design.md).
 # The build is tag-push / dispatch only (only a maintainer can create a backend-v* tag -- a fork PR
 # cannot), so it never runs untrusted code; keeping it GitHub-hosted means zero fleet exposure.
 
