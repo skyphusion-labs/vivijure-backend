@@ -36,9 +36,9 @@ on:
       precision:
         description: 'Baked weight precision (selects the R2 bake-seed prefix).'
         required: true
-        default: fp8
+        default: bf16
         type: choice
-        options: [fp8, bf16]
+        options: [bf16, fp8]
 
 permissions:
   contents: read
@@ -81,9 +81,10 @@ jobs:
               echo "::error::Tag '${TAG}' is not a backend-vX.Y.Z release tag; nothing to build."
               exit 1
             fi
-            # Precision for a tag build comes from a repo variable (default fp8). Set vars.VJ_BAKE_PRECISION=bf16 to cut a bf16 release.
+            # Precision for a tag build comes from a repo variable (default bf16, the self-contained
+            # public/prod track). Set vars.VJ_BAKE_PRECISION=fp8 to cut an fp8 (partial-prod) release.
             PREC="${{ vars.VJ_BAKE_PRECISION }}"
-            [ -n "${PREC}" ] || PREC="fp8"
+            [ -n "${PREC}" ] || PREC="bf16"
           fi
           case "${PREC}" in fp8|bf16) ;; *) echo "::error::precision must be fp8 or bf16"; exit 1;; esac
           echo "version=${VER}"   >> "$GITHUB_OUTPUT"
@@ -133,12 +134,23 @@ jobs:
             --stats 30s --stats-one-line
           python deploy/bake_layers.py reconstruct-symlinks --root ./_seed
           du -sh ./_seed || true
+          # Fast, explicit empty-seed guard: `rclone copy` of an empty/wrong R2 prefix exits 0, which
+          # is how the #4 hollow image shipped. Fail loud HERE, before the build, pointing at the seed.
+          COUNT="$(find ./_seed -type f ! -name '*.rclonelink' | wc -l)"
+          if [ "${COUNT}" -eq 0 ]; then
+            echo "::error::staged bake seed is EMPTY (r2:${R2_BUCKET}/${PREFIX} has no files). Refusing"
+            echo "::error::to build a hollow bake (#4). Populate the R2 seed prefix and re-run."
+            exit 1
+          fi
+          echo "staged ${COUNT} seed file(s)."
 
-      # Bin-pack the seed into <10GB layers. HARD GATE (pre-build): any single file >=10GB is fatal.
+      # Bin-pack the seed into <10GB layers. HARD GATE (upper): any single file >=10GB is fatal.
+      # HARD GATE (lower): --precision sets the byte floor so an under-staged seed dies here too.
       - name: Bin-pack seed into <10GB layers
         run: |
           set -eu
-          python deploy/bake_layers.py bin --src ./_seed --out deploy/seed-bins --bins 24 --ceiling-gb 9.0
+          python deploy/bake_layers.py bin --src ./_seed --out deploy/seed-bins --bins 24 --ceiling-gb 9.0 \
+            --precision '${{ steps.cfg.outputs.precision }}'
           cat deploy/seed-bins/bake-bins.json
           # Free the pre-bin staging copy; the bins (hardlinked) are what the build context needs.
           rm -rf ./_seed

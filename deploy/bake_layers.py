@@ -21,13 +21,23 @@ not depend on the package being importable. CPU-only; no GPU, no model load.
 
 SUBCOMMANDS
 -----------
-  bin  --src <staged-seed> --out <bins-dir> [--bins N] [--ceiling-gb 9.0]
+  bin  --src <staged-seed> --out <bins-dir> [--bins N] [--ceiling-gb 9.0] [--precision fp8|bf16] [--min-gb F]
         First-fit-decreasing pack the seed at <staged-seed> into <bins-dir>/bin-00 .. bin-(N-1).
-        HARD GATE (pre-build): a single regular file >= the GHCR limit (10 GB) is fatal -- it can
+        HARD GATE (upper): a single regular file >= the GHCR limit (10 GB) is fatal -- it can
         never fit a layer, so the seed curation must reshard it (e.g. a single-file checkpoint ->
-        diffusers sharded safetensors). Files are hardlinked into bins when possible (no second
-        copy of the bytes on the same filesystem), else copied. Symlinks are recreated as symlinks
-        (tiny; HF-cache snapshot links). Writes <bins-dir>/bake-bins.json (the plan + per-bin bytes).
+        diffusers sharded safetensors). HARD GATE (lower): the packed total must be >= the floor
+        (--min-gb, or the --precision default, else 0.5 GB), so an EMPTY/under-staged seed dies here
+        rather than producing zero-byte bins that build into a hollow image (the #4 empty-bake bug).
+        Files are hardlinked into bins when possible (no second copy of the bytes on the same
+        filesystem), else copied. Symlinks are recreated as symlinks (tiny; HF-cache snapshot links).
+        Writes <bins-dir>/bake-bins.json (the plan + per-bin bytes).
+
+  assert-weights  --root <model-root> [--precision fp8|bf16] [--min-gb F] [--min-shard-gb 1.0]
+        Hard-fail unless <model-root> holds a REAL weight set: total regular-file bytes >= the floor
+        AND at least one shard >= --min-shard-gb. This GATES the `.vj-baked` sentinel write in the
+        Dockerfile (a weightless image can never be stamped baked) and doubles as a post-build CI
+        check. Stdlib-only: one implementation, both call sites. Catches the #4 empty-bake bug at the
+        source (is_baked() trusts the sentinel; the sentinel must not lie).
 
   verify-image  --image <ref> [--ceiling-gb 10.0]
         Post-build gate: read the built image's per-layer sizes (`docker history`) and FAIL if any
@@ -50,6 +60,19 @@ from pathlib import Path
 
 # GHCR hard per-layer ceiling. A layer at or above this is rejected by the registry.
 GHCR_LAYER_LIMIT_BYTES = 10 * 1024**3
+
+# Minimum on-disk weight footprint (sum of regular-file bytes under the model root) for a bake we
+# will TRUST enough to stamp `.vj-baked`. A real curated set is ~50-60 GB (fp8) / ~80-90 GB (bf16);
+# these floors sit well below the real size (so a legitimately re-curated seed is not rejected) but
+# far above a config-only stub tree. The empty-bake bug (#4) shipped ~34 MB of HF config + .no_exist
+# stubs with ZERO weight shards, yet still wrote the sentinel; any of these floors kills that.
+WEIGHT_FLOOR_GB = {"fp8": 40.0, "bf16": 60.0}
+DEFAULT_WEIGHT_FLOOR_GB = 40.0
+
+# A genuine bake also has at least one LARGE shard. The stub tree's largest file was <10 MB, so a
+# pile of small JSON could never reach the byte floor by accident -- but we require a real shard too
+# as a second, independent signal that these are model weights, not config.
+MIN_SHARD_BYTES = 1 * 1024**3
 
 
 def _walk_regular_files(root: Path):
@@ -76,11 +99,13 @@ def _place(src_file: Path, dst_file: Path) -> None:
         shutil.copy2(src_file, dst_file)
 
 
-def bin_pack(src: Path, out: Path, bins: int, ceiling: int, log=print) -> dict:
+def bin_pack(src: Path, out: Path, bins: int, ceiling: int, min_gb: float = 0.5, log=print) -> dict:
     """First-fit-decreasing pack src's regular files into `bins` bin dirs under `out`, each < ceiling.
 
-    HARD GATE: any single regular file >= GHCR_LAYER_LIMIT_BYTES is fatal (cannot fit a layer).
-    Returns the plan dict (also written to out/bake-bins.json)."""
+    HARD GATE (upper): any single regular file >= GHCR_LAYER_LIMIT_BYTES is fatal (cannot fit a layer).
+    HARD GATE (lower): the packed total must be >= `min_gb`, so an EMPTY or under-staged seed dies here
+    instead of silently producing zero-byte bins that build into a hollow image (the #4 empty-bake bug;
+    `rclone copy` of an empty R2 prefix exits 0). Returns the plan dict (also written to bake-bins.json)."""
     if ceiling >= GHCR_LAYER_LIMIT_BYTES:
         raise SystemExit("ceiling must be < 10 GB (the GHCR limit); pick e.g. 9.0 GB for headroom")
     files = sorted(_walk_regular_files(src), key=lambda rs: rs[1], reverse=True)
@@ -108,6 +133,13 @@ def bin_pack(src: Path, out: Path, bins: int, ceiling: int, log=print) -> dict:
                 f"cannot fit {rel} ({sz/1024**3:.2f} GB) into {bins} bins at ceiling "
                 f"{ceiling/1024**3:.2f} GB -- raise --bins or the seed grew; "
                 f"current packed total {sum(bin_bytes)/1024**3:.1f} GB")
+
+    packed = sum(bin_bytes)
+    if packed < int(min_gb * 1024**3):
+        raise SystemExit(
+            f"bake_layers: packed seed is {packed/1024**3:.3f} GB, below the {min_gb:.1f} GB floor -- "
+            f"the staged seed at {src} is EMPTY or under-staged. Refusing to bin-pack a hollow bake "
+            f"(the #4 empty-bake bug). Re-stage r2:vivijure/bake-seed-<precision>/ and rebuild.")
 
     # Symlinks (HF-cache snapshot links) all go to bin-00; they are bytes-free path entries and must
     # land under the same root as their blob targets (every bin COPYs to VJ_MODELS_ROOT, so they do).
@@ -140,6 +172,58 @@ def bin_pack(src: Path, out: Path, bins: int, ceiling: int, log=print) -> dict:
         f"total {plan['total_gb']:.1f} GB; largest bin {plan['max_bin_gb']:.2f} GB "
         f"(ceiling {plan['ceiling_gb']:.1f} GB, GHCR limit 10 GB). OK.")
     return plan
+
+
+def assert_weights(root: Path, min_gb: float, min_shard_bytes: int = MIN_SHARD_BYTES,
+                   log=print) -> dict:
+    """Hard-fail unless `root` holds a REAL baked weight set, defending the `.vj-baked` sentinel from
+    ever being written over an empty/stub tree (the #4 empty-bake bug). Two independent signals must
+    both hold: (1) total regular-file bytes >= `min_gb`; (2) at least one shard >= `min_shard_bytes`.
+    Returns a summary dict; raises SystemExit on failure. Stdlib-only so it runs inside the image
+    build (gating the sentinel write) AND as a post-build CI step -- one implementation, two call
+    sites."""
+    if not root.is_dir():
+        raise SystemExit(f"bake_layers: assert-weights FATAL -- model root {root} does not exist.")
+    total = largest = nfiles = big = 0
+    for _rel, sz in _walk_regular_files(root):
+        total += sz
+        nfiles += 1
+        largest = max(largest, sz)
+        if sz >= min_shard_bytes:
+            big += 1
+    summary = {
+        "root": str(root), "files": nfiles,
+        "total_gb": round(total / 1024**3, 3),
+        "largest_gb": round(largest / 1024**3, 3),
+        "shards_over_min": big,
+        "min_gb": min_gb,
+        "min_shard_gb": round(min_shard_bytes / 1024**3, 3),
+    }
+    if total < int(min_gb * 1024**3):
+        raise SystemExit(
+            f"bake_layers: assert-weights FATAL -- {root} holds {summary['total_gb']:.3f} GB of "
+            f"regular files across {nfiles} file(s), below the {min_gb:.1f} GB floor. The weight seed "
+            f"is EMPTY or under-staged; a .vj-baked sentinel must NEVER be written over a stub tree "
+            f"(the #4 empty-bake bug). Re-stage r2:vivijure/bake-seed-<precision>/ and rebuild.")
+    if big < 1:
+        raise SystemExit(
+            f"bake_layers: assert-weights FATAL -- {root} has {summary['total_gb']:.3f} GB across "
+            f"{nfiles} file(s) but NO single file >= {summary['min_shard_gb']:.1f} GB. That looks like "
+            f"config/stub files, not model shards. Re-stage the R2 bake seed and rebuild.")
+    log(f"bake_layers: assert-weights OK -- {summary['total_gb']:.1f} GB across {nfiles} files, "
+        f"largest {summary['largest_gb']:.2f} GB, {big} shard(s) >= {summary['min_shard_gb']:.1f} GB "
+        f"(floor {min_gb:.1f} GB).")
+    return summary
+
+
+def _floor_for(precision: str | None, explicit_min_gb: float | None) -> float:
+    """Resolve the byte floor: an explicit --min-gb wins; else the precision default; else the global
+    default. Keeps the Dockerfile/CI call sites declarative (pass --precision, get the right floor)."""
+    if explicit_min_gb is not None:
+        return explicit_min_gb
+    if precision:
+        return WEIGHT_FLOOR_GB.get(precision, DEFAULT_WEIGHT_FLOOR_GB)
+    return DEFAULT_WEIGHT_FLOOR_GB
 
 
 def verify_image(image: str, ceiling: int, log=print) -> int:
@@ -217,6 +301,20 @@ def main() -> None:
     p_bin.add_argument("--out", required=True, type=Path)
     p_bin.add_argument("--bins", type=int, default=24)
     p_bin.add_argument("--ceiling-gb", type=float, default=9.0)
+    p_bin.add_argument("--precision", choices=sorted(WEIGHT_FLOOR_GB), default=None,
+                       help="select the empty-seed floor (fp8/bf16); overridden by --min-gb")
+    p_bin.add_argument("--min-gb", type=float, default=None,
+                       help="hard lower bound on packed bytes; default 0.5 GB (or the precision floor)")
+
+    p_aw = sub.add_parser("assert-weights",
+                          help="hard-fail unless the model root holds a real weight set (gates .vj-baked)")
+    p_aw.add_argument("--root", required=True, type=Path)
+    p_aw.add_argument("--precision", choices=sorted(WEIGHT_FLOOR_GB), default=None,
+                      help="select the byte floor (fp8/bf16); overridden by --min-gb")
+    p_aw.add_argument("--min-gb", type=float, default=None,
+                      help="byte floor in GB; default = the precision floor or the global default")
+    p_aw.add_argument("--min-shard-gb", type=float, default=MIN_SHARD_BYTES / 1024**3,
+                      help="require at least one regular file this large (real shard, not config)")
 
     p_v = sub.add_parser("verify-image", help="assert built image layers < ceiling")
     p_v.add_argument("--image", required=True)
@@ -230,7 +328,11 @@ def main() -> None:
     if args.cmd == "reconstruct-symlinks":
         reconstruct_symlinks(args.root)
     elif args.cmd == "bin":
-        bin_pack(args.src, args.out, args.bins, int(args.ceiling_gb * 1024**3))
+        floor = _floor_for(args.precision, args.min_gb) if (args.precision or args.min_gb is not None) else 0.5
+        bin_pack(args.src, args.out, args.bins, int(args.ceiling_gb * 1024**3), min_gb=floor)
+    elif args.cmd == "assert-weights":
+        assert_weights(args.root, _floor_for(args.precision, args.min_gb),
+                       int(args.min_shard_gb * 1024**3))
     elif args.cmd == "verify-image":
         sys.exit(verify_image(args.image, int(args.ceiling_gb * 1024**3)))
     elif args.cmd == "bins-needed":
