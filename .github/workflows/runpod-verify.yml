@@ -99,8 +99,9 @@ jobs:
             TTL="${{ inputs.ttl_minutes }}"
             PROMOTE="${{ inputs.promote }}"
           else
-            # Chained after a release build: verify the freshly pushed :latest on the datacenter tier.
-            TAG="latest"; TIER="h200"; TTL="30"; PROMOTE="true"
+            # Chained after a release build: REGRESSION run on the freshly pushed :latest.
+            # The auto path NEVER promotes -- promotion is a deliberate Phase C manual dispatch.
+            TAG="latest"; TIER="h200"; TTL="30"; PROMOTE="false"
           fi
           IMG="${REGISTRY}/${OWNER}/${WORKER_IMAGE}:${TAG}"
           echo "image=${IMG}"   >> "$GITHUB_OUTPUT"
