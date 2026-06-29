@@ -48,9 +48,9 @@ on:
         type: choice
         options: [h200, b200, rtx4090, rtx3090]
       ttl_minutes:
-        description: 'Hard pod TTL (auto-stop). Bounds GPU spend even if the job hangs.'
+        description: 'Hard pod TTL (auto-stop). Bounds GPU spend even if the job hangs. Default 60m gives a full bf16 regression pass a full hour of pod time.'
         required: true
-        default: '30'
+        default: '60'
         type: string
       promote:
         description: 'On PASS, promote the image onto the prod serverless endpoint.'
@@ -77,14 +77,19 @@ env:
   WORKER_IMAGE: vivijure-backend
   # Prod serverless endpoint promotion target (the vivijure-backend serverless endpoint).
   PROD_ENDPOINT_ID: t9wcvlxh8rc5la
-  COST_CEILING_USD: '5'
+  # Hard auto-stop cost ceiling on the verify pod -- a runaway BACKSTOP, not expected spend.
+  # A 60-min H200 is only ~$6; $50 ensures the gate is never guillotined by the money cap while
+  # still bounding a truly hung pod.
+  COST_CEILING_USD: '50'
 
 jobs:
   pod-verify:
     # Skip the chained path unless the upstream release build actually succeeded.
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 90m so the control job outlives the 60m pod TTL plus the pass/fail/promote/teardown steps
+    # (a ~55-min verify must not race the job timeout).
+    timeout-minutes: 90
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -101,7 +106,10 @@ jobs:
           else
             # Chained after a release build: REGRESSION run on the freshly pushed :latest.
             # The auto path NEVER promotes -- promotion is a deliberate Phase C manual dispatch.
-            TAG="latest"; TIER="h200"; TTL="30"; PROMOTE="false"
+            # TTL 60m: a full bf16 regression (SDXL keyframe -> Wan2.2-A14B i2v -> RIFE -> finish,
+            # x CAP-6 2-shot) gets a full hour of pod time, not a 30-min sprint. The 90m job
+            # timeout outlives this TTL plus teardown.
+            TAG="latest"; TIER="h200"; TTL="60"; PROMOTE="false"
           fi
           IMG="${REGISTRY}/${OWNER}/${WORKER_IMAGE}:${TAG}"
           echo "image=${IMG}"   >> "$GITHUB_OUTPUT"
