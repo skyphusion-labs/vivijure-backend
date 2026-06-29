@@ -215,7 +215,7 @@ Already in the existing harness: `vram_free_gb >= 8.0` after model load. No chan
   where the pipeline does not error but produces nothing useful. They are NOT a proxy for
   quality; sharpness_parity (already in the harness) handles that.
 - **Timing bounds** are HARD: exceed them and the check fails. They are sized at 3x the
-  expected median on an H100 to absorb normal cold-start variance without being trivially
+  expected median on an H200 to absorb normal cold-start variance without being trivially
   loose. A pod that times out at the TTL wall (`timed_out == True`) also fails regardless
   of which checks passed.
 - **No silent skip:** every coverage gap is recorded in the report (`coverage_gaps` dict).
@@ -248,13 +248,15 @@ Coverage gaps (CAP-5 LoRA) are RECORDED in the report but do NOT flip `passed` t
 | **Total expected** | **12-18 min** | -- |
 | **Hard TTL (pod wall-clock)** | -- | **30 min (1800s)** |
 
-GPU tier: H100 80GB HBM3 (first preference) or H200 (if available; same `i2v` tier as
-the current harness). Cost estimate at the hard TTL:
-- H100 @ $2.69/hr: 30-min cap = **$1.35 max**; expected run ~**$0.90**
+GPU tier: **H200 80GB HBM3 is the FLOOR** (B200 above it; both Blackwell sm_120). H100
+(Hopper sm_90) is EXCLUDED from the `i2v` tier: prod runs Wan2.2-A14B on Blackwell, so an
+H100 has a different kernel target and memory envelope and would not represent prod -- a
+gate run on it would be meaningless (Conrad, 2026-06-29). Cost estimate at the hard TTL:
+- H200 @ $3.99/hr: 30-min cap = **~$2.00 max**; expected run (12-18 min) ~**$0.80-1.20**
 
 These estimates are printed in the run report (conservative-high, same as the existing
-`cost_estimate_usd` function). If no H100/H200 is available at spin time, the harness
-aborts before spending anything and emits `spun: false`.
+`cost_estimate_usd` function). If no H200/B200 is available at spin time, the harness
+aborts before spending anything and emits `spun: false` (no fallback to a non-Blackwell card).
 
 ---
 

@@ -40,12 +40,14 @@ from typing import Any, Callable, Protocol
 
 # --------------------------------------------------------------------------- tiers + config
 
-# Tier -> the GPU class the image needs. i2v/bf16 needs an H200-class card (the ~28B MoE full-step
-# floor); a homelab-lite base-only image verifies on a cheap consumer card. Concrete ids are resolved
-# against live availability (PodClient.list_gpu_types) at spin time, never hard-coded to one sold-out
-# SKU. These are PREFERENCE ORDERS, most-capable first within budget.
+# Tier -> the GPU class the image needs. i2v/bf16 is pinned to BLACKWELL (sm_120): H200 is the FLOOR,
+# B200 above it. H100 (Hopper sm_90) is deliberately EXCLUDED: prod runs Wan2.2-A14B on Blackwell, so
+# an H100 has a different kernel target AND memory envelope and would NOT represent prod -- a gate run
+# on it would be meaningless (Conrad, 2026-06-29). A homelab-lite base-only image verifies on a cheap
+# consumer card. Concrete ids are resolved against live availability (PodClient.list_gpu_types) at spin
+# time, never hard-coded to one sold-out SKU. These are PREFERENCE ORDERS, the floor first then up.
 GPU_TIERS: dict[str, tuple[str, ...]] = {
-    "i2v": ("NVIDIA H200", "NVIDIA H100 NVL", "NVIDIA H100 80GB HBM3", "NVIDIA B200"),
+    "i2v": ("NVIDIA H200", "NVIDIA B200"),
     "base": ("NVIDIA RTX 4090", "NVIDIA RTX A5000", "NVIDIA A10", "NVIDIA L4"),
 }
 
@@ -63,7 +65,7 @@ class VerifyConfig:
     """One verify run's bounds + gates. All spend guards live here so a caller cannot fire an
     unbounded job by omission."""
     image: str                                  # the freshly built image ref (ghcr.io/...:tag)
-    tier: str = "i2v"                            # GPU_TIERS key; i2v => H200-class
+    tier: str = "i2v"                            # GPU_TIERS key; i2v => Blackwell, H200 floor / B200 up
     registry_auth_id: str | None = None          # containerRegistryAuthId (MCP-managed, no dashboard)
     ttl_seconds: int = 1800                      # HARD wall-clock auto-stop, regardless of progress
     max_first_frame_seconds: float = 300.0       # time-to-first-frame bound
@@ -81,7 +83,7 @@ class VerifyConfig:
 class RegressionConfig(VerifyConfig):
     """A FULL capability regression run's bounds + gates (extends the #131 smoke `VerifyConfig`). One
     file, one contract -- no fork. Adds the CAP-1..6 + BAK-3/4 bounds and turns on the pod-side
-    regression emitters via `VJ_REGRESSION`. Every bound is a hard wall sized ~3x the H100 median to
+    regression emitters via `VJ_REGRESSION`. Every bound is a hard wall sized ~3x the H200 median to
     absorb cold-start variance without being trivially loose (see docs/regression-plan.md)."""
     # CAP wall-clock bounds (seconds) -- exceed and the check fails; the pod TTL still auto-stops.
     max_keyframe_seconds: float = 120.0     # CAP-1 SDXL keyframe
