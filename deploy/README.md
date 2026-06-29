@@ -86,6 +86,15 @@ R2_BUCKET=vivijure
 The R2 token does double duty: the cold-start model mirror (`r2:<bucket>/models`) and job I/O
 (bundle in, render + state out). The worker holds no Cloudflare Access or skyphusion secret.
 
+**Sovereignty note (R2-ours vs self-contained):** with `HF_HUB_OFFLINE=1` baked in, `from_pretrained`
+never reaches the HF Hub, so the R2 token is the ONLY runtime weight source for any NON-baked path.
+On the fp8-PARTIAL image, the FINAL tier still lazy-pulls bf16 from OUR R2 (`ensure_i2v_models`), so
+that image is **prod-only** -- a BYO-RunPod renter without our R2 keys cannot load the final tier. The
+**full bf16 bake removes that R2 dependency** (final tier loads from baked weights), making the public
+datacenter image self-contained. `HF_TOKEN`, if present on the endpoint, is **build-time only**
+(`bake_hf_configs.py` fetches CONFIGS with the offline flags flipped); at runtime it is inert. Full
+discussion: [../docs/release-gate.md](../docs/release-gate.md#sovereignty-r2-ours-prod-only-vs-self-contained-public).
+
 ## Dependency pins
 
 `deploy/requirements.txt` is the single source of the runtime version set (torch installs

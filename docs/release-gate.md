@@ -83,6 +83,36 @@ Build facts:
 > pod-staging gate. This section is the locked build spec; no homelab build action is taken until
 > the datacenter image passes verify.
 
+## Sovereignty: R2-ours (prod-only) vs self-contained (public)
+
+This is the crux of why the FULL bf16 bake matters, not just the fp8 one.
+
+**Prod state (re-baselined 2026-06-29):** the production serverless endpoint (`t9wcvlxh8rc5la`) runs
+image **0.2.28 (fp8-baked PARTIAL)** with **no network volume** (`networkVolumeId ""`) and the
+template env carries **no `VJ_VOLUME_ROOT` / `VJ_VOLUME_SELF_PRELOAD`** -- volumes are already OFF in
+prod, so there is nothing to detach; the bake is purely additive to the live config.
+
+**The runtime weight sources, confirmed from code:**
+- A baked worker reads weights from the image (`HF_HUB_OFFLINE=1` is baked into the Dockerfile ENV, so
+  `from_pretrained` NEVER reaches the HF Hub -- the only source is the local cache).
+- The fp8-PARTIAL image bakes the draft/standard path but the **final tier still lazy-pulls bf16 from
+  `r2:vivijure/models/hf-cache/hub/...`** (`harness/models_mirror.ensure_i2v_models`). That is **OUR
+  R2** (the `vivijure` bucket via our `R2_*` creds), not HF-public.
+- `HF_TOKEN` in the template env is **build-time only**: `deploy/bake_hf_configs.py` flips the offline
+  flags to 0 to fetch repo CONFIGS at build. At runtime (offline=1) `HF_TOKEN` is inert. So it is NOT
+  a runtime weight source; our R2 creds are.
+
+**Consequence:** the fp8-partial image's final tier depends on OUR R2 creds, so it is **prod-only** --
+a BYO-RunPod renter who deploys the public image with their own keys has no access to our R2 bucket
+and cannot load the final tier. **The FULL bf16 bake is what makes the public datacenter image
+self-contained:** the final tier loads from BAKED full-precision weights, killing the R2 lazy-pull
+entirely (the #118 "B-seam" bf16-lazy-on-final becomes obsolete). No R2 dependency, no creds, no
+egress -- the renter runs it standalone. That is the public-release / sovereignty win the bake exists
+for; the fp8 image is the prod-only stepping stone.
+
+(Serve-side disk is a non-issue: the RunPod worker container disk is 500 GB, so a ~117 GB full-bf16
+image fits with room to spare. The only disk constraint is the BUILD runner -- see the disk budget.)
+
 ## See also
 
 - [cold-start-design.md](cold-start-design.md) -- why the bake replaced the network-volume plan, and
