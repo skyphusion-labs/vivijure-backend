@@ -45,8 +45,9 @@ different process, OUTSIDE the in-process guard). Run the full render on each of
 
 **Mechanism: a userspace socket-guard in `vj_derisk.py` (PR #161), NOT iptables.** CAP_NET_ADMIN is not
 available on RunPod (see the next section), so a kernel-level OUTPUT-DROP is off the table. The guard
-wraps `socket.getaddrinfo` + `socket.socket.connect` in the render process and, in Design B (FULL-BLOCK),
-allows ONLY `AF_UNIX` + loopback and DROPs everything else INCLUDING R2; any other `connect()` raises. It installs when `DERISK_EGRESS_LOCK=1` is present in the env, which
+wraps `socket.socket.connect` in the render process and, in Design B (FULL-BLOCK), allows ONLY `AF_UNIX`
++ loopback and DROPs every other connect INCLUDING R2; any blocked `connect()` raises. `getaddrinfo` is
+left UNWRAPPED so name resolution still works (no import-time crash); only the CONNECT is gated. It installs when `DERISK_EGRESS_LOCK=1` is present in the env, which
 the fire injects pod-level via `runpodctl --env` so the inner $RUN render children inherit it (no inner
 code change beyond the flag; baseline runs omit it, so zero behavior change).
 
@@ -77,8 +78,9 @@ the bake is incomplete. On `:0.3.3` (facexlib baked) the render succeeds = true-
 read-path uploader keeps working (it is a SEPARATE process, outside the guard), so the @event stream still
 reaches R2 even though the render itself has zero network.
 
-EXPECT_SHA for the injected driver is set in #161 (`22709023...`); the inner integrity gate uses exactly
-these driver bytes.
+EXPECT_SHA for the injected driver is set in #161
+(`22709023154a6d6d3ddbed2c6e93d22df52d460eb0a83aaf4304a67ebd34ffbf`, in `deploy/derisk_pod_start.sh` on
+main); the inner integrity gate uses exactly these driver bytes.
 
 ## CAP_NET_ADMIN -- SETTLED: not available on RunPod (iptables is OUT)
 
