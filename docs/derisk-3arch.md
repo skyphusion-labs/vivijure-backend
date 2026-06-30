@@ -133,80 +133,100 @@ the first command (`arch-gate`) on the canary.
 ## Per-card deploy commands (Strummer, infra -- locked + reproducible)
 
 Driven from a checkout of this repo (`~/vivijure-backend`) via `runpodctl` (the RunPod MCP cannot set a
-pod start command). Every op runs in Strummer's own login shell (`sudo -u strummer bash -lc '<op>'`). The
-start command is the committed `deploy/derisk_pod_start.sh` wrapped in the boto3->R2 read-path scaffold,
-base64-transported so it survives the shell -> runpodctl -> RunPod -> container quoting layers
-byte-identical.
+pod start command). Every op runs in Strummer's own **login** shell (`sudo -u strummer bash -l ...`) so
+the per-identity `RUNPOD_API_KEY` loads -- `runpodctl pod create` errors `api key not found` from a
+non-login shell. The start command is the committed `deploy/derisk_pod_start.sh` wrapped in the committed
+boto3->R2 read-path outer `deploy/derisk_read_wrapper.sh`, base64-transported so it survives the shell ->
+runpodctl -> RunPod -> container quoting layers byte-identical.
+
+**Use `runpodctl pod create`, NOT the deprecated `runpodctl create pod`.** The deprecated form takes
+repeated `--env KEY=VALUE` and splits each on `=`, which CORRUPTS a base64 value (base64 padding is `=`):
+`--env DERISK_INNER_B64=<...=>` fails client-side with `wrong env value`. The modern `pod create` takes
+`--env` as a single **JSON object** (carries `=` cleanly) and `--docker-args` for the start command.
 
 **Reference template `reg2j3abgx`** (`vivijure-derisk-bf16-v0.3.1`) carries the right shape (image
 `:0.3.1`, disk 220 GB, NO volume/mount, `registry=null`), but its `args` is EMPTY (the MCP
-`create-template` silently dropped the start command). So we deploy with **explicit `--imageName`** and
-inject the start command via `--args`; the template is a reference, not the deploy mechanism.
+`create-template` silently dropped the start command). So we deploy with **explicit `--image`** and inject
+the start command via `--docker-args`; the template is a reference, not the deploy mechanism.
 
-**Locked `--gpuType` strings + per-card `--cost` ceilings** (verified against the live RunPod catalog;
-two of the three names are ambiguous, so the EXACT string matters -- a fuzzy match lands the wrong
-silicon and de-risks the wrong arch):
+**Locked `--gpu-id` strings + per-card expected secure $/hr** (verified against the live RunPod catalog +
+`runpodctl gpu list`; two of the three names are ambiguous, so the EXACT string matters -- a fuzzy match
+lands the wrong silicon and de-risks the wrong arch). The `--gpu-id` value is identical to the old
+`--gpuType` string:
 
-| Order | Card (arch) | `--gpuType` (exact) | `--cost` | Cloud |
+| Order | Card (arch) | `--gpu-id` (exact) | ~secure $/hr | Cloud |
 |---|---|---|---|---|
-| 1 (canary) | RTX PRO 6000 Blackwell Server Edition (sm_120) | `NVIDIA RTX PRO 6000 Blackwell Server Edition` | `2.50` | secure |
-| 2 | H200 SXM 141 GB (sm_90, Hopper) | `NVIDIA H200` | `5.00` | secure |
-| 3 | B200 180 GB (sm_100) | `NVIDIA B200` | `6.50` | secure |
+| 1 (canary) | RTX PRO 6000 Blackwell Server Edition (sm_120) | `NVIDIA RTX PRO 6000 Blackwell Server Edition` | ~2.09 | secure |
+| 2 | H200 SXM 141 GB (sm_90, Hopper) | `NVIDIA H200` | ~4.39 | secure |
+| 3 | B200 180 GB (sm_100) | `NVIDIA B200` | ~5.89 | secure |
 
 NOT the RTX PRO 6000 `Workstation`/`Max-Q` editions; NOT `NVIDIA H200 NVL` (143 GB). B200 is
-**secure-cloud only**, so all three deploy `--secureCloud` for a uniform, reliable pool. Ceilings sit
-just above secure on-demand (~$2.09 / ~$4.39 / ~$5.89) as the runaway guard; at a 60-min cap the worst
-case is ~$2 / ~$4.4 / ~$5.9 per card, all far under the #136 ~$50 cap (the 60-min terminate is the
-binding limit, not `--cost`).
+**secure-cloud only**, so all three deploy `--cloud-type SECURE` for a uniform, reliable pool. `pod
+create` has **no `--cost` flag**; the hard spend bound is the native `--terminate-after` (60-min cap
+below), well under the #136 ~$50 ceiling. At a 60-min cap the worst case is ~$2 / ~$4.4 / ~$5.9 per card.
+
+**Placement note (secure capacity for a 220 GB container disk is scarce).** An unconstrained `pod create`
+on secure RTX PRO 6000 frequently returns `This machine does not have the resources to deploy your pod`
+or `There are no longer any instances available with the requested specifications` -- the GPU stock is
+"High" but the machines that can hold a 220 GB container disk for this card are not always placeable. Do
+NOT lower the disk (an unpack failure would confound the de-risk) and do NOT fall back to community (the
+exfil key is bucket-level Object R+W on `vivijure` -- R2 cannot prefix-scope -- so an untrusted host gets
+R+W to the whole bucket). Instead **probe data centers**: retry `pod create` with `--data-center-ids`
+targeted one DC at a time until one places (first hit wins; failed attempts cost $0). The sm_120 canary
+placed in **US-KS-2** on 2026-06-30 after 8 secure DCs reported no stock.
 
 **R2 exfil creds (mandatory read path):** inject ONLY the `R2_S3_*` exfil key (`R2_S3_ENDPOINT` /
-`R2_S3_ACCESS_KEY_ID` / `R2_S3_SECRET_ACCESS_KEY` / `R2_S3_BUCKET`), read-write scoped to the `derisk/`
-prefix, NEVER the backend's `R2_*` model-pull names (so the baked backend has no model-pull creds at
-all). The deploy wraps the committed inner in a boto3->R2 uploader that PUTs `/workspace/out/derisk.log`
+`R2_S3_ACCESS_KEY_ID` / `R2_S3_SECRET_ACCESS_KEY` / `R2_S3_BUCKET`), a DEDICATED bucket-level Object R+W
+token on `vivijure` (R2 tokens are bucket-scoped, NOT prefix-scoped -- "derisk/ only" is not enforceable
+on the key, so the token is throwaway + revoked at teardown), NEVER the backend's `R2_*` model-pull names
+(so the baked backend has no model-pull creds at all). The read-path outer PUTs `/workspace/out/derisk.log`
 to `r2:vivijure/derisk/<label>/derisk.log` every ~15s; no `R2_S3_*` creds = blind pod, do not fire. The
-creds are sourced from your secret store and presence-checked with `${VAR:+SET}`, never echoed.
+creds are sourced from a 600 drop file and presence-checked with `${VAR:+SET}`, never echoed. Shred the
+drop file only AFTER the pod is confirmed created (a pre-fire shred strands you if the fire fails
+downstream).
 
 ### Fire the canary (sm_120), then fan out
 
 Both halves of what fires are committed + change-controlled: the de-risk inner (`deploy/derisk_pod_start.sh`)
 and the boto3->R2 read-path outer (`deploy/derisk_read_wrapper.sh`). The deploy only base64-transports
-them into `runpodctl --args`, so they survive the shell -> runpodctl -> RunPod -> container quoting layers
-byte-identical -- what fires is exactly the reviewed files (no hand-pasted heredoc).
+them, so what fires is exactly the reviewed files (no hand-pasted heredoc).
 
 ```
-cd ~/vivijure-backend && git pull --ff-only
+cd ~/vivijure-backend && git checkout main && git pull --ff-only
 
-# The R2_S3_* exfil creds must be loaded in YOUR shell (presence-check only, NEVER echo a value):
+# R2_S3_* exfil creds loaded in YOUR login shell (presence-check only, NEVER echo a value):
 for v in R2_S3_ENDPOINT R2_S3_ACCESS_KEY_ID R2_S3_SECRET_ACCESS_KEY R2_S3_BUCKET; do
   printf '%s=%s\n' "$v" "${!v:+SET}"
 done
 
-LABEL=sm120
-INNER_B64=$(base64 -w0 deploy/derisk_pod_start.sh)     # the de-risk inner
-WRAP_B64=$(base64 -w0 deploy/derisk_read_wrapper.sh)   # the boto3->R2 read-path outer
+export DERISK_LABEL=sm120
+export DERISK_INNER_B64="$(base64 -w0 deploy/derisk_pod_start.sh)"   # de-risk inner
+WRAP_B64="$(base64 -w0 deploy/derisk_read_wrapper.sh)"               # boto3->R2 read-path outer
 
-runpodctl create pod \
+# --env is a JSON OBJECT (the fix): build it without echoing the secret.
+ENVJSON="$(python3 -c 'import os,json;print(json.dumps({k:os.environ[k] for k in ["DERISK_LABEL","DERISK_INNER_B64","R2_S3_ENDPOINT","R2_S3_ACCESS_KEY_ID","R2_S3_SECRET_ACCESS_KEY","R2_S3_BUCKET"]}))')"
+TERM_AFTER="$(date -u -d '+60 minutes' +%Y-%m-%dT%H:%M:%SZ)"         # native hard TTL
+DC=US-KS-2   # probe DCs until one places; see the placement note above
+
+runpodctl pod create \
   --name vj-derisk-sm120-rtxpro6000 \
-  --imageName ghcr.io/skyphusion-labs/vivijure-backend:0.3.1 \
-  --gpuType 'NVIDIA RTX PRO 6000 Blackwell Server Edition' \
-  --gpuCount 1 --secureCloud --cost 2.50 \
-  --containerDiskSize 220 \
-  --env DERISK_LABEL="$LABEL" \
-  --env DERISK_INNER_B64="$INNER_B64" \
-  --env R2_S3_ENDPOINT="$R2_S3_ENDPOINT" \
-  --env R2_S3_ACCESS_KEY_ID="$R2_S3_ACCESS_KEY_ID" \
-  --env R2_S3_SECRET_ACCESS_KEY="$R2_S3_SECRET_ACCESS_KEY" \
-  --env R2_S3_BUCKET="$R2_S3_BUCKET" \
-  --args "bash -lc 'echo $WRAP_B64 | base64 -d | bash'"
+  --image ghcr.io/skyphusion-labs/vivijure-backend:0.3.1 \
+  --gpu-id "NVIDIA RTX PRO 6000 Blackwell Server Edition" \
+  --gpu-count 1 --cloud-type SECURE \
+  --data-center-ids "$DC" \
+  --container-disk-in-gb 220 --ssh=false \
+  --terminate-after "$TERM_AFTER" \
+  --env "$ENVJSON" \
+  --docker-args "bash -lc 'echo $WRAP_B64 | base64 -d | bash'" \
+  -o json
 ```
 
-`runpodctl --env` takes `VAR=value` only (no bare pull-from-env form), so the secret value transits
-`runpodctl`'s argv. Acceptable here: it is your local operator shell, the value is argv-transient for one
-short-lived invocation, and it never lands in a tracked file -- only the variable NAMES appear above; the
-values expand from your already-loaded secret store, presence-checked with `${VAR:+SET}`. H200 + B200 are
-identical except `LABEL` / `--name` / `--gpuType` / `--cost`:
-- H200 (sm_90):  `LABEL=sm90`   `--gpuType 'NVIDIA H200'`   `--cost 5.00`   `--name vj-derisk-sm90-h200`
-- B200 (sm_100): `LABEL=sm100`  `--gpuType 'NVIDIA B200'`   `--cost 6.50`   `--name vj-derisk-sm100-b200`
+The secret rides in the JSON `--env` value on `runpodctl`'s argv: acceptable here (local operator shell,
+argv-transient for one short-lived invocation, never in a tracked file -- only variable NAMES appear
+above; values expand from the loaded creds). H200 + B200 are identical except `DERISK_LABEL` / `--name` /
+`--gpu-id` (and pick a DC that places):
+- H200 (sm_90):  `DERISK_LABEL=sm90`   `--gpu-id 'NVIDIA H200'`   `--name vj-derisk-sm90-h200`
+- B200 (sm_100): `DERISK_LABEL=sm100`  `--gpu-id 'NVIDIA B200'`   `--name vj-derisk-sm100-b200`
 
 Fan H200 + B200 out IN PARALLEL only AFTER the canary emits `@event arch_gate {... "passed": true}` (and
 ideally `@event derisk_pass`). A canary `@event derisk_fail stage=archgate` is a hard STOP: do not fan
@@ -216,9 +236,10 @@ out, flag the lead + Rollins.
 
 ```
 LABEL=sm120   # sm90 / sm100 for the fan-out pods
-runpodctl get pod <podId>                 # status only (no pod-log API)
+runpodctl pod list 2>/dev/null | grep vj-derisk        # status only (no pod-log API)
 # Poll the @event stream the pod's boto3 uploader PUTs every ~15s. The operator-side rclone READ is
-# fine -- the no-pull tripwire is on the POD, not here. derisk_boot appears within ~15s = read proven.
+# fine -- the no-pull tripwire is on the POD, not here. NOTE: the :0.3.1 image is ~96.7 GiB, so the
+# cold-start pull takes several minutes before the wrapper runs; derisk_boot lands after the pull.
 while sleep 12; do
   clear; rclone cat "r2:vivijure/derisk/$LABEL/derisk.log" 2>/dev/null || echo "(no object yet)"
 done
@@ -229,31 +250,32 @@ the raw `arch_list` VERBATIM -- closes #14); `@event gpu_probe`/`baked_probe`/`r
 fired=false`; `@event render_done film_bytes>0`; `@event i2v_jit ... first_call_jit_seconds` (per-arch
 JIT cost); terminal `@event derisk_pass` (green) or `@event derisk_fail stage=<...>`.
 
-### TTL + cost cap + teardown (no native pod TTL)
+### TTL + teardown (native `--terminate-after`)
 
-`runpodctl` has NO native TTL, so the cap is enforced manually + by the lead's independent sweep:
-- The instant each pod is up, send the **pod ID + fire timestamp** to the lead -- his RunPod-MCP sweep
-  hard-terminates any straggler past ~75 min (independent backstop to a dropped watch).
-- Primary cap: on a terminal `@event` (pass or fail) OR at 60 min, whichever first --
-  `runpodctl remove pod <podId>` on PASS; `runpodctl pod stop <podId>` on FAIL (keep the disk for a
-  debug re-spin, emit the resume handle).
-- `--cost` is the $/hr price ceiling (runaway guard), not a spend cap; the 60-min terminate is the real
-  bound. NEVER leave a pod billing past the watch.
+`runpodctl pod create --terminate-after <ISO8601 Z>` IS a native hard TTL -- set it to fire+60min so the
+pod self-terminates regardless of outcome. The lead's independent ~75-min RunPod-MCP sweep stays as the
+second layer (send the **pod ID + fire timestamp** the instant the pod is up).
+- On a terminal `@event` (pass or fail) OR at the TTL, whichever first -- `runpodctl remove pod <podId>`
+  on PASS; `runpodctl pod stop <podId>` on FAIL (keep the disk for a debug re-spin, emit the resume
+  handle). NEVER leave a pod billing past the watch.
+- Teardown also REVOKES the throwaway R2 exfil token (bucket-level R+W on `vivijure` -- revoke promptly).
 
 ## RESUME (post-checkpoint, step one)
 
 Held at the clean pre-fire boundary (no GPU pods running; nothing to revert; prod `:0.2.28` untouched).
 To resume the #15 3-arch de-risk:
 
-1. Rollins pings Strummer to FIRE the **RTX PRO 6000 Blackwell Server Edition (sm_120) canary** from the
-   committed `deploy/derisk_pod_start.sh` (wrapped in the boto3->R2 read-path scaffold, base64 via
-   runpodctl), image `:0.3.1`, NO volume, `R2_S3_*` exfil creds set (boto3->R2 read path), #136 caps
-   (~$50 / 60-min manual terminate). Strummer sends the pod ID to the lead.
+1. The lead mints a DEDICATED bucket-level Object-R+W-on-`vivijure` token and drops the four `R2_S3_*`
+   into Strummer's shell (600 file). Strummer FIRES the **RTX PRO 6000 Blackwell Server Edition (sm_120)
+   canary** via `runpodctl pod create` (login shell; JSON `--env`; `--docker-args`; `--gpu-id`;
+   `--cloud-type SECURE`; `--container-disk-in-gb 220`; native `--terminate-after`=fire+60min; probe
+   `--data-center-ids` until one places), image `:0.3.1`, NO volume. Strummer sends the pod ID + fire
+   timestamp to the lead, then shreds the creds file (post-confirm).
 2. Watch for `@event arch_gate {... "missing": [], "passed": true}` -- report the raw `arch_list`
    verbatim (closes #14). A missing base arch = hard STOP, do-not-promote, flag.
 3. On `@event derisk_pass` (canary green), fan out **H200 (sm_90)** + **B200 (sm_100)** in parallel.
 4. Per pod assert: `gpu_probe` kernel_ok + capability_in_arch_list; `baked_probe` vj_baked +
    precision=bf16 + a Wan i2v repo (image, not a mount); `rclone_tripwire fired=false` (no-pull);
    `render_done film_bytes>0`; `i2v_jit` first-call JIT captured per arch.
-5. PRs awaiting the lead's merge: #145 (H200 conservative-high cost) and #147 (this wrapper + runbook).
+5. Teardown: `runpodctl remove pod` each pod (or `stop` on fail) and REVOKE the throwaway exfil token.
    #5 serverless prod promote remains gated on Conrad.
