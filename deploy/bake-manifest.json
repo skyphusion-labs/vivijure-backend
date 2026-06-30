@@ -65,7 +65,8 @@
   "finish_dirs": [
     {"dir": "antelopev2", "approx_gb": 0.4, "note": "InstantID insightface antelopev2 pack (read directly from VJ_MODELS_ROOT/antelopev2)."},
     {"dir": "rife", "approx_gb": 0.05, "note": "FRAME_INTERP RIFE flownet.pkl (read from VJ_MODELS_ROOT/rife/flownet.pkl)."},
-    {"dir": "GFPGANv1.4", "approx_gb": 0.3, "note": "FACE_RESTORE GFPGANv1.4.pth (read from VJ_MODELS_ROOT/GFPGANv1.4/GFPGANv1.4.pth)."}
+    {"dir": "GFPGANv1.4", "approx_gb": 0.3, "note": "FACE_RESTORE GFPGANv1.4.pth (read from VJ_MODELS_ROOT/GFPGANv1.4/GFPGANv1.4.pth)."},
+    {"dir": "facexlib", "approx_gb": 0.2, "note": "facexlib detection_Resnet50_Final.pth + parsing_parsenet.pth for GFPGAN/CodeFormer face restore; read offline from VJ_MODELS_ROOT/facexlib via _ensure_facexlib_offline. Closes the finish-leg github fetch the sm_120 de-risk surfaced."}
   ],
   "drop_repos": [
     {"repo": "models--Wan-AI--Wan2.2-T2V-A14B-Diffusers", "reason": "text-to-video; never loaded (DEFAULT_SKIP_REPOS). ~117.5 GiB saved."},

@@ -113,7 +113,7 @@ def probe() -> int:
     hub = Path(models_root) / "hf-cache" / "hub"
     i2v_repos = sorted(p.name for p in hub.glob("models--*Wan*")) if hub.is_dir() else []
     finish_dirs = sorted(p.name for p in Path(models_root).iterdir()
-                         if p.is_dir() and p.name in ("antelopev2", "rife", "GFPGANv1.4"))
+                         if p.is_dir() and p.name in ("antelopev2", "rife", "GFPGANv1.4", "facexlib"))
 
     from vivijure_backend.harness.models_mirror import is_baked, repo_in_hf_cache
     from vivijure_backend.models import DEFAULT_SPECS, ModelRole, _select_i2v_weights
@@ -124,7 +124,7 @@ def probe() -> int:
     # runtime asked for the un-baked -fp8 repo, and that LocalEntryNotFoundError reached render. Reuse
     # the runtime's own i2v decision (_select_i2v_weights) so the probe can never assert a different
     # repo than the load resolves; check the keyframe base too (same un-baked-repo-offline class).
-    # Finish models load direct file paths (finish_dirs below), not HF snapshots, so they are separate.
+    # Finish-leg face-restore (facexlib) weights get their own $0 file-presence gate just below.
     i2v_spec = DEFAULT_SPECS[ModelRole.I2V]
     i2v_final = os.environ.get("VJ_I2V_DISTILL", "1") == "0"
     i2v_fp8_present = bool(i2v_spec.fp8_repo_id) and repo_in_hf_cache(i2v_spec.fp8_repo_id) if baked else False
@@ -137,6 +137,18 @@ def probe() -> int:
         ev("derisk_fail", stage="render_repo_not_cached", missing_repos=missing_repos,
            render_repos=render_repos, i2v_final_tier=i2v_final,
            hint="runtime would from_pretrained these offline and raise LocalEntryNotFoundError")
+        return 1
+
+    # $0 finish-leg gate: the face-restore path (GFPGAN/CodeFormer -> facexlib) loads detection +
+    # parsing weights from <models_root>/facexlib; if absent, facexlib fetches them from github at
+    # render time (the finish-leg egress the sm_120 de-risk surfaced). Assert them here, fail-closed.
+    facexlib_dir = Path(models_root) / "facexlib"
+    facexlib_missing = [fn for fn in ("detection_Resnet50_Final.pth", "parsing_parsenet.pth")
+                        if not (facexlib_dir / fn).is_file()]
+    if facexlib_missing:
+        ev("derisk_fail", stage="finish_weights_not_cached", missing=facexlib_missing,
+           facexlib_dir=str(facexlib_dir),
+           hint="facexlib would fetch these from github at face-restore time (finish-leg egress)")
         return 1
 
     import torch

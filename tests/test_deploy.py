@@ -153,3 +153,23 @@ def test_derisk_driver_keeps_the_build_render_inputs_marker():
     integrity gate's discriminator stays valid."""
     root = Path(__file__).resolve().parents[1]
     assert "def build_render_inputs" in (root / "deploy" / "vj_derisk.py").read_text()
+
+
+# ----------------------------------------------------------- facexlib baked as a finish_dir (offline)
+
+def test_bake_manifest_declares_facexlib_finish_dir():
+    """The face-restore finish leg pulls facexlib detection+parsing weights; they must be baked like
+    the other finish_dirs (rife/GFPGANv1.4) so face restore is offline. Guards manifest drift."""
+    import json
+    root = Path(__file__).resolve().parents[1]
+    m = json.loads((root / "deploy" / "bake-manifest.json").read_text())
+    dirs = {fd["dir"] for fd in m["finish_dirs"]}
+    assert "facexlib" in dirs, "facexlib missing from bake-manifest finish_dirs"
+
+
+def test_mirror_pulls_facexlib_finish_dir():
+    """The R2 cold-mirror fallback must pull facexlib alongside rife/GFPGANv1.4, or a non-baked worker
+    would fetch facexlib from github at render time."""
+    root = Path(__file__).resolve().parents[1]
+    src = (root / "src" / "vivijure_backend" / "harness" / "models_mirror.py").read_text()
+    assert "facexlib" in src, "models_mirror does not mirror facexlib"

@@ -417,7 +417,7 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     # ModelServer.frame_interpolator loads $VJ_MODELS_ROOT/rife/flownet.pkl and
     # ModelServer.face_restorer loads $VJ_MODELS_ROOT/GFPGANv1.4/GFPGANv1.4.pth directly,
     # so they need their own R2 mirror legs separate from the HF-cache pull above.
-    for subdir in ("rife", "GFPGANv1.4"):
+    for subdir in ("rife", "GFPGANv1.4", "facexlib"):
         dst = models_root / subdir
         dst.mkdir(parents=True, exist_ok=True)
         legs.append((subdir, _timed(
@@ -441,7 +441,8 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     # otherwise-successful cold mirror -- the exact path we are trying to stabilize.
     try:
         total_bytes = (_dir_bytes(hf_home) + _dir_bytes(antelope)
-                       + _dir_bytes(models_root / "rife") + _dir_bytes(models_root / "GFPGANv1.4"))
+                       + _dir_bytes(models_root / "rife") + _dir_bytes(models_root / "GFPGANv1.4")
+                       + _dir_bytes(models_root / "facexlib"))
         log(_mirror_event(legs, total_bytes, cold=True, model_version=model_version))
     except Exception as exc:
         log(f"models_mirror: mirror telemetry skipped ({exc})")

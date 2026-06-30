@@ -125,3 +125,44 @@ def test_i2v_not_baked_pulls_bf16_and_quantizes():
     assert repo == _I2V_SPEC.repo_id
     assert weights_are_fp8 is False
     assert pull is True
+
+
+# ------------------------------------------------------- facexlib offline shim (finish-leg egress gap)
+
+from vivijure_backend.models import _ensure_facexlib_offline, _FACEXLIB_WEIGHTS
+
+
+def test_ensure_facexlib_offline_symlinks_baked_weights_where_facexlib_looks(tmp_path, monkeypatch):
+    # GFPGAN 1.3.8 looks in cwd-relative gfpgan/weights; the shim must place the baked weights there
+    # so facexlib's os.path.exists() check passes and it never fetches from github.
+    models_root = tmp_path / "models"
+    baked = models_root / "facexlib"
+    baked.mkdir(parents=True)
+    for fn in _FACEXLIB_WEIGHTS:
+        (baked / fn).write_bytes(b"w")
+    monkeypatch.chdir(tmp_path)
+    _ensure_facexlib_offline(str(models_root))
+    for fn in _FACEXLIB_WEIGHTS:
+        link = tmp_path / "gfpgan" / "weights" / fn
+        assert link.exists(), f"{fn} not resolvable where facexlib looks"
+        assert link.resolve() == (baked / fn).resolve()
+
+
+def test_ensure_facexlib_offline_is_a_noop_without_baked_weights(tmp_path, monkeypatch):
+    # No baked dir -> nothing to link, must not raise and must not create empty link targets.
+    monkeypatch.chdir(tmp_path)
+    _ensure_facexlib_offline(str(tmp_path / "absent"))
+    assert not (tmp_path / "gfpgan" / "weights").exists()
+
+
+def test_ensure_facexlib_offline_idempotent(tmp_path, monkeypatch):
+    models_root = tmp_path / "models"
+    baked = models_root / "facexlib"
+    baked.mkdir(parents=True)
+    for fn in _FACEXLIB_WEIGHTS:
+        (baked / fn).write_bytes(b"w")
+    monkeypatch.chdir(tmp_path)
+    _ensure_facexlib_offline(str(models_root))
+    _ensure_facexlib_offline(str(models_root))  # second call must not raise on existing links
+    for fn in _FACEXLIB_WEIGHTS:
+        assert (tmp_path / "gfpgan" / "weights" / fn).exists()
