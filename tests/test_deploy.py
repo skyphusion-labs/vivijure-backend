@@ -271,3 +271,46 @@ def test_vj_derisk_probe_asserts_facexlib_sha_from_baked_manifest():
     src = (Path(__file__).resolve().parents[1] / "deploy" / "vj_derisk.py").read_text()
     assert "bake-manifest.json" in src
     assert "finish_weights_sha_mismatch" in src
+
+
+# ---------------------------------------- de-risk egress guard (#17/#159, full-block socket-userspace)
+
+import socket as _socket
+
+
+def _load_vj_derisk():
+    return _load_deploy_mod("vj_derisk")
+
+
+def test_egress_allowed_full_block_only_loopback_and_afunix():
+    vj = _load_vj_derisk()
+    A = lambda fam, addr: vj._egress_allowed(fam, addr)[0]
+    # ALLOW: AF_UNIX + every loopback form
+    assert A(_socket.AF_UNIX, "/var/run/x.sock")
+    for lb in ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"):
+        assert A(_socket.AF_INET, (lb, 8000)), lb
+    # BLOCK: everything non-loopback, regardless of port -- HF, github, R2-ish, DNS-over-TCP, arbitrary
+    assert not A(_socket.AF_INET, ("140.82.112.3", 443))      # github
+    assert not A(_socket.AF_INET, ("3.160.0.1", 443))         # huggingface-ish CDN
+    assert not A(_socket.AF_INET, ("104.18.0.1", 443))        # r2-ish (R2 is NOT allowed under full block)
+    assert not A(_socket.AF_INET, ("8.8.8.8", 53))            # no DNS-over-TCP allowance either
+    assert not A(_socket.AF_INET, ("203.0.113.9", 8080))
+
+
+def test_egress_allowed_non_inet_address_is_passthrough():
+    vj = _load_vj_derisk()
+    # a non-tuple address (defensive) is not an inet egress decision -> allowed (let the OS handle it)
+    assert vj._egress_allowed(_socket.AF_INET, None)[0]
+
+
+def test_flag_on_truthy_set():
+    vj = _load_vj_derisk()
+    import os
+    for v in ("1", "true", "TRUE", "yes", "on"):
+        os.environ["VJ_TEST_FLAG"] = v
+        assert vj._flag_on("VJ_TEST_FLAG")
+    for v in ("", "0", "false", "no", "off"):
+        os.environ["VJ_TEST_FLAG"] = v
+        assert not vj._flag_on("VJ_TEST_FLAG")
+    os.environ.pop("VJ_TEST_FLAG", None)
+    assert not vj._flag_on("VJ_TEST_FLAG")

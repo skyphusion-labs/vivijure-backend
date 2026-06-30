@@ -53,7 +53,7 @@ printf '%s' "$DERISK_DRIVER_B64" | base64 -d | gunzip > /workspace/vj_derisk.py 
 # exists ONLY in the #151 fix (absence == old/stale driver). Structured @event so the watcher asserts on the
 # channel, not prose. On mismatch: emit @event driver_corrupt, then sleep so the boto3->R2 uploader PUTs the
 # event (the read path needs the pod alive ~15s+ or the terminal event never reaches R2), then exit non-zero.
-EXPECT_SHA=0a600a9594b70b56ddebd62b95a86b88b17f96c7ca2c02ca071955d7699660d0
+EXPECT_SHA=22709023154a6d6d3ddbed2c6e93d22df52d460eb0a83aaf4304a67ebd34ffbf
 GOT_SHA=$(sha256sum /workspace/vj_derisk.py | cut -d' ' -f1)
 if [ "$GOT_SHA" != "$EXPECT_SHA" ] || ! grep -q 'def build_render_inputs' /workspace/vj_derisk.py; then
   echo "@event driver_corrupt {\"ok\": false, \"expected_sha256\": \"$EXPECT_SHA\", \"got_sha256\": \"$GOT_SHA\", \"marker\": \"build_render_inputs\"}"
