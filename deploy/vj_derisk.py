@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import statistics
@@ -140,16 +141,60 @@ def probe() -> int:
         return 1
 
     # $0 finish-leg gate: the face-restore path (GFPGAN/CodeFormer -> facexlib) loads detection +
-    # parsing weights from <models_root>/facexlib; if absent, facexlib fetches them from github at
-    # render time (the finish-leg egress the sm_120 de-risk surfaced). Assert them here, fail-closed.
+    # parsing weights from <models_root>/facexlib; if absent OR not the pinned bytes, facexlib would
+    # fetch them from github at render time (the finish-leg egress the sm_120 de-risk surfaced), and a
+    # corrupted/substituted .pth would silently degrade face restore. Assert exact size + sha256
+    # against the baked manifest (the SAME pins the staging upload + the build-time bake gate use), so
+    # the three cannot drift. Fail-closed, pre-GPU, $0. Reads the manifest baked at <models_root>/
+    # bake-manifest.json (gated into .vj-baked at build); falls back to presence-only on an older image
+    # that predates the baked manifest, emitting a note so the weaker check is never silent.
     facexlib_dir = Path(models_root) / "facexlib"
-    facexlib_missing = [fn for fn in ("detection_Resnet50_Final.pth", "parsing_parsenet.pth")
-                        if not (facexlib_dir / fn).is_file()]
-    if facexlib_missing:
-        ev("derisk_fail", stage="finish_weights_not_cached", missing=facexlib_missing,
-           facexlib_dir=str(facexlib_dir),
-           hint="facexlib would fetch these from github at face-restore time (finish-leg egress)")
-        return 1
+    manifest_path = Path(models_root) / "bake-manifest.json"
+    fx_pins = []
+    if manifest_path.is_file():
+        try:
+            for entry in json.loads(manifest_path.read_text()).get("finish_dirs", []):
+                if entry.get("dir") == "facexlib":
+                    fx_pins = entry.get("files") or []
+        except (OSError, ValueError) as exc:
+            ev("derisk_fail", stage="finish_manifest_unreadable",
+               manifest=str(manifest_path), error=str(exc))
+            return 1
+    if fx_pins:
+        fx_bad = []
+        for pin in fx_pins:
+            f = facexlib_dir / pin["name"]
+            if not f.is_file():
+                fx_bad.append({"name": pin["name"], "why": "missing"})
+                continue
+            size = f.stat().st_size
+            if size != pin["size"]:
+                fx_bad.append({"name": pin["name"], "why": "size", "got": size, "pin": pin["size"]})
+                continue
+            h = hashlib.sha256()
+            with open(f, "rb") as fh:
+                for block in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(block)
+            got = h.hexdigest()
+            if got != pin["sha256"]:
+                fx_bad.append({"name": pin["name"], "why": "sha256", "got": got, "pin": pin["sha256"]})
+        if fx_bad:
+            ev("derisk_fail", stage="finish_weights_sha_mismatch", bad=fx_bad,
+               facexlib_dir=str(facexlib_dir),
+               hint="baked facexlib weight is missing or does not match its pinned sha256")
+            return 1
+        ev("finish_weights_ok", facexlib_dir=str(facexlib_dir),
+           verified=[pin["name"] for pin in fx_pins], source="manifest_sha256")
+    else:
+        facexlib_missing = [fn for fn in ("detection_Resnet50_Final.pth", "parsing_parsenet.pth")
+                            if not (facexlib_dir / fn).is_file()]
+        if facexlib_missing:
+            ev("derisk_fail", stage="finish_weights_not_cached", missing=facexlib_missing,
+               facexlib_dir=str(facexlib_dir),
+               hint="facexlib would fetch these from github at face-restore time (finish-leg egress)")
+            return 1
+        ev("finish_weights_present_unpinned", facexlib_dir=str(facexlib_dir),
+           note="no baked bake-manifest.json; presence-only check (pre-pin image)")
 
     import torch
     cuda_ok = torch.cuda.is_available()

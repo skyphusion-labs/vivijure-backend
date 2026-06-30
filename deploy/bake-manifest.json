@@ -66,7 +66,10 @@
     {"dir": "antelopev2", "approx_gb": 0.4, "note": "InstantID insightface antelopev2 pack (read directly from VJ_MODELS_ROOT/antelopev2)."},
     {"dir": "rife", "approx_gb": 0.05, "note": "FRAME_INTERP RIFE flownet.pkl (read from VJ_MODELS_ROOT/rife/flownet.pkl)."},
     {"dir": "GFPGANv1.4", "approx_gb": 0.3, "note": "FACE_RESTORE GFPGANv1.4.pth (read from VJ_MODELS_ROOT/GFPGANv1.4/GFPGANv1.4.pth)."},
-    {"dir": "facexlib", "approx_gb": 0.2, "note": "facexlib detection_Resnet50_Final.pth + parsing_parsenet.pth for GFPGAN/CodeFormer face restore; read offline from VJ_MODELS_ROOT/facexlib via _ensure_facexlib_offline. Closes the finish-leg github fetch the sm_120 de-risk surfaced."}
+    {"dir": "facexlib", "approx_gb": 0.2, "files": [
+      {"name": "detection_Resnet50_Final.pth", "release": "v0.1.0", "url": "https://github.com/xinntao/facexlib/releases/download/v0.1.0/detection_Resnet50_Final.pth", "size": 109497761, "sha256": "6d1de9c2944f2ccddca5f5e010ea5ae64a39845a86311af6fdf30841b0a5a16d"},
+      {"name": "parsing_parsenet.pth", "release": "v0.2.2", "url": "https://github.com/xinntao/facexlib/releases/download/v0.2.2/parsing_parsenet.pth", "size": 85331193, "sha256": "3d558d8d0e42c20224f13cf5a29c79eba2d59913419f945545d8cf7b72920de2"}
+    ], "note": "facexlib detection_Resnet50_Final.pth + parsing_parsenet.pth for GFPGAN/CodeFormer face restore; read offline from VJ_MODELS_ROOT/facexlib via _ensure_facexlib_offline. Closes the finish-leg github fetch the sm_120 de-risk surfaced. sha256 pins are the SINGLE SOURCE OF TRUTH (this object): the staging upload, the build-time bake gate, and the de-risk runtime probe all assert against these exact bytes. Both pins are independently corroborated -- the github release asset and the gmk123/GFPGAN HF mirror serve byte-identical content."}
   ],
   "drop_repos": [
     {"repo": "models--Wan-AI--Wan2.2-T2V-A14B-Diffusers", "reason": "text-to-video; never loaded (DEFAULT_SKIP_REPOS). ~117.5 GiB saved."},

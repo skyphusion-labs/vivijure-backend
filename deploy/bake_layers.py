@@ -58,6 +58,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Sibling reader for the facexlib finish-leg pins (single source of truth = deploy/bake-manifest.json).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from facexlib_pins import load_facexlib_pins, verify_file  # noqa: E402
+
 # GHCR hard per-layer ceiling. A layer at or above this is rejected by the registry.
 GHCR_LAYER_LIMIT_BYTES = 10 * 1024**3
 
@@ -216,6 +220,34 @@ def assert_weights(root: Path, min_gb: float, min_shard_bytes: int = MIN_SHARD_B
     return summary
 
 
+def assert_finish_shas(root: Path, manifest_path=None, log=print) -> dict:
+    """Hard-fail unless every pinned facexlib finish-leg weight under <root>/facexlib matches its
+    manifest sha256 (and exact size) EXACTLY. A baked artifact we make public reproducibility claims
+    about cannot rest on a size-band + magic-byte gate -- that would accept a corrupted-but-plausible
+    or substituted .pth. This asserts the bytes are the pinned bytes, at image build time, before the
+    .vj-baked sentinel is trusted. Reads the SAME manifest pins the staging upload and the de-risk
+    runtime probe use, so the three cannot drift. Returns a summary dict; raises SystemExit on any
+    mismatch."""
+    fx = root / "facexlib"
+    try:
+        pins = load_facexlib_pins(manifest_path)
+    except (OSError, ValueError) as exc:
+        raise SystemExit("bake_layers: assert-finish-shas FATAL -- cannot load facexlib pins: " + str(exc))
+    checked = []
+    for pin in pins:
+        try:
+            verify_file(fx / pin["name"], pin)
+        except ValueError as exc:
+            raise SystemExit(
+                "bake_layers: assert-finish-shas FATAL -- " + str(exc) + ". The baked facexlib weight"
+                " does not match its pinned sha256 (a corrupted / substituted / under-staged file)."
+                " Re-stage r2:vivijure/models/facexlib via deploy/stage_facexlib_to_r2.py and rebuild.")
+        checked.append(pin["name"])
+    log("bake_layers: assert-finish-shas OK -- " + str(len(checked)) +
+        " facexlib weight(s) match the manifest sha256 pin (" + ", ".join(checked) + ").")
+    return {"facexlib_dir": str(fx), "verified": checked}
+
+
 def _floor_for(precision: str | None, explicit_min_gb: float | None) -> float:
     """Resolve the byte floor: an explicit --min-gb wins; else the precision default; else the global
     default. Keeps the Dockerfile/CI call sites declarative (pass --precision, get the right floor)."""
@@ -316,6 +348,13 @@ def main() -> None:
     p_aw.add_argument("--min-shard-gb", type=float, default=MIN_SHARD_BYTES / 1024**3,
                       help="require at least one regular file this large (real shard, not config)")
 
+    p_fx = sub.add_parser("assert-finish-shas",
+                          help="hard-fail unless baked facexlib weights match the manifest sha256 pin")
+    p_fx.add_argument("--root", required=True, type=Path,
+                      help="model root; <root>/facexlib must hold the pinned files")
+    p_fx.add_argument("--manifest", type=Path, default=None,
+                      help="bake-manifest.json with the facexlib pins (default: alongside this script)")
+
     p_v = sub.add_parser("verify-image", help="assert built image layers < ceiling")
     p_v.add_argument("--image", required=True)
     p_v.add_argument("--ceiling-gb", type=float, default=10.0)
@@ -333,6 +372,8 @@ def main() -> None:
     elif args.cmd == "assert-weights":
         assert_weights(args.root, _floor_for(args.precision, args.min_gb),
                        int(args.min_shard_gb * 1024**3))
+    elif args.cmd == "assert-finish-shas":
+        assert_finish_shas(args.root, args.manifest)
     elif args.cmd == "verify-image":
         sys.exit(verify_image(args.image, int(args.ceiling_gb * 1024**3)))
     elif args.cmd == "bins-needed":

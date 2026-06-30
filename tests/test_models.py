@@ -166,3 +166,16 @@ def test_ensure_facexlib_offline_idempotent(tmp_path, monkeypatch):
     _ensure_facexlib_offline(str(models_root))  # second call must not raise on existing links
     for fn in _FACEXLIB_WEIGHTS:
         assert (tmp_path / "gfpgan" / "weights" / fn).exists()
+
+
+def test_facexlib_manifest_pins_match_the_runtime_weight_set():
+    """The manifest pins (what the bake stages + the gates assert) MUST be exactly the files the runtime
+    shim resolves offline (_FACEXLIB_WEIGHTS). If they drift, the bake could carry the wrong set or miss
+    one and face restore would phone github at render time."""
+    import json
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    m = json.loads((root / "deploy" / "bake-manifest.json").read_text())
+    fx = next(fd for fd in m["finish_dirs"] if fd["dir"] == "facexlib")
+    pinned = {f["name"] for f in fx["files"]}
+    assert pinned == set(_FACEXLIB_WEIGHTS), (pinned, set(_FACEXLIB_WEIGHTS))
