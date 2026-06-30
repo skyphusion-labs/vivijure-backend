@@ -1,7 +1,9 @@
 # De-risk offline-correctness proof (#17): no-egress verification
 
-Status: DESIGN (gated on `:0.3.3` for the runs). Owner: Strummer (harness); inner egress-block is
-change-controlled, coordinate with Rollins (owns `vj_derisk.py`) + lead before merge.
+Status: DESIGN (gated on `:0.3.3` for the runs). Owner: Strummer (harness + fire wiring); the inner
+egress guard lives in `vj_derisk.py` (Rollins, PR #161) and is change-controlled -- coordinate with
+Rollins + lead before merge. CAP_NET_ADMIN is SETTLED (see below): the primary Layer-2 mechanism is the
+userspace socket-guard, NOT iptables.
 
 ## Why
 
@@ -40,57 +42,73 @@ endpoint. Run the full render on each of the 3 pooled arches (RTX PRO 6000 sm_12
 sm_100). A clean `render_portrait` + `render_landscape` + `derisk_pass` UNDER the block proves the GPU
 render does no phone-home beyond the R2 read path.
 
-Egress allowlist (the ONLY things permitted out):
-- DNS (UDP+TCP 53) to the resolver -- needed to resolve the R2 endpoint host.
-- The R2 S3 endpoint host (`<accountid>.r2.cloudflarestorage.com`) on TCP 443 (the boto3 uploader).
-Everything else: DROP. No github, no huggingface, no pypi, no torch.hub.
+**Mechanism: a userspace socket-guard in `vj_derisk.py` (PR #161), NOT iptables.** CAP_NET_ADMIN is not
+available on RunPod (see the next section), so a kernel-level OUTPUT-DROP is off the table. The guard
+wraps `socket.getaddrinfo` + `socket.socket.connect` in the render process and allowlists ONLY the R2
+host; any other `connect()` raises. It installs when `DERISK_EGRESS_LOCK=1` is present in the env, which
+the fire injects pod-level via `runpodctl --env` so the inner $RUN render children inherit it (no inner
+code change beyond the flag; baseline runs omit it, so zero behavior change).
 
-Mechanism (in `deploy/derisk_pod_start.sh`, BEFORE `$RUN render`, gated behind a `DERISK_EGRESS_LOCK`
-env flag so normal de-risk runs are unaffected):
+Allowlist + controls:
+- DYNAMIC allowlist: `getaddrinfo` is wrapped so every resolved R2 IP is unioned into the allow-set over
+  the life of the run -- round-robin-safe (R2 returns rotating A records; a static pin would false-fail).
+- DNS stays open (resolution is required to find the R2 host).
+- NEGATIVE control: a github connect is attempted and MUST be blocked
+  (`egress_guard_proven github_blocked:true`).
+- POSITIVE control: a credential-free TCP connect to the R2 host on 443 MUST succeed
+  (`egress_guard_r2_ok tcp_connect:true`). `R2_S3_ENDPOINT` is already pod-level (the boto3 uploader needs
+  it), so the guard finds the host.
 
-```
-# Resolve + pin the R2 host, then default-drop egress except loopback, established, DNS, and R2:443.
-R2_HOST=$(printf '%s' "$R2_S3_ENDPOINT" | sed -E 's#https?://([^/]+).*#\1#')
-iptables -P OUTPUT DROP
-iptables -A OUTPUT -o lo -j ACCEPT
-iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
-for ip in $(getent ahosts "$R2_HOST" | awk '{print $1}' | sort -u); do
-  iptables -A OUTPUT -p tcp -d "$ip" --dport 443 -j ACCEPT
-done
-echo "@event egress_locked {\"allow\": [\"dns\", \"$R2_HOST:443\"], \"default\": \"DROP\"}"
-```
+**Finding (record this):** the render process makes NO R2 connection of its own -- it is baked + offline +
+credential-free (the backend `R2_*` model-pull names are deliberately NOT injected). The R2 `@event`
+uploader is a SEPARATE process (the read-path wrapper), untouched by the guard. So under the lock the
+guard is effectively a NEAR-TOTAL egress block on the render, and the render stays credential-free: a
+clean render under the block is positive proof of self-containment.
+
+@event sequence the watcher asserts under the lock:
+`egress_guard_installed` -> `egress_guard_proven {github_blocked: true}` ->
+`egress_guard_r2_ok {tcp_connect: true}` -> `render_done` (both aspects) -> `derisk_pass`, with NO
+`derisk_fail stage=egress_guard_inactive` (that stage fires if the lock was requested but the guard did
+not install -- a hard do-not-trust).
 
 On the block, an un-baked dep (facexlib pre-`:0.3.3`) FAILS -> `derisk_fail` at finish -> exactly the proof
 the bake is incomplete. On `:0.3.3` (facexlib baked) the render succeeds = true-offline proof. The boto3
-read-path uploader keeps working (R2:443 + DNS allowed), so the @event stream still reaches R2.
+read-path uploader keeps working (separate process; R2:443 + DNS reachable), so the @event stream still
+reaches R2.
 
-Complementary cheap measure (not a substitute for the block): broaden the inner's PATH-shadow tripwire to
-also shadow `curl` / `wget` / `git` (same trick as the fake `rclone`), so a github/torch.hub fetch trips a
-sentinel too. The egress-block is the gold standard; the broadened tripwire is a cheap belt for runs where
-the block is unavailable.
+EXPECT_SHA for the injected driver is re-derived in #161 (`065039a0...`); the inner integrity gate matches
+the new driver bytes.
 
-## THE feasibility unknown -- CAP_NET_ADMIN
+## CAP_NET_ADMIN -- SETTLED: not available on RunPod (iptables is OUT)
 
-`iptables` / `netns` require `CAP_NET_ADMIN`. Does a RunPod SECURE container grant it? UNKNOWN -- settle
-BEFORE committing layer 2, with a $0 check: smallest/CPU pod running `capsh --print` + `iptables -L` (or
-RunPod docs).
-- If YES -> the iptables approach above, in the inner behind `DERISK_EGRESS_LOCK`.
-- If NO -> fallbacks:
-  - (a) Python-level socket guard in the driver: monkeypatch `socket.getaddrinfo` / `socket.socket.connect`
-    to allowlist ONLY the R2 host; any other `connect()` raises. Pure userspace, no cap needed, asserts at
-    the exact syscall the render uses. (Coordinate with Rollins -- it lives in the driver.)
-  - (b) Run Layer 1 (`--network=none`) on a self-hosted GPU box if the fleet has one, for the true
-    zero-network GPU render, and keep RunPod for the perf/JIT numbers (network-on).
+`iptables` / `nft` OUTPUT-DROP require `CAP_NET_ADMIN`. VERDICT: a RunPod SECURE container does NOT grant
+it. `runpodctl pod create` exposes no `--cap-add` / `--privileged` surface, the container drops the cap,
+and Secure Cloud is sandboxed. The API surface is conclusive, so this was settled WITHOUT burning a pod
+($0). Consequence: the kernel-level iptables approach is OUT; the **userspace socket-guard (above) is the
+PRIMARY Layer-2 mechanism**, not a fallback.
+
+(Belt, not a substitute: the inner PATH-shadow tripwire can also shadow `curl` / `wget` / `git` so a
+github/torch.hub fetch trips a sentinel even outside the Python socket surface.)
+
+## Honest scope of the proof (do NOT overclaim)
+
+The userspace guard catches the **Python egress surface** -- `hf_hub` / `torch.hub` / `requests` / `boto3`,
+which are ALL the vectors in play here. A native (non-Python) raw socket would bypass it; we do not claim
+otherwise. Frame the proof EXACTLY as:
+
+> Layer 1: kernel-airtight offline-RESOLVABILITY (`--network=none`, the CPU legs).
+> Layer 2: userspace-blocked GPU render with negative (github) + positive (R2) controls.
+
+Do NOT imply kernel-airtight for the GPU leg -- it is userspace-blocked, which is the strongest available
+on RunPod given no CAP_NET_ADMIN.
 
 ## Sign-off + resume sequencing
 
-1. Settle CAP_NET_ADMIN (the $0 check above).
-2. Sign-off the inner egress-block (or the driver socket-guard fallback) with lead + Rollins
-   (change-controlled; the inner is the de-risk pod start, the socket guard touches `vj_derisk.py`).
+1. CAP_NET_ADMIN: SETTLED (not available; userspace guard is primary). DONE.
+2. Sign-off the inner egress guard (PR #161, `vj_derisk.py`) + the fire-wiring flag with lead + Rollins
+   (change-controlled).
 3. Gated on `:0.3.3` (facexlib baked, #15): run Layer 1 (`--network=none`, $0) first, then the
-   egress-blocked 3-arch fan-out (RTX PRO 6000 + H200 + B200).
+   egress-blocked 3-arch fan-out (RTX PRO 6000 + H200 + B200) with `DERISK_EGRESS_LOCK=1`.
 4. A clean 3-arch `derisk_pass` under the block = the "fully baked / offline" proof -> #5 serverless
    promote, on Conrad's word.
 
