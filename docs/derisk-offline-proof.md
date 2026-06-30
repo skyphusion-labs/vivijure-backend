@@ -37,47 +37,48 @@ layer 2.)
 
 ### Layer 2 -- egress-blocked 3-arch fan-out (RunPod, GPU)
 
-The pods need the R2 read path, so this is NOT `--network=none`; it is egress-blocked EXCEPT the R2 exfil
-endpoint. Run the full render on each of the 3 pooled arches (RTX PRO 6000 sm_120 / H200 sm_90 / B200
-sm_100). A clean `render_portrait` + `render_landscape` + `derisk_pass` UNDER the block proves the GPU
-render does no phone-home beyond the R2 read path.
+The render process is fully baked + credential-free, so under Design B (FULL-BLOCK) it needs NO network
+at all. The pod is not `--network=none` only because it still runs the SEPARATE R2 telemetry uploader (a
+different process, OUTSIDE the in-process guard). Run the full render on each of the 3 pooled arches
+(RTX PRO 6000 sm_120 / H200 sm_90 / B200 sm_100). A clean `render_portrait` + `render_landscape` +
+`derisk_pass` UNDER the block proves the GPU render does no phone-home AT ALL.
 
 **Mechanism: a userspace socket-guard in `vj_derisk.py` (PR #161), NOT iptables.** CAP_NET_ADMIN is not
 available on RunPod (see the next section), so a kernel-level OUTPUT-DROP is off the table. The guard
-wraps `socket.getaddrinfo` + `socket.socket.connect` in the render process and allowlists ONLY the R2
-host; any other `connect()` raises. It installs when `DERISK_EGRESS_LOCK=1` is present in the env, which
+wraps `socket.getaddrinfo` + `socket.socket.connect` in the render process and, in Design B (FULL-BLOCK),
+allows ONLY `AF_UNIX` + loopback and DROPs everything else INCLUDING R2; any other `connect()` raises. It installs when `DERISK_EGRESS_LOCK=1` is present in the env, which
 the fire injects pod-level via `runpodctl --env` so the inner $RUN render children inherit it (no inner
 code change beyond the flag; baseline runs omit it, so zero behavior change).
 
-Allowlist + controls:
-- DYNAMIC allowlist: `getaddrinfo` is wrapped so every resolved R2 IP is unioned into the allow-set over
-  the life of the run -- round-robin-safe (R2 returns rotating A records; a static pin would false-fail).
-- DNS stays open (resolution is required to find the R2 host).
-- NEGATIVE control: a github connect is attempted and MUST be blocked
-  (`egress_guard_proven github_blocked:true`).
-- POSITIVE control: a credential-free TCP connect to the R2 host on 443 MUST succeed
-  (`egress_guard_r2_ok tcp_connect:true`). `R2_S3_ENDPOINT` is already pod-level (the boto3 uploader needs
-  it), so the guard finds the host.
+Controls (Design B -- there is NO R2 allowlist; R2 is dropped to the render too):
+- NEGATIVE: a huggingface connect AND a github connect are attempted and MUST BOTH be blocked
+  (`egress_guard_proven {hf_blocked: true, github_blocked: true}`).
+- POSITIVE (sanity): a loopback connect MUST still succeed (`egress_guard_sane {loopback_ok: true}`),
+  proving the guard blocks egress without bricking local IPC.
+- No R2 positive control: the render makes no R2 connection, so the guard does not allow R2. `R2_S3_*`
+  stays pod-level for the SEPARATE uploader, NOT for the render.
 
 **Finding (record this):** the render process makes NO R2 connection of its own -- it is baked + offline +
 credential-free (the backend `R2_*` model-pull names are deliberately NOT injected). The R2 `@event`
-uploader is a SEPARATE process (the read-path wrapper), untouched by the guard. So under the lock the
-guard is effectively a NEAR-TOTAL egress block on the render, and the render stays credential-free: a
-clean render under the block is positive proof of self-containment.
+uploader is a SEPARATE process (the read-path wrapper), untouched by the in-process guard. So Design B
+(FULL-BLOCK) SUPERSEDES the earlier allow-R2 design: the render is credential-free AND R2-free, the guard
+is a FULL egress block on it (loopback + `AF_UNIX` only), and a clean render under the block is positive
+proof of self-containment.
 
 @event sequence the watcher asserts under the lock:
-`egress_guard_installed` -> `egress_guard_proven {github_blocked: true}` ->
-`egress_guard_r2_ok {tcp_connect: true}` -> `render_done` (both aspects) -> `derisk_pass`, with NO
-`derisk_fail stage=egress_guard_inactive` (that stage fires if the lock was requested but the guard did
-not install -- a hard do-not-trust).
+`egress_guard_installed {mode: full_block}` ->
+`egress_guard_proven {hf_blocked: true, github_blocked: true}` (NEGATIVE) ->
+`egress_guard_sane {loopback_ok: true}` (POSITIVE) -> `render_done` (portrait) -> `render_done` (landscape)
+-> `derisk_pass`. FAIL = `derisk_fail stage=egress_guard_inactive` on ANY control miss (the lock was
+requested but the guard did not install, or a negative control reached the network) -- a hard do-not-trust.
 
 On the block, an un-baked dep (facexlib pre-`:0.3.3`) FAILS -> `derisk_fail` at finish -> exactly the proof
 the bake is incomplete. On `:0.3.3` (facexlib baked) the render succeeds = true-offline proof. The boto3
-read-path uploader keeps working (separate process; R2:443 + DNS reachable), so the @event stream still
-reaches R2.
+read-path uploader keeps working (it is a SEPARATE process, outside the guard), so the @event stream still
+reaches R2 even though the render itself has zero network.
 
-EXPECT_SHA for the injected driver is re-derived in #161 (`065039a0...`); the inner integrity gate matches
-the new driver bytes.
+EXPECT_SHA for the injected driver is set in #161 (`22709023...`); the inner integrity gate uses exactly
+these driver bytes.
 
 ## CAP_NET_ADMIN -- SETTLED: not available on RunPod (iptables is OUT)
 
@@ -97,7 +98,7 @@ which are ALL the vectors in play here. A native (non-Python) raw socket would b
 otherwise. Frame the proof EXACTLY as:
 
 > Layer 1: kernel-airtight offline-RESOLVABILITY (`--network=none`, the CPU legs).
-> Layer 2: userspace-blocked GPU render with negative (github) + positive (R2) controls.
+> Layer 2: userspace FULL-BLOCK GPU render with negative (HF + github) + positive (loopback sanity) controls.
 
 Do NOT imply kernel-airtight for the GPU leg -- it is userspace-blocked, which is the strongest available
 on RunPod given no CAP_NET_ADMIN.
