@@ -128,9 +128,13 @@ jobs:
           set -eu
           PREFIX='${{ steps.cfg.outputs.seed_prefix }}'
           echo "Staging r2:${R2_BUCKET}/${PREFIX} -> ./_seed ..."
+          # --timeout/--contimeout bound a stalled R2 connection so rclone's default retries fire
+          # on a hang instead of wedging the 180-min build; the IO-idle timeout only trips on
+          # inactivity, never on a healthy multi-thread transfer.
           rclone copy "r2:${R2_BUCKET}/${PREFIX}" ./_seed \
             --links --transfers 16 --checkers 16 \
             --multi-thread-streams 8 --multi-thread-cutoff 100M \
+            --timeout 120s --contimeout 30s \
             --stats 30s --stats-one-line
           python deploy/bake_layers.py reconstruct-symlinks --root ./_seed
           du -sh ./_seed || true

@@ -46,6 +46,14 @@ STAGE = Path(os.environ.get("VJ_BAKE_STAGE", str(Path.home() / "bake-seed-bf16-s
 
 # Ride out R2's intermittent 501 NotImplemented on copy (seen on small objects); rclone retries clear it.
 RETRY = ["--retries", "8", "--low-level-retries", "20"]
+# Bound a stalled R2 connection so a retry actually FIRES: a silent hang is not an error rclone will
+# retry on its own, so without these a wedged connection blocks the stage indefinitely (the post-copy
+# hang). --timeout is the IO-idle cap (no data for this long -> error -> retry); --contimeout the
+# connect cap. Idle timeout only trips on inactivity, so a healthy multi-thread transfer is never cut.
+TIMEOUTS = ["--timeout", "120s", "--contimeout", "30s"]
+# Net hardening on every rclone call (transfer + metadata): retries to ride out R2 501s, timeouts to
+# convert a stalled connection into a retriable error instead of an unbounded hang.
+NET = RETRY + TIMEOUTS
 # Local-only resume markers must never reach the seed (and R2 501s on them otherwise abort the upload).
 EXCLUDE_MARKERS = ["--exclude", ".vj-recast-done", "--exclude", ".vj-*"]
 
@@ -60,7 +68,7 @@ def sh(cmd: list[str], *, capture: bool = False) -> str:
 
 def rclone_bytes(remote_path: str) -> int:
     try:
-        out = subprocess.run(["rclone", "size", remote_path, "--json"],
+        out = subprocess.run(["rclone", "size", remote_path, "--json"] + NET,
                              check=True, text=True, capture_output=True).stdout
         return int(json.loads(out)["bytes"])
     except subprocess.CalledProcessError:
@@ -119,14 +127,14 @@ def stage_recast_repo(repo: str, rev: str, src_hub: str, dst_hub: str, dry: bool
     else:
         sh(["rclone", "copy", "-l", f"{src_hub}/{repo}", str(local),
             "--transfers", "16", "--checkers", "16", "--multi-thread-streams", "8",
-            "--multi-thread-cutoff", "100M", "--stats", "30s", "--stats-one-line"] + RETRY)
+            "--multi-thread-cutoff", "100M", "--stats", "30s", "--stats-one-line"] + NET)
         summary = recast_repo_inplace(local)
         print(f"    recast summary: {summary}")
         marker.write_text("recast fp32->bf16 complete\n")
     # Upload is idempotent/resumable (rclone skips files already in dest); the local marker is excluded.
     sh(["rclone", "copy", "-l", str(local), f"{dst_hub}/{repo}",
         "--transfers", "16", "--checkers", "16", "--stats", "30s", "--stats-one-line"]
-       + EXCLUDE_MARKERS + RETRY)
+       + EXCLUDE_MARKERS + NET)
 
 
 def stage_copy_repo(repo: str, src_hub: str, dst_hub: str, dry: bool) -> None:
@@ -135,7 +143,7 @@ def stage_copy_repo(repo: str, src_hub: str, dst_hub: str, dry: bool) -> None:
         print(f"    would: rclone copy {src_hub}/{repo} {dst_hub}/{repo}")
         return
     sh(["rclone", "copy", f"{src_hub}/{repo}", f"{dst_hub}/{repo}",
-        "--transfers", "32", "--checkers", "32", "--stats", "30s", "--stats-one-line"] + RETRY)
+        "--transfers", "32", "--checkers", "32", "--stats", "30s", "--stats-one-line"] + NET)
 
 
 def stage_include_only(repo: str, rev: str, files: list[str], src_hub: str, dst_hub: str,
@@ -151,17 +159,17 @@ def stage_include_only(repo: str, rev: str, files: list[str], src_hub: str, dst_
         return
     local.mkdir(parents=True, exist_ok=True)
     # refs/main (HF resolution needs it)
-    sh(["rclone", "copy", f"{src_hub}/{repo}/refs", str(local / "refs"), "--stats-one-line"] + RETRY)
+    sh(["rclone", "copy", f"{src_hub}/{repo}/refs", str(local / "refs"), "--stats-one-line"] + NET)
     for rel in files:
         marker = f"{src_hub}/{repo}/snapshots/{rev}/{rel}.rclonelink"
-        blobrel = subprocess.run(["rclone", "cat", marker], check=True, text=True,
+        blobrel = subprocess.run(["rclone", "cat", marker] + NET, check=True, text=True,
                                  capture_output=True).stdout.strip()
         bhash = blobrel.rsplit("/", 1)[-1]
         dest = local / "snapshots" / rev / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
-        sh(["rclone", "copyto", f"{src_hub}/{repo}/blobs/{bhash}", str(dest), "--stats-one-line"] + RETRY)
+        sh(["rclone", "copyto", f"{src_hub}/{repo}/blobs/{bhash}", str(dest), "--stats-one-line"] + NET)
     sh(["rclone", "copy", "-l", str(local), f"{dst_hub}/{repo}", "--stats-one-line"]
-       + EXCLUDE_MARKERS + RETRY)
+       + EXCLUDE_MARKERS + NET)
 
 
 def main() -> int:
@@ -199,7 +207,7 @@ def main() -> int:
             print(f"[copy]   finish/{d}  (server-side R2->R2)")
             if not args.dry_run:
                 sh(["rclone", "copy", f"{src}/{d}", f"{dst}/{d}",
-                    "--transfers", "32", "--checkers", "32", "--stats-one-line"] + RETRY)
+                    "--transfers", "32", "--checkers", "32", "--stats-one-line"] + NET)
 
     print("\n=== dest size ===")
     if not args.dry_run:
