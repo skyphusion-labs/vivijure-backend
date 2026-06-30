@@ -272,13 +272,13 @@ def _thumb_b64_from_clip(path: Path, px=256) -> str:
     return b
 
 
-def render(aspect: str, tier: str, out_dir: Path, frames: int, i2v_steps: int, kf_steps: int) -> int:
+def build_render_inputs(aspect: str, tier: str, out_dir: Path, frames: int, i2v_steps: int, kf_steps: int):
+    """Build the GPU-free render inputs (contract objects + config) for a de-risk render. Pure of any
+    CUDA/GPU work, so CI can exercise the whole construction path against the REAL contract -- the exact
+    coverage gap that let a bad Scene kwarg (duration_seconds, not target_seconds) reach the pod and
+    derisk_fail at stage=render_portrait. Returns (req, sb, cast, bundle, cfg, work, w, h)."""
     from vivijure_backend.contract import Scene, Storyboard, Cast, Bundle, RenderRequest
     from vivijure_backend.config import RenderConfig
-    from vivijure_backend.orchestrator import plan as make_plan
-    from vivijure_backend.pipeline import GpuPipeline
-    from vivijure_backend.assemble import ClipInput, assemble, order_for_storyboard
-    import torch
 
     w, h = ASPECTS[aspect]
     work = out_dir / aspect
@@ -289,7 +289,7 @@ def render(aspect: str, tier: str, out_dir: Path, frames: int, i2v_steps: int, k
         prompt=("a lone lighthouse on a rocky coast at golden hour, sweeping clouds, "
                 "cinematic wide shot, gentle camera push-in"),
         character_slots=[],
-        duration_seconds=2.0,
+        target_seconds=2.0,
     )
     sb = Storyboard(title="derisk-%s" % aspect, scenes=[scene],
                     duration_seconds=2.0, use_characters=[])
@@ -305,14 +305,25 @@ def render(aspect: str, tier: str, out_dir: Path, frames: int, i2v_steps: int, k
     cfg = RenderConfig.from_request(tier, overrides)
     req = RenderRequest(action="render", project="derisk", bundle_key="local",
                         quality_tier=tier, config=cfg)
+    return req, sb, cast, bundle, cfg, work, w, h
+
+
+def render(aspect: str, tier: str, out_dir: Path, frames: int, i2v_steps: int, kf_steps: int) -> int:
+    from vivijure_backend.orchestrator import plan as make_plan
+    from vivijure_backend.pipeline import GpuPipeline
+    from vivijure_backend.assemble import ClipInput, assemble, order_for_storyboard
+    import torch
+
+    req, sb, _cast, bundle, cfg, work, w, h = build_render_inputs(
+        aspect, tier, out_dir, frames, i2v_steps, kf_steps)
     ev("render_config", aspect=aspect, tier=tier, width=w, height=h,
        i2v_distill_env=os.environ.get("VJ_I2V_DISTILL"),
        finish_enabled=cfg.finish.enabled,
        i2v_steps=cfg.i2v.steps, i2v_frames=cfg.i2v.num_frames, kf_steps=cfg.keyframe.steps)
 
-    rplan = make_plan(req, sb, cast=cast)
-    ev("plan", train=list(rplan.lora.train), keyframes=rplan.keyframes_to_generate(),
-       shots=rplan.shots_to_animate(), summary=rplan.summary())
+    rplan = make_plan(req, sb)
+    ev("plan", train=list(rplan.lora.train), keyframes=rplan.keyframes_to_generate,
+       shots=rplan.shots_to_animate, summary=rplan.summary())
 
     pipe = GpuPipeline(config=cfg)
     probe = _Probe()
