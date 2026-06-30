@@ -40,14 +40,16 @@ from typing import Any, Callable, Protocol
 
 # --------------------------------------------------------------------------- tiers + config
 
-# Tier -> the GPU class the image needs. i2v/bf16 is pinned to BLACKWELL (sm_120): H200 is the FLOOR,
-# B200 above it. H100 (Hopper sm_90) is deliberately EXCLUDED: prod runs Wan2.2-A14B on Blackwell, so
-# an H100 has a different kernel target AND memory envelope and would NOT represent prod -- a gate run
-# on it would be meaningless (Conrad, 2026-06-29). A homelab-lite base-only image verifies on a cheap
-# consumer card. Concrete ids are resolved against live availability (PodClient.list_gpu_types) at spin
-# time, never hard-coded to one sold-out SKU. These are PREFERENCE ORDERS, the floor first then up.
+# Tier -> the GPU classes the image must run on. The i2v/bf16 serverless pool spans THREE DC arches,
+# one card each: H200 (Hopper sm_90, 141GB), B200 (Blackwell DC sm_100, 180GB), RTX PRO 6000 Blackwell
+# (sm_120, 96GB). 3-arch coverage rides on the prebuilt cu128 wheels (nothing compiles CUDA from source,
+# so TORCH_CUDA_ARCH_LIST is a no-op and absent by design). H100 (ALSO Hopper sm_90) is EXCLUDED not for
+# its kernel target -- H200 shares it -- but for its memory ENVELOPE: 80GB OOMs Wan2.2-A14B where the
+# 141GB H200 fits (Conrad, 2026-06-29; H200 is Hopper, the earlier 'H200 = Blackwell floor' note was
+# wrong). A homelab-lite base-only image verifies on a cheap consumer card. Concrete ids resolve against
+# live availability (PodClient.list_gpu_types) at spin time, never a sold-out SKU. PREFERENCE ORDERS.
 GPU_TIERS: dict[str, tuple[str, ...]] = {
-    "i2v": ("NVIDIA H200", "NVIDIA B200"),
+    "i2v": ("NVIDIA H200", "NVIDIA B200", "NVIDIA RTX PRO 6000 Blackwell Server Edition"),
     "base": ("NVIDIA RTX 4090", "NVIDIA RTX A5000", "NVIDIA A10", "NVIDIA L4"),
 }
 
@@ -57,6 +59,7 @@ GPU_HOURLY_USD: dict[str, float] = {
     "NVIDIA H200": 3.99, "NVIDIA H100 NVL": 2.79, "NVIDIA H100 80GB HBM3": 2.69,
     "NVIDIA B200": 5.99, "NVIDIA RTX 4090": 0.69, "NVIDIA RTX A5000": 0.36,
     "NVIDIA A10": 0.45, "NVIDIA L4": 0.43,
+    "NVIDIA RTX PRO 6000 Blackwell Server Edition": 2.49,
 }
 
 
@@ -65,7 +68,7 @@ class VerifyConfig:
     """One verify run's bounds + gates. All spend guards live here so a caller cannot fire an
     unbounded job by omission."""
     image: str                                  # the freshly built image ref (ghcr.io/...:tag)
-    tier: str = "i2v"                            # GPU_TIERS key; i2v => Blackwell, H200 floor / B200 up
+    tier: str = "i2v"                            # GPU_TIERS key; i2v => the 3-arch pool (sm_90/100/120)
     registry_auth_id: str | None = None          # containerRegistryAuthId (MCP-managed, no dashboard)
     ttl_seconds: int = 1800                      # HARD wall-clock auto-stop, regardless of progress
     max_first_frame_seconds: float = 300.0       # time-to-first-frame bound
