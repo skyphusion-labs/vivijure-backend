@@ -37,8 +37,8 @@ printf '%s\n' '#!/bin/sh' 'touch "$VJ_RCLONE_TRIPWIRE"' 'exit 0' > /workspace/bi
 chmod +x /workspace/bin/rclone
 export PATH=/workspace/bin:$PATH
 
-# Driver pinned to the merged #144 commit (integrity + reproducibility: exactly the reviewed code).
-SHA=481f8277eeafa0b045e97075bf5b2191e933b263
+# Driver pinned to the merged #151 fix commit (integrity + reproducibility: exactly the reviewed code).
+SHA=274802860a57ecb41daaef244ea0ce518bfa0b0b
 fail() { echo "@event derisk_fail stage=$1"; sleep 600; exit 1; }
 curl -fsSL "https://raw.githubusercontent.com/skyphusion-labs/vivijure-backend/$SHA/deploy/vj_derisk.py" \
   -o /workspace/vj_derisk.py || fail fetch
