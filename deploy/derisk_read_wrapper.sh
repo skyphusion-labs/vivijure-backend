@@ -14,44 +14,77 @@
 #     region_name="auto", no path-style addressing.
 #   - boto3 ONLY, never rclone -- the inner arms an rclone tripwire to prove the baked image never pulls
 #     from R2, so any rclone here would poison that proof.
-#   - A derisk_boot marker is PUT within ~15s of boot to self-prove the read path BEFORE any GPU render
-#     spend (a blind pod is caught before a cent is spent on a card).
+#   - IDENTITY STAMP: the log is seeded with `@event derisk_meta {pod_id, fire_ts, boot_utc, label}` as
+#     its FIRST line, so EVERY uploaded object carries the run identity. A reader confirms pod_id ==
+#     the pod id returned at fire AND fire_ts == the recorded fire timestamp; a mismatch means a stale or
+#     foreign object (this kills the stale-log misread class at the source, not just by pre-fire wipe).
+#   - CLEAR-AT-BOOT: the uploader deletes any pre-existing object for this key before its first PUT, so a
+#     stale object from a prior fire can never be read as live (belt to the operator pre-fire prefix-wipe).
+#   - A derisk_boot marker is written to the log within ~15s of boot to self-prove the read path BEFORE
+#     any GPU render spend (a blind pod is caught before a cent is spent on a card).
 #
 # ENV (injected via runpodctl --env at deploy time):
 #   DERISK_INNER_B64  base64 (-w0) of the inner to run (e.g. deploy/derisk_pod_start.sh)
 #   DERISK_LABEL      per-card label -> object key derisk/<label>/derisk.log (sm120 / sm90 / sm100)
+#   DERISK_FIRE_TS    operator fire timestamp (UTC, ISO8601 Z); stamped into derisk_meta for identity
+#                     (optional -- defaults to "unset"; the pod_id stamp alone still disambiguates)
 #   R2_S3_*           the four exfil-key vars above
+#   RUNPOD_POD_ID     auto-injected by RunPod; stamped into derisk_meta as the run identity
+#
+# TEARDOWN (operator, NOT this file -- documented here because it bit us): NEVER `runpodctl pod stop`/
+# `get` (nor MCP get-pod/list-pods) on a secret-bearing pod -- they dump the FULL pod object, INCLUDING
+# the env block (the R2 secret), to stdout. Tear down with `runpodctl remove pod <id>` and output
+# suppressed/parsed. See docs/derisk-3arch.md.
 #
 # boto3 lives in the baked `vivijure` conda env, not base, so the uploader runs under `conda run`.
 set -u
 mkdir -p /workspace/out
 LOG=/workspace/out/derisk.log
+POD_ID="${RUNPOD_POD_ID:-unknown}"
+FIRE_TS="${DERISK_FIRE_TS:-unset}"
+BOOT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# Background the boto3 -> R2 uploader: PUT a derisk_boot marker immediately (read-path self-proof), then
-# re-PUT the growing log every ~15s. Keyed by DERISK_LABEL so parallel cards never collide.
+# Seed the persistent log with the identity stamp + the read-path self-proof. Both are written INTO the
+# log file (not PUT as a one-shot object body), so they survive every ~15s re-PUT instead of being
+# clobbered. A reader matches pod_id + fire_ts against the fire they recorded.
+{
+  printf '@event derisk_meta {"pod_id": "%s", "fire_ts": "%s", "boot_utc": "%s", "label": "%s"}\n' "$POD_ID" "$FIRE_TS" "$BOOT_UTC" "$DERISK_LABEL"
+  printf '@event derisk_boot {"label": "%s", "pod_id": "%s", "boot_utc": "%s"}\n' "$DERISK_LABEL" "$POD_ID" "$BOOT_UTC"
+} > "$LOG"
+
+# Background the boto3 -> R2 uploader. CLEAR-AT-BOOT: delete any stale object for this key first, then
+# PUT the seeded log immediately (read-path self-proof), then re-PUT every ~15s. Keyed by DERISK_LABEL
+# so parallel cards never collide. boto3 ONLY (never rclone, so the inner's no-pull tripwire stays clean).
 conda run --no-capture-output -n vivijure python - "$DERISK_LABEL" <<'PY' &
 import os, sys, time, boto3
 from botocore.config import Config
 label = sys.argv[1]
+log_path = "/workspace/out/derisk.log"
 c = boto3.client(
     "s3",
     endpoint_url=os.environ["R2_S3_ENDPOINT"],
     aws_access_key_id=os.environ["R2_S3_ACCESS_KEY_ID"],
     aws_secret_access_key=os.environ["R2_S3_SECRET_ACCESS_KEY"],
-    region_name="auto",                      # R2 ignores region; boto3 insists on one
+    region_name="auto",                       # R2 ignores region; boto3 insists on one
     config=Config(signature_version="s3v4"),  # no path-style addressing
 )
 bucket, key = os.environ["R2_S3_BUCKET"], f"derisk/{label}/derisk.log"
-# derisk_boot self-proves the read path within ~15s, BEFORE any GPU render spend.
-c.put_object(Bucket=bucket, Key=key, Body=("@event derisk_boot label=%s\n" % label).encode())
-while True:
-    time.sleep(15)
+# clear-at-boot: a stale object from a prior fire can never be read as live.
+try:
+    c.delete_object(Bucket=bucket, Key=key)
+except Exception:
+    pass
+def push():
     try:
-        with open("/workspace/out/derisk.log", "rb") as f:
+        with open(log_path, "rb") as f:
             c.put_object(Bucket=bucket, Key=key, Body=f.read())
     except FileNotFoundError:
         pass
+push()              # immediate: the seeded derisk_meta + derisk_boot self-prove the read path now
+while True:
+    time.sleep(15)
+    push()
 PY
 
-# Run the committed inner, tee-ing its @event stream to the polled log.
+# Run the committed inner, tee-ing its @event stream to the (already identity-stamped) polled log.
 echo "$DERISK_INNER_B64" | base64 -d | bash 2>&1 | tee -a "$LOG"
