@@ -126,6 +126,96 @@ PUBLIC GHCR package. Verified against the artifact, not records:
 Still pending to fully close #14: the `get_arch_list()` {sm_90, sm_100, sm_120} STOP-gate, which runs as
 the first command (`arch-gate`) on the canary.
 
+## Per-card deploy commands (Strummer, infra -- locked + reproducible)
+
+Driven from a checkout of this repo (`~/vivijure-backend`) via `runpodctl` (the RunPod MCP cannot set a
+pod start command). Every op runs in Strummer's own login shell (`sudo -u strummer bash -lc '<op>'`). The
+start command is the committed `deploy/derisk_pod_start.sh`, base64-transported so it survives the shell
+-> runpodctl -> RunPod -> container quoting layers byte-identical.
+
+**Reference template `reg2j3abgx`** (`vivijure-derisk-bf16-v0.3.1`) carries the right shape (image
+`:0.3.1`, disk 220 GB, ports `22/tcp`, NO volume/mount, `registry=null`), but its `args` is EMPTY (the
+MCP `create-template` silently dropped the start command). So we deploy with **explicit `--imageName`**
+and inject the start command via `--args`; the template is a reference, not the deploy mechanism.
+
+**Locked `--gpuType` strings + per-card `--cost` ceilings** (verified against the live RunPod catalog;
+two of the three names are ambiguous, so the EXACT string matters -- a fuzzy match lands the wrong
+silicon and de-risks the wrong arch):
+
+| Order | Card (arch) | `--gpuType` (exact) | `--cost` | Cloud |
+|---|---|---|---|---|
+| 1 (canary) | RTX PRO 6000 Blackwell Server Edition (sm_120) | `NVIDIA RTX PRO 6000 Blackwell Server Edition` | `2.50` | secure |
+| 2 | H200 SXM 141 GB (sm_90, Hopper) | `NVIDIA H200` | `5.00` | secure |
+| 3 | B200 180 GB (sm_100) | `NVIDIA B200` | `6.50` | secure |
+
+NOT the RTX PRO 6000 `Workstation`/`Max-Q` editions; NOT `NVIDIA H200 NVL` (143 GB). B200 is
+**secure-cloud only**, so all three deploy `--secureCloud` for a uniform, reliable pool. Ceilings sit
+just above secure on-demand (~$2.09 / ~$4.39 / ~$5.89) as the runaway guard; at a 60-min cap the worst
+case is ~$2 / ~$4.4 / ~$5.9 per card, all far under the #136 ~$50 cap (the 60-min terminate is the
+binding limit, not `--cost`).
+
+**PUBLIC_KEY (mandatory read path):** a THROWAWAY per-pod ed25519, never a reused identity key (bounds
+blast radius, matches the per-pod-key discipline above; Mackaye referenced "strummer pubkey" but the
+throwaway is the locked choice). The committed script apt-installs + starts sshd from it BEFORE the
+de-risk; no `PUBLIC_KEY` = blind pod, do not fire.
+
+### Fire the canary (sm_120), then fan out
+
+```
+cd ~/vivijure-backend && git pull --ff-only
+B64=$(base64 -w0 deploy/derisk_pod_start.sh)
+ssh-keygen -t ed25519 -f ~/.ssh/derisk_sm120 -N '' -C derisk-sm120   # throwaway; shred after teardown
+runpodctl create pod \
+  --name vj-derisk-sm120-rtxpro6000 \
+  --imageName ghcr.io/skyphusion-labs/vivijure-backend:0.3.1 \
+  --gpuType 'NVIDIA RTX PRO 6000 Blackwell Server Edition' \
+  --gpuCount 1 --secureCloud --cost 2.50 \
+  --containerDiskSize 220 --ports '22/tcp' \
+  --env PUBLIC_KEY="$(cat ~/.ssh/derisk_sm120.pub)" \
+  --args "bash -lc 'echo $B64 | base64 -d | bash'"
+```
+
+H200 + B200 are identical except `--name` / `--gpuType` / `--cost` / the throwaway key suffix:
+- H200 (sm_90):  `--gpuType 'NVIDIA H200'`  `--cost 5.00`  `--name vj-derisk-sm90-h200`   key `derisk_sm90`
+- B200 (sm_100): `--gpuType 'NVIDIA B200'`  `--cost 6.50`  `--name vj-derisk-sm100-b200`  key `derisk_sm100`
+
+Fan H200 + B200 out IN PARALLEL only AFTER the canary emits `@event arch_gate {... "passed": true}` (and
+ideally `@event derisk_pass`). A canary `@event derisk_fail stage=archgate` is a hard STOP: do not fan
+out, flag the lead + Rollins.
+
+### Watch (ssh read path) + send the pod ID
+
+```
+runpodctl get pod <podId> -a     # read the 22/tcp public ip:port from portMappings
+# sshd needs ~20-40s to apt-install + start; retry until it connects:
+ssh -i ~/.ssh/derisk_sm120 -o StrictHostKeyChecking=accept-new -p <pubPort> root@<pubIp> \
+  'tail -f /workspace/derisk.log'
+```
+
+Watch, in order: `### derisk: sshd up`; `@event arch_gate ... "passed": true` (record the raw `arch_list`
+VERBATIM -- closes #14); `@event gpu_probe`/`baked_probe`/`rclone_tripwire fired=false`; `@event
+render_done film_bytes>0`; `@event i2v_jit ... first_call_jit_seconds` (per-arch JIT cost); terminal
+`@event derisk_pass` (green) or `@event derisk_fail stage=<...>`.
+
+### TTL + cost cap + teardown (no native pod TTL)
+
+`runpodctl` has NO native TTL, so the cap is enforced manually + by the lead's independent sweep:
+- The instant each pod is up, send the **pod ID + fire timestamp** to the lead -- his RunPod-MCP sweep
+  hard-terminates any straggler past ~75 min (independent backstop to a dropped watch).
+- Primary cap: on a terminal `@event` (pass or fail) OR at 60 min, whichever first --
+  `runpodctl remove pod <podId>` on PASS; `runpodctl pod stop <podId>` on FAIL (keep the disk for an ssh
+  debug session, emit the resume handle); then `shred -u ~/.ssh/derisk_<arch>{,.pub}`.
+- `--cost` is the $/hr price ceiling (runaway guard), not a spend cap; the 60-min terminate is the real
+  bound. NEVER leave a pod billing past the watch.
+
+### Fallback read path (if ssh proves fiddly)
+
+Confirmed available but unused while ssh works: the image carries `boto3>=1.34`
+(`deploy/requirements.txt`) and the operator has R2 read (`rclone r2:`), so the start command can instead
+background-`boto3`-PUT `/workspace/derisk.log` to `r2:vivijure/derisk/<arch>/` (boto3, never rclone, so
+the no-pull tripwire stays clean -- a post-render telemetry PUT, not a weight GET), read from the
+operator's shell. Kept as a documented contingency; the locked path is self-sshd + ssh-tail above.
+
 ## RESUME (post-checkpoint, step one)
 
 Held at the clean pre-fire boundary (no GPU pods running; nothing to revert; prod `:0.2.28` untouched).
