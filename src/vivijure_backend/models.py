@@ -131,6 +131,28 @@ def quant_for(family: ModelFamily, device: Device) -> Quant:
     return Quant.BF16
 
 
+def _select_i2v_weights(spec, *, baked: bool, final_tier: bool, fp8_present: bool):
+    """Pick (repo_id, weights_are_fp8, pull_from_r2) for the Wan i2v load. PURE -- no I/O, no GPU --
+    so CI exercises the offline weight-source decision with no weights present (the coverage gap that
+    let an un-baked fp8 repo reach a pod). `pull_from_r2` True means the caller runs ensure_i2v_models()
+    first. The fp8 fast path is gated on `fp8_present` (the fp8 repo actually being in the cache), so a
+    bf16-seed image -- which has only the bf16 repo -- loads the bf16 weights and runtime-quantizes
+    instead of asking for a repo that was never baked.
+
+      baked + fp8 present + draft/standard -> (fp8_repo_id, True,  False)   # A1: pre-fp8, no quant
+      baked + fp8 present + final          -> (repo_id,     False, True)    # B: bf16 lazy-pull from R2
+      baked + fp8 absent  (bf16 seed)      -> (repo_id,     False, False)   # baked bf16, runtime-quant
+      not baked                            -> (repo_id,     False, True)    # R2 bf16 + runtime-quant"""
+    fp8_fast = baked and bool(spec.fp8_repo_id) and fp8_present
+    if fp8_fast and not final_tier:
+        return spec.fp8_repo_id, True, False
+    if fp8_fast and final_tier:
+        return spec.repo_id, False, True
+    if baked:
+        return spec.repo_id, False, False
+    return spec.repo_id, False, True
+
+
 class ModelServer:
     """Lazy, persistent model registry. Each role loads once and is cached for the process
     lifetime (the warm worker reuses it). `device` defaults to the live card."""
@@ -283,40 +305,42 @@ class ModelServer:
                   "full-step keyframes only.")
 
     def i2v_pipeline(self):
-        """Wan 2.2 image-to-video. Three weight sources, picked by (baked image?, render tier):
+        """Wan 2.2 image-to-video. Weight source picked by (what's actually baked?, render tier) via
+        the pure _select_i2v_weights decision, so the SAME code serves an fp8 bake or a bf16 bake:
 
-          - BAKED + draft/standard (the A1 default): load the PRE-QUANTIZED fp8 diffusers weights
-            (spec.fp8_repo_id) straight from the baked HF cache and apply the dynamic-activation
-            wrapper at compute -- NO runtime torchao quantize (the weights are already fp8_e4m3fn).
-          - BAKED + final (the B seam, bf16-lazy-on-final): lazy-pull the bf16 diffusers shards from
-            R2 and load THEM at full bf16 (no quant) for the hero clip. Gated on the tier, so the
-            baked default never pulls.
-          - NOT baked (legacy / pre-bake image): load bf16 from the R2 mirror and runtime-quantize to
-            fp8 with torchao, exactly as before.
+          - BAKED pre-fp8 + draft/standard (the A1 fast path): load the PRE-QUANTIZED fp8 diffusers
+            weights (spec.fp8_repo_id) from the baked HF cache and apply the dynamic-activation wrapper
+            at compute -- NO runtime quant (already fp8_e4m3fn). Taken ONLY when the fp8 repo is truly
+            in the cache (repo_in_hf_cache); a bf16-seed image does not have it.
+          - BAKED pre-fp8 + final (the B seam): lazy-pull the bf16 shards from R2 and load them at full
+            bf16 for the hero clip.
+          - BAKED bf16 (the shipping seed): the baked weights ARE bf16 -- load them straight from the
+            bake (no R2 pull) and runtime-quantize to fp8 on draft/standard. Every tier of a bf16-seed
+            image lands here.
+          - NOT baked (legacy / pre-bake image): load bf16 from the R2 mirror and runtime-quantize.
 
-        The distill LoRA (few-step) attaches on draft/standard and is dropped on final, same as before
-        (final = VJ_I2V_DISTILL=0). Wan 2.2 A14B is a ~28B two-expert MoE; below ~120GB VRAM the
-        inactive expert is CPU-offloaded. The bf16 bake (next-week upgrade) is a manifest swap: point
-        spec.fp8_repo_id at the bf16 repo and this exact branch structure carries it unchanged."""
+        The distill LoRA (few-step) attaches on draft/standard and is dropped on final (VJ_I2V_DISTILL=0).
+        Wan 2.2 A14B is a ~28B two-expert MoE; below ~120GB VRAM the inactive expert is CPU-offloaded.
+        Loading whatever was actually baked (not a hard-coded repo) is what closes the offline-load gap
+        the sm_120 de-risk hit: the old code always asked for the -fp8 repo, which the bf16 seed lacks."""
         if "i2v" in self._cache:
             return self._cache["i2v"]
         import os
         import torch
         from diffusers import WanImageToVideoPipeline
-        from .harness.models_mirror import ensure_i2v_models, is_baked
+        from .harness.models_mirror import ensure_i2v_models, is_baked, repo_in_hf_cache
 
         spec = self.specs[ModelRole.I2V]
         final_tier = os.environ.get("VJ_I2V_DISTILL", "1") == "0"
         baked = is_baked()
-        # Decide the weight source + whether the weights are ALREADY fp8 (skip runtime quant).
-        if baked and spec.fp8_repo_id and not final_tier:
-            repo, weights_are_fp8 = spec.fp8_repo_id, True      # A1 default: baked pre-fp8
-        elif baked and final_tier:
-            ensure_i2v_models()                                 # B: bf16-lazy-on-final from R2
-            repo, weights_are_fp8 = spec.repo_id, False
-        else:
-            ensure_i2v_models()                                 # legacy: R2 bf16 + runtime quant
-            repo, weights_are_fp8 = spec.repo_id, False
+        # Take the pre-fp8 fast path ONLY when that repo is genuinely in the baked cache; a bf16 seed
+        # has the bf16 repo, not the -fp8 one. _select_i2v_weights is pure (CI-tested) and decides the
+        # source + whether an R2 pull is needed; loading what's actually baked is the offline-load fix.
+        fp8_present = bool(spec.fp8_repo_id) and repo_in_hf_cache(spec.fp8_repo_id) if baked else False
+        repo, weights_are_fp8, pull_from_r2 = _select_i2v_weights(
+            spec, baked=baked, final_tier=final_tier, fp8_present=fp8_present)
+        if pull_from_r2:
+            ensure_i2v_models()
 
         load_dtype = torch.float8_e4m3fn if weights_are_fp8 else torch.bfloat16
         pipe = WanImageToVideoPipeline.from_pretrained(

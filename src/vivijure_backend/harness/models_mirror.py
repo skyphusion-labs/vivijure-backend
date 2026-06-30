@@ -82,6 +82,21 @@ def is_baked(env: dict | None = None) -> bool:
     models_root = Path(e.get("VJ_MODELS_ROOT", "/opt/models"))
     return (models_root / BAKED_SENTINEL).exists()
 
+
+def repo_in_hf_cache(repo_id: str, env: dict | None = None) -> bool:
+    """True iff `repo_id` is offline-loadable from the local HF hub cache: the `models--<org>--<name>`
+    dir exists AND holds a non-empty snapshot. A bare cache dir with no populated snapshot still raises
+    LocalEntryNotFoundError under `local_files_only=True`, so a from_pretrained caller must gate on THIS,
+    not on the dir alone. Pure: stat only, no I/O. (The sm_120 de-risk hit exactly this -- the runtime
+    asked for a repo that was never baked, and a glob-only baked_probe masked it.)"""
+    e = env if env is not None else os.environ
+    hf_home = Path(e.get("HF_HOME") or Path(e.get("VJ_MODELS_ROOT", "/opt/models")) / "hf-cache")
+    snaps = hf_home / "hub" / ("models--" + repo_id.replace("/", "--")) / "snapshots"
+    if not snaps.is_dir():
+        return False
+    return any(p.is_dir() and any(p.iterdir()) for p in snaps.iterdir())
+
+
 # Bump this constant (or set VJ_MODEL_VERSION in the worker env) whenever the model set
 # in R2 changes so warm workers re-pull instead of silently using a stale cache.
 _DEFAULT_MODEL_VERSION = "1"

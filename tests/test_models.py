@@ -82,3 +82,46 @@ def test_pad_to_multiple_rescues_every_non64_backend():
     assert (pad(768), pad(1364)) == (0, 44)
     # and a square non-64 case stays handled (no aspect-ratio assumption)
     assert pad(726) == 42
+
+
+# ------------------------------------------------------- i2v weight-source selection (offline-load gap)
+
+from vivijure_backend.models import DEFAULT_SPECS, _select_i2v_weights
+
+_I2V_SPEC = DEFAULT_SPECS[ModelRole.I2V]
+
+
+def test_i2v_bf16_seed_loads_baked_bf16_not_the_unbaked_fp8_repo():
+    # The sm_120 de-risk bug: a bf16-seed image has only the bf16 repo, but the runtime asked for the
+    # -fp8 repo and crashed offline. With fp8 absent, every tier loads the baked bf16 repo, no R2 pull
+    # (it is baked), and runtime-quantizes (weights_are_fp8 False).
+    for final_tier in (False, True):
+        repo, weights_are_fp8, pull = _select_i2v_weights(
+            _I2V_SPEC, baked=True, final_tier=final_tier, fp8_present=False)
+        assert repo == _I2V_SPEC.repo_id
+        assert weights_are_fp8 is False
+        assert pull is False
+
+
+def test_i2v_fp8_bake_takes_the_prefp8_fast_path_on_draft_standard():
+    repo, weights_are_fp8, pull = _select_i2v_weights(
+        _I2V_SPEC, baked=True, final_tier=False, fp8_present=True)
+    assert repo == _I2V_SPEC.fp8_repo_id
+    assert weights_are_fp8 is True
+    assert pull is False
+
+
+def test_i2v_fp8_bake_final_tier_lazy_pulls_bf16_from_r2():
+    repo, weights_are_fp8, pull = _select_i2v_weights(
+        _I2V_SPEC, baked=True, final_tier=True, fp8_present=True)
+    assert repo == _I2V_SPEC.repo_id
+    assert weights_are_fp8 is False
+    assert pull is True
+
+
+def test_i2v_not_baked_pulls_bf16_and_quantizes():
+    repo, weights_are_fp8, pull = _select_i2v_weights(
+        _I2V_SPEC, baked=False, final_tier=False, fp8_present=False)
+    assert repo == _I2V_SPEC.repo_id
+    assert weights_are_fp8 is False
+    assert pull is True
