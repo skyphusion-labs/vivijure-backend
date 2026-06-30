@@ -155,6 +155,14 @@ Build and deploy the worker image: [docs/operations.md](docs/operations.md) (and
 - [SECURITY](SECURITY.md) -- the security boundary (one R2 credential, control-plane-trusted input).
 - [CHANGELOG](CHANGELOG.md) / [RELEASES](RELEASES.md) -- per-release notes and the release ledger.
 
+## Acceptable use
+
+This is the generative render engine behind Vivijure (text-to-image keyframes, image-to-video motion,
+and LoRA training). Using it to generate sexual content involving minors, real or synthetic, or
+non-consensual intimate imagery or deepfakes of real people, is absolutely prohibited; CSAM is also a
+crime (18 U.S.C. 1466A / 2252A). That bright line is the project-wide spine. The full policy is the
+[Vivijure Acceptable Use Policy](https://github.com/skyphusion-labs/vivijure/blob/main/docs/legal/ACCEPTABLE-USE.md).
+
 ## License
 
 **AGPL-3.0-only.** A labor of love, given freely: use it, learn from it, self-host it, build your own creative visions on it. Run it as a network service and the AGPL has you share your changes back, so it stays a commons. It is not for sale, and not to be resold as a SaaS.
