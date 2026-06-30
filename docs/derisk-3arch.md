@@ -216,7 +216,8 @@ WRAP_B64="$(base64 -w0 deploy/derisk_read_wrapper.sh)"               # boto3->R2
 # EGRESS-BLOCKED run ONLY (the #17 fan-out): also `export DERISK_EGRESS_LOCK=1` so it rides in --env
 # (pod-level). The inner $RUN render children inherit it and vj_derisk.py installs the userspace egress
 # guard (PR #161). A baseline (non-egress) run leaves it UNSET -> the key is omitted -> zero behavior change.
-# R2_S3_ENDPOINT stays pod-level either way (the boto3 uploader needs it; it is also the guard positive control).
+# R2_S3_* stays pod-level for the boto3 uploader. The Design B full-block guard does NOT use R2 (no R2
+# positive control) -- the render process gets loopback + AF_UNIX only.
 
 # --env is a JSON OBJECT (the fix): build it without echoing the secret. DERISK_EGRESS_LOCK is appended
 # ONLY when set, so an unset baseline run produces the exact same object as before.
