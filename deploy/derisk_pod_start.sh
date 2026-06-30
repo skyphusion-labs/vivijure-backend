@@ -3,7 +3,7 @@
 # the READ PATH is a separate observability scaffold applied at deploy time (see below).
 #
 # It replaces the image CMD (the serverless worker loop, which exits on a pod with no test_input.json):
-# arms the rclone tripwire, curls the driver pinned to #144, then arch-gate -> probe -> render, emitting
+# arms the rclone tripwire, materializes the INJECTED driver, then arch-gate -> probe -> render, emitting
 # the @event channel to stdout.
 #
 # READ PATH (boto3 -> R2 poll, Strummer's deploy-time wrapper -- NOT in this file):
@@ -37,11 +37,30 @@ printf '%s\n' '#!/bin/sh' 'touch "$VJ_RCLONE_TRIPWIRE"' 'exit 0' > /workspace/bi
 chmod +x /workspace/bin/rclone
 export PATH=/workspace/bin:$PATH
 
-# Driver pinned to the merged #151 fix commit (integrity + reproducibility: exactly the reviewed code).
-SHA=274802860a57ecb41daaef244ea0ce518bfa0b0b
 fail() { echo "@event derisk_fail stage=$1"; sleep 600; exit 1; }
-curl -fsSL "https://raw.githubusercontent.com/skyphusion-labs/vivijure-backend/$SHA/deploy/vj_derisk.py" \
-  -o /workspace/vj_derisk.py || fail fetch
+
+# Driver INJECTED, not fetched. raw.githubusercontent returned STALE bytes for an immutable raw-by-SHA URL
+# during the post-#151/#152-merge propagation window (2026-06-30): a curled pod ran the OLD driver and
+# crashed at render despite the inner pinning the fixed commit. We now inject the reviewed driver bytes via
+# DERISK_DRIVER_B64 (gzip + base64 -w0 of deploy/vj_derisk.py) and materialize them here: zero network/CDN
+# dependency, so the pod runs EXACTLY the reviewed code. The fire builds DERISK_DRIVER_B64 from the COMMITTED
+# driver on main; the materialized file (post-gunzip) is byte-identical to that driver.
+[ -n "${DERISK_DRIVER_B64:-}" ] || fail no_driver
+printf '%s' "$DERISK_DRIVER_B64" | base64 -d | gunzip > /workspace/vj_derisk.py 2>/dev/null || fail driver_decode
+
+# Integrity gate (CPU, pre-GPU, $0): the materialized driver MUST match the reviewed bytes EXACTLY. Primary
+# gate = sha256 (catches ANY transport corruption); secondary = the `def build_render_inputs` marker that
+# exists ONLY in the #151 fix (absence == old/stale driver). Structured @event so the watcher asserts on the
+# channel, not prose. On mismatch: emit @event driver_corrupt, then sleep so the boto3->R2 uploader PUTs the
+# event (the read path needs the pod alive ~15s+ or the terminal event never reaches R2), then exit non-zero.
+EXPECT_SHA=2662f20c553fcb9f37abd2b6ccd4960629f02ffb40d1633cbffe8b2faac53856
+GOT_SHA=$(sha256sum /workspace/vj_derisk.py | cut -d' ' -f1)
+if [ "$GOT_SHA" != "$EXPECT_SHA" ] || ! grep -q 'def build_render_inputs' /workspace/vj_derisk.py; then
+  echo "@event driver_corrupt {\"ok\": false, \"expected_sha256\": \"$EXPECT_SHA\", \"got_sha256\": \"$GOT_SHA\", \"marker\": \"build_render_inputs\"}"
+  sleep 600   # keep the pod alive so the uploader PUTs the event; operator removes on read ($0-intent, pre-GPU)
+  exit 1
+fi
+echo "@event driver_integrity {\"ok\": true, \"sha256\": \"$GOT_SHA\", \"marker\": \"build_render_inputs\"}"
 
 RUN="conda run --no-capture-output -n vivijure python /workspace/vj_derisk.py"
 
