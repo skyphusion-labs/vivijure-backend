@@ -1,61 +1,43 @@
 #!/usr/bin/env bash
-# Pod start-command for the #15 3-arch de-risk (one pod per pooled DC card).
+# De-risk INNER for the #15 3-arch run (one pod per pooled DC card). This is the de-risk LOGIC only;
+# the READ PATH is a separate observability scaffold applied at deploy time (see below).
 #
-# This is the container start command (CMD override) the de-risk pods run. Our baked image's CMD is the
-# serverless worker loop, which exits immediately on a pod (no test_input.json); this script keeps the
-# pod working: it self-runs the de-risk (arch-gate -> probe -> render) and emits the @event channel.
+# It replaces the image CMD (the serverless worker loop, which exits on a pod with no test_input.json):
+# arms the rclone tripwire, curls the driver pinned to #144, then arch-gate -> probe -> render, emitting
+# the @event channel to stdout.
 #
-# OBSERVABILITY (why this looks the way it does): a RunPod pod's container stdout is NOT API/CLI-readable
-# (console websocket only -- runpodctl has no `logs`, the MCP get-pod returns status only). AND this image
-# ships no openssh-server. So this script provides its own read path:
-#   - self-tees ALL output to /workspace/derisk.log (exec > >(tee ...)), and
-#   - if PUBLIC_KEY is set, apt-installs + starts sshd with it BEFORE the de-risk, so the operator can
-#     ssh in and `tail -f /workspace/derisk.log` live.
-# PUBLIC_KEY is therefore MANDATORY -- without it the pod runs but is unreadable (blind). Set the pod env
-# PUBLIC_KEY=<your ed25519 pubkey>.
+# READ PATH (boto3 -> R2 poll, Strummer's deploy-time wrapper -- NOT in this file):
+#   RunPod pod stdout is not API/CLI-readable (console-only) and this image has no sshd. So the deploy
+#   wraps THIS inner in a scaffold that tees output to /workspace/out/derisk.log and, every ~15s, uploads
+#   it to r2:vivijure/derisk/<label>/derisk.log via boto3 (the operator polls R2 to read the @event
+#   stream). boto3 ONLY, never rclone, so the tripwire here stays meaningful. A derisk_boot marker is
+#   uploaded within ~15s of boot to self-prove the read path BEFORE any GPU render spend.
+#   CREDS: inject ONLY R2_S3_* (the exfil key) via --env; do NOT inject the backend's R2_* names -- then
+#   the baked backend has no model-pull creds at all (can't pull from R2 even if is_baked() failed). The
+#   boto3 client must match src/vivijure_backend/harness/r2.py: signature_version="s3v4",
+#   region_name="auto", no path-style addressing.
 #
-# DEPLOY (the RunPod MCP cannot set a pod start command -- see the tooling-gap issue): deliver verbatim,
-# quoting-proof, via runpodctl as base64:
-#   B64=$(base64 -w0 deploy/derisk_pod_start.sh)
-#   runpodctl create pod --imageName ghcr.io/skyphusion-labs/vivijure-backend:0.3.1 \
-#     --gpuType '<NVIDIA H200 | NVIDIA B200 | NVIDIA RTX PRO 6000 Blackwell Server Edition>' \
-#     --containerDiskSize 220 --ports '22/tcp' --env PUBLIC_KEY="$(cat ~/.ssh/derisk.pub)" \
-#     --args "bash -lc 'echo $B64 | base64 -d | bash'"
-# base64 survives the shell -> runpodctl -> RunPod -> container quoting layers byte-identical. NO network
-# volume / NO mount at /opt/models (it would shadow the baked weights). GHCR is public (no registry auth).
-# runpodctl has no native TTL: watch the log and `runpodctl remove pod` on a terminal @event or ~60 min.
-#
+# DEPLOY (the RunPod MCP cannot set a pod start command -- see the tooling-gap issue): base64 the full
+# wrapped script into runpodctl --args. Image ghcr.io/skyphusion-labs/vivijure-backend:0.3.1 (PUBLIC, no
+# registry auth), NO volume / NO mount at /opt/models (would shadow the baked weights), containerDisk
+# ~220GB. runpodctl has no native TTL: watch R2 and `runpodctl remove pod` on a terminal @event or ~60min.
 # Order: RTX PRO 6000 (sm_120) canary first; on @event derisk_pass, fan out H200 (sm_90) + B200 (sm_100).
 #
 # set -u correctness: VJ_RCLONE_TRIPWIRE is exported BEFORE the fake-rclone write, and the rclone body is
-# single-quoted so the var is written UNexpanded (resolves when the fake rclone runs, not at write time);
-# otherwise set -u aborts on line 1 with the export pending (dead pod, zero @event). ${PUBLIC_KEY:-} is
-# default-guarded so set -u tolerates it being unset.
+# single-quoted so the var is written UNexpanded (resolves when the fake rclone runs); otherwise set -u
+# aborts on line 1 with the export pending (dead pod, zero @event).
 set -u
-exec > >(tee -a /workspace/derisk.log) 2>&1
 export VJ_RCLONE_TRIPWIRE=/workspace/.rclone-fired
 mkdir -p /workspace/bin /workspace/out
 
-# Read path: install + start sshd from PUBLIC_KEY (this image has none), BEFORE the de-risk so progress
-# is watchable live. No PUBLIC_KEY = blind pod; abort and set it.
-if [ -n "${PUBLIC_KEY:-}" ]; then
-  apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq openssh-server >/dev/null 2>&1
-  mkdir -p /run/sshd ~/.ssh && chmod 700 ~/.ssh
-  printf '%s\n' "$PUBLIC_KEY" >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
-  /usr/sbin/sshd && echo "### derisk: sshd up" || echo "### derisk: sshd_setup_failed"
-else
-  echo "### derisk: NO PUBLIC_KEY set -- pod is BLIND (no read path). Abort and redeploy with PUBLIC_KEY."
-fi
-
-# rclone tripwire: shadow rclone with a fake earlier in PATH that touches the sentinel on spawn. On a
-# truthfully-baked image the baked short-circuit never pulls from R2, so the sentinel must never appear
-# (the driver re-checks it: @event rclone_tripwire fired=false is the no-pull proof).
+# rclone tripwire: shadow rclone with a fake earlier in PATH that touches the sentinel on spawn. A
+# truthfully-baked image never pulls from R2, so the sentinel must never appear (@event rclone_tripwire
+# fired=false is the no-pull proof).
 printf '%s\n' '#!/bin/sh' 'touch "$VJ_RCLONE_TRIPWIRE"' 'exit 0' > /workspace/bin/rclone
 chmod +x /workspace/bin/rclone
 export PATH=/workspace/bin:$PATH
 
-# Driver pinned to the merged #144 commit (integrity + reproducibility: the pod runs exactly the
-# reviewed code, immune to a mid-run push to main).
+# Driver pinned to the merged #144 commit (integrity + reproducibility: exactly the reviewed code).
 SHA=481f8277eeafa0b045e97075bf5b2191e933b263
 fail() { echo "@event derisk_fail stage=$1"; sleep 600; exit 1; }
 curl -fsSL "https://raw.githubusercontent.com/skyphusion-labs/vivijure-backend/$SHA/deploy/vj_derisk.py" \
@@ -71,4 +53,4 @@ $RUN render --aspect portrait  --tier final --out /workspace/out || fail render_
 $RUN render --aspect landscape --tier final --out /workspace/out || fail render_landscape
 
 echo "@event derisk_pass stages=archgate,probe,render_portrait,render_landscape"
-sleep 600   # log-read window only; the hard cap is the operator's `runpodctl remove pod`
+sleep 600   # read-window only; the hard cap is the operator's `runpodctl remove pod`
