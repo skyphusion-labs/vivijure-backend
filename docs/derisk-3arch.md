@@ -168,6 +168,11 @@ creds are sourced from your secret store and presence-checked with `${VAR:+SET}`
 
 ### Fire the canary (sm_120), then fan out
 
+Both halves of what fires are committed + change-controlled: the de-risk inner (`deploy/derisk_pod_start.sh`)
+and the boto3->R2 read-path outer (`deploy/derisk_read_wrapper.sh`). The deploy only base64-transports
+them into `runpodctl --args`, so they survive the shell -> runpodctl -> RunPod -> container quoting layers
+byte-identical -- what fires is exactly the reviewed files (no hand-pasted heredoc).
+
 ```
 cd ~/vivijure-backend && git pull --ff-only
 
@@ -177,38 +182,8 @@ for v in R2_S3_ENDPOINT R2_S3_ACCESS_KEY_ID R2_S3_SECRET_ACCESS_KEY R2_S3_BUCKET
 done
 
 LABEL=sm120
-INNER_B64=$(base64 -w0 deploy/derisk_pod_start.sh)
-
-# Read-path wrapper: background a boto3->R2 uploader (matches src/vivijure_backend/harness/r2.py:
-# s3v4 / region auto / no path-style), then run the committed inner tee'd to the polled log. boto3
-# ONLY (never rclone) so the pod-side tripwire stays clean. derisk_boot self-proves the read path.
-read -r -d '' WRAP <<'WRAPEOF'
-set -u
-mkdir -p /workspace/out
-LOG=/workspace/out/derisk.log
-conda run --no-capture-output -n vivijure python - "$DERISK_LABEL" <<'PY' &
-import os, sys, time, boto3
-from botocore.config import Config
-label = sys.argv[1]
-c = boto3.client("s3",
-    endpoint_url=os.environ["R2_S3_ENDPOINT"],
-    aws_access_key_id=os.environ["R2_S3_ACCESS_KEY_ID"],
-    aws_secret_access_key=os.environ["R2_S3_SECRET_ACCESS_KEY"],
-    region_name="auto",
-    config=Config(signature_version="s3v4"))
-bucket, key = os.environ["R2_S3_BUCKET"], f"derisk/{label}/derisk.log"
-c.put_object(Bucket=bucket, Key=key, Body=("@event derisk_boot label=%s\n" % label).encode())
-while True:
-    time.sleep(15)
-    try:
-        with open("/workspace/out/derisk.log", "rb") as f:
-            c.put_object(Bucket=bucket, Key=key, Body=f.read())
-    except FileNotFoundError:
-        pass
-PY
-echo "$DERISK_INNER_B64" | base64 -d | bash 2>&1 | tee -a "$LOG"
-WRAPEOF
-WRAP_B64=$(printf '%s' "$WRAP" | base64 -w0)
+INNER_B64=$(base64 -w0 deploy/derisk_pod_start.sh)     # the de-risk inner
+WRAP_B64=$(base64 -w0 deploy/derisk_read_wrapper.sh)   # the boto3->R2 read-path outer
 
 runpodctl create pod \
   --name vj-derisk-sm120-rtxpro6000 \
@@ -225,9 +200,11 @@ runpodctl create pod \
   --args "bash -lc 'echo $WRAP_B64 | base64 -d | bash'"
 ```
 
-The `R2_S3_*` values are expanded from your already-loaded secret store; only the variable NAMES appear
-here, never a plaintext value. H200 + B200 are identical except `LABEL` / `--name` / `--gpuType` /
-`--cost`:
+`runpodctl --env` takes `VAR=value` only (no bare pull-from-env form), so the secret value transits
+`runpodctl`'s argv. Acceptable here: it is your local operator shell, the value is argv-transient for one
+short-lived invocation, and it never lands in a tracked file -- only the variable NAMES appear above; the
+values expand from your already-loaded secret store, presence-checked with `${VAR:+SET}`. H200 + B200 are
+identical except `LABEL` / `--name` / `--gpuType` / `--cost`:
 - H200 (sm_90):  `LABEL=sm90`   `--gpuType 'NVIDIA H200'`   `--cost 5.00`   `--name vj-derisk-sm90-h200`
 - B200 (sm_100): `LABEL=sm100`  `--gpuType 'NVIDIA B200'`   `--cost 6.50`   `--name vj-derisk-sm100-b200`
 
