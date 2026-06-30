@@ -128,3 +128,28 @@ def test_model_server_uses_job_config_specs(monkeypatch):
     pipe2 = worker.build_pipeline(req2)
     assert pipe2.server is pipe.server  # reused
     assert worker._SERVER.specs[ModelRole.KEYFRAME_BASE].repo_id == "custom/sdxl-base"  # unchanged
+
+
+# ----------------------------------------------------------- de-risk driver sha <-> EXPECT_SHA guard
+
+def test_derisk_expect_sha_matches_committed_driver():
+    """The inner (derisk_pod_start.sh) injects deploy/vj_derisk.py and sha256-gates it against a
+    hard-coded EXPECT_SHA before any GPU spend. If the driver changes but EXPECT_SHA does not, every
+    de-risk fire would driver_corrupt at $0 -- so this asserts they stay in lockstep at commit time."""
+    import hashlib, re
+    root = Path(__file__).resolve().parents[1]
+    driver = (root / "deploy" / "vj_derisk.py").read_bytes()
+    got = hashlib.sha256(driver).hexdigest()
+    inner = (root / "deploy" / "derisk_pod_start.sh").read_text()
+    m = re.search(r"^EXPECT_SHA=([0-9a-f]{64})$", inner, re.MULTILINE)
+    assert m, "EXPECT_SHA=<sha256> not found in derisk_pod_start.sh"
+    assert m.group(1) == got, (
+        f"EXPECT_SHA ({m.group(1)}) != sha256(vj_derisk.py) ({got}); "
+        "bump EXPECT_SHA in derisk_pod_start.sh when the driver changes")
+
+
+def test_derisk_driver_keeps_the_build_render_inputs_marker():
+    """The inner's secondary gate greps for `def build_render_inputs`; keep the marker present so the
+    integrity gate's discriminator stays valid."""
+    root = Path(__file__).resolve().parents[1]
+    assert "def build_render_inputs" in (root / "deploy" / "vj_derisk.py").read_text()

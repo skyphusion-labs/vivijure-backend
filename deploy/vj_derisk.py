@@ -115,8 +115,29 @@ def probe() -> int:
     finish_dirs = sorted(p.name for p in Path(models_root).iterdir()
                          if p.is_dir() and p.name in ("antelopev2", "rife", "GFPGANv1.4"))
 
-    from vivijure_backend.harness.models_mirror import is_baked
+    from vivijure_backend.harness.models_mirror import is_baked, repo_in_hf_cache
+    from vivijure_backend.models import DEFAULT_SPECS, ModelRole, _select_i2v_weights
     baked = is_baked()
+
+    # $0 PRE-GPU gate: assert the EXACT repos the render will from_pretrained ARE cached, BEFORE the
+    # CUDA kernel below. A models--*Wan* glob is not enough -- it matched the bf16 repo while the
+    # runtime asked for the un-baked -fp8 repo, and that LocalEntryNotFoundError reached render. Reuse
+    # the runtime's own i2v decision (_select_i2v_weights) so the probe can never assert a different
+    # repo than the load resolves; check the keyframe base too (same un-baked-repo-offline class).
+    # Finish models load direct file paths (finish_dirs below), not HF snapshots, so they are separate.
+    i2v_spec = DEFAULT_SPECS[ModelRole.I2V]
+    i2v_final = os.environ.get("VJ_I2V_DISTILL", "1") == "0"
+    i2v_fp8_present = bool(i2v_spec.fp8_repo_id) and repo_in_hf_cache(i2v_spec.fp8_repo_id) if baked else False
+    i2v_repo_active, _, _ = _select_i2v_weights(
+        i2v_spec, baked=baked, final_tier=i2v_final, fp8_present=i2v_fp8_present)
+    render_repos = {"i2v": i2v_repo_active,
+                    "keyframe_base": DEFAULT_SPECS[ModelRole.KEYFRAME_BASE].repo_id}
+    missing_repos = {role: r for role, r in render_repos.items() if not repo_in_hf_cache(r)}
+    if missing_repos:
+        ev("derisk_fail", stage="render_repo_not_cached", missing_repos=missing_repos,
+           render_repos=render_repos, i2v_final_tier=i2v_final,
+           hint="runtime would from_pretrained these offline and raise LocalEntryNotFoundError")
+        return 1
 
     import torch
     cuda_ok = torch.cuda.is_available()
@@ -157,7 +178,8 @@ def probe() -> int:
        vram_free_gb=round(free_b / 1e9, 2), vram_total_meminfo_gb=round(total_b / 1e9, 2))
     ev("baked_probe",
        vj_baked=baked, sentinel_present=sentinel.is_file(), sentinel_meta=baked_meta,
-       i2v_repos_baked=i2v_repos, finish_dirs=finish_dirs)
+       i2v_repos_baked=i2v_repos, finish_dirs=finish_dirs,
+       render_repos_active=render_repos, i2v_repo_active=i2v_repo_active)
     _check_tripwire("probe")
     return 0
 
