@@ -443,7 +443,7 @@ class ModelServer:
         else:
             weight_path = os.path.join(
                 models_root, spec.repo_id.split("/")[-1], spec.weight_name or "GFPGANv1.4.pth")
-            restorer = _GfpganRestorer(weight_path)
+            restorer = _GfpganRestorer(weight_path, models_root)
         self._cache[cache_key] = restorer
         return restorer
 
@@ -693,6 +693,43 @@ class _RifeInterpolator:
         return out[:h, :w]  # crop the pad back off -> exactly the original dims
 
 
+_FACEXLIB_WEIGHTS = ("detection_Resnet50_Final.pth", "parsing_parsenet.pth")
+
+
+def _ensure_facexlib_offline(models_root: str) -> None:
+    """Make facexlib's face detection + parsing weights resolve OFFLINE for both face restorers.
+
+    GFPGAN 1.3.8 hardcodes model_rootpath='gfpgan/weights' (cwd-relative) into its internal
+    FaceRestoreHelper, and a bare CodeFormer FaceRestoreHelper defaults to facexlib's package weights
+    dir -- either way facexlib's load_file_from_url would GET detection_Resnet50_Final.pth +
+    parsing_parsenet.pth from github on construction (the finish-leg egress the sm_120 de-risk
+    surfaced). The weights are baked at <models_root>/facexlib/; symlink them into every location
+    facexlib's os.path.exists() check consults so it never reaches out. Version-agnostic by
+    construction (we satisfy the existence check, not a specific kwarg). Best-effort per target (a
+    read-only site-packages or cwd is tolerated); the baked_probe is the hard $0 gate, and the
+    --network=none docker verify proves the resolution end to end."""
+    import os
+    from pathlib import Path as _Path
+
+    baked = _Path(models_root) / "facexlib"
+    targets = [_Path("gfpgan") / "weights"]          # GFPGAN 1.3.8 hardcoded cwd-relative rootpath
+    try:
+        import facexlib  # facexlib package weights dir (CodeFormer's default helper)
+        targets.append(_Path(facexlib.__file__).parent / "weights")
+    except Exception:  # noqa: BLE001
+        pass
+    for tdir in targets:
+        for fn in _FACEXLIB_WEIGHTS:
+            src, dst = baked / fn, tdir / fn
+            if dst.exists() or not src.is_file():
+                continue
+            try:
+                tdir.mkdir(parents=True, exist_ok=True)
+                os.symlink(src, dst)
+            except OSError:
+                pass  # best-effort; baked_probe asserts the baked files at $0
+
+
 class _GfpganRestorer:
     """GFPGAN blind face restorer. `restore(frame, fidelity, only_faces)` runs the restorer over the
     detected faces in one frame. GFPGAN's fidelity knob is `weight` (its restoration/fidelity
@@ -701,9 +738,12 @@ class _GfpganRestorer:
     `only_faces` True we still paste them back (the restored faces are what we want), but leave the
     rest of the frame untouched, which is GFPGAN's default paste behavior. The model loads once."""
 
-    def __init__(self, weight_path: str):
+    def __init__(self, weight_path: str, models_root: str):
         from gfpgan import GFPGANer  # deferred
 
+        # GFPGAN's internal FaceRestoreHelper would fetch facexlib's detection+parsing weights from
+        # github on construction; pre-place the baked weights where it looks so the load is offline.
+        _ensure_facexlib_offline(models_root)
         self._restorer = GFPGANer(model_path=weight_path, upscale=1, arch="clean",
                                   channel_multiplier=2, bg_upsampler=None)
 
@@ -740,8 +780,12 @@ class _CodeFormerRestorer:
         net.load_state_dict(torch.load(ckpt, map_location=self._device)["params_ema"])
         net.eval()
         self._net = net
+        # Resolve facexlib's detection+parsing weights from the baked dir (offline): model_rootpath
+        # points FaceRestoreHelper straight at them, and the shim covers any other facexlib lookup.
+        _ensure_facexlib_offline(models_root)
         self._helper = FaceRestoreHelper(
-            upscale_factor=1, face_size=512, device=self._device)
+            upscale_factor=1, face_size=512, device=self._device,
+            model_rootpath=os.path.join(models_root, "facexlib"))
 
     def restore(self, frame, *, fidelity: float = 0.7, only_faces: bool = True):
         torch = self._torch

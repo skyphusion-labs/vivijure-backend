@@ -169,7 +169,13 @@ ARG VJ_MODEL_VERSION=1
 # for the precision + at least one real shard). is_baked() trusts this sentinel to skip the R2 pull,
 # so the sentinel must NOT be able to lie: the AND below writes it only after the assert passes.
 COPY deploy/bake_layers.py /tmp/bake_layers.py
+COPY deploy/facexlib_pins.py /tmp/facexlib_pins.py
+COPY deploy/bake-manifest.json /tmp/bake-manifest.json
+# Bake the manifest into the image as the auditable pin record. is_baked() trusts .vj-baked; the
+# manifest travels with the artifact so the de-risk runtime probe re-asserts the SAME facexlib sha256.
+COPY deploy/bake-manifest.json /opt/models/bake-manifest.json
 RUN python /tmp/bake_layers.py assert-weights --root "$VJ_MODELS_ROOT" --precision "${VJ_BAKE_PRECISION}" \
+    && python /tmp/bake_layers.py assert-finish-shas --root "$VJ_MODELS_ROOT" --manifest /tmp/bake-manifest.json \
     && printf 'baked_utc=%s\nprecision=%s\nmodel_version=%s\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${VJ_BAKE_PRECISION}" "${VJ_MODEL_VERSION}" \
         > /opt/models/.vj-baked \

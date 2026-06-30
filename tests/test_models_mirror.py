@@ -27,6 +27,7 @@ from vivijure_backend.harness.models_mirror import (
     _truthy,
     ensure_i2v_models,
     mirror_cmd,
+    rclone_env,
     start_i2v_prefetch,
     write_no_exist_stubs,
 )
@@ -218,7 +219,7 @@ def test_cold_start_skips_heavy_i2v_and_dead_repos():
                  "models--stabilityai--stable-diffusion-xl-base-1.0",
                  "models--stabilityai--sdxl-turbo"):
         assert repo in DEFAULT_SKIP_REPOS
-    cmd = mirror_cmd(Path("/x/conf"), "r2:b/models/hf-cache", Path("/dst"), skip_repos=DEFAULT_SKIP_REPOS)
+    cmd = mirror_cmd("r2:b/models/hf-cache", Path("/dst"), skip_repos=DEFAULT_SKIP_REPOS)
     for repo in DEFAULT_SKIP_REPOS:
         assert f"hub/{repo}/**" in cmd          # each skip repo becomes an rclone --exclude
 
@@ -245,7 +246,7 @@ def test_ensure_i2v_skips_when_no_r2_creds(tmp_path):
 # --------------------------------------------------------- eager i2v prefetch (perf #1)
 
 def test_mirror_cmd_includes_multi_thread_flags():
-    cmd = mirror_cmd(Path("/x/conf"), "r2:b/src", Path("/dst"))
+    cmd = mirror_cmd("r2:b/src", Path("/dst"))
     assert "--multi-thread-streams" in cmd
     assert "8" in cmd
     assert "--multi-thread-cutoff" in cmd
@@ -503,3 +504,81 @@ def test_repo_in_hf_cache_unbaked_fp8_repo_is_false(tmp_path):
     (bf16 / "model_index.json").write_text("{}")
     assert models_mirror.repo_in_hf_cache("Wan-AI/Wan2.2-I2V-A14B-Diffusers", env) is True
     assert models_mirror.repo_in_hf_cache("Wan-AI/Wan2.2-I2V-A14B-Diffusers-fp8", env) is False
+
+
+# --------------------------------------- R2 secret never on disk (py/clear-text-storage, CodeQL #1)
+
+_R2_CREDS = {"R2_ACCESS_KEY_ID": "AKIAFAKE", "R2_SECRET_ACCESS_KEY": "s3cr3t-NEVER-on-disk",
+             "R2_ENDPOINT": "https://acct.r2.cloudflarestorage.com", "R2_BUCKET": "vivijure"}
+
+
+def _drive_cold_pull(tmp_path, monkeypatch):
+    """Run ensure_models' cold path with a fake rclone (subprocess.run captured), returning the list
+    of (argv, kwargs) calls. Not baked, no volume, no sentinel, creds present -> the mirror legs run."""
+    import subprocess as _sp
+    calls = []
+
+    def fake_run(argv, *a, **kw):
+        calls.append((argv, kw))
+        class _CP:  # minimal CompletedProcess stand-in
+            returncode = 0
+        return _CP()
+
+    monkeypatch.setattr(models_mirror.shutil, "which", lambda _: "/usr/bin/rclone")
+    monkeypatch.setattr(models_mirror.subprocess, "run", fake_run)
+    monkeypatch.setattr(models_mirror, "_reconstruct_symlinks", lambda *a, **k: 0)
+    monkeypatch.setattr(models_mirror, "_jitter_seconds", lambda *_: 0.0)
+    hf = tmp_path / "hf-cache"
+    env = {**_R2_CREDS, "HF_HOME": str(hf), "VJ_MODELS_ROOT": str(tmp_path)}
+    ran = ensure_models(env=env, log=lambda *_: None)
+    return ran, calls
+
+
+def test_cold_pull_passes_secret_in_env_never_in_argv(tmp_path, monkeypatch):
+    ran, calls = _drive_cold_pull(tmp_path, monkeypatch)
+    assert ran is True and calls, "cold pull did not run the mirror legs"
+    secret = _R2_CREDS["R2_SECRET_ACCESS_KEY"]
+    for argv, kw in calls:
+        # the secret rides in the child env...
+        assert kw.get("env", {}).get("RCLONE_CONFIG_R2_SECRET_ACCESS_KEY") == secret
+        # ...and NEVER in the command line (argv) or any flag
+        assert not any(secret in str(tok) for tok in argv), "secret leaked into rclone argv"
+        assert "--config" not in argv, "an on-disk rclone.conf path was passed"
+        assert argv[0] == "rclone" and "copy" in argv
+
+
+def test_cold_pull_writes_no_secret_bearing_file_anywhere(tmp_path, monkeypatch):
+    _drive_cold_pull(tmp_path, monkeypatch)
+    secret = _R2_CREDS["R2_SECRET_ACCESS_KEY"].encode()
+    for f in tmp_path.rglob("*"):
+        if f.is_file():
+            assert secret not in f.read_bytes(), f"secret written to disk at {f}"
+    # and explicitly: no rclone.conf was created (the old clear-text-on-disk path is gone)
+    assert not list(tmp_path.rglob("rclone.conf"))
+
+
+def test_cold_pull_resolves_the_r2_remote_from_env(tmp_path, monkeypatch):
+    _, calls = _drive_cold_pull(tmp_path, monkeypatch)
+    for argv, kw in calls:
+        src = argv[-2]
+        assert src.startswith("r2:"), f"leg src {src!r} does not use the r2: remote"
+        # the remote name in argv matches the RCLONE_CONFIG_R2_* env that configures it
+        assert kw["env"]["RCLONE_CONFIG_R2_TYPE"] == "s3"
+
+
+def test_cold_pull_legs_are_behavior_equivalent(tmp_path, monkeypatch):
+    # Same remote + same legs as before the env-var change: hf-cache + antelopev2 + the three finish
+    # dirs (rife, GFPGANv1.4, facexlib). Guards that the secret-removal did not drop or reorder a leg.
+    _, calls = _drive_cold_pull(tmp_path, monkeypatch)
+    leg_srcs = [argv[-2] for argv, _ in calls]
+    assert leg_srcs == [
+        "r2:vivijure/models/hf-cache",
+        "r2:vivijure/models/antelopev2",
+        "r2:vivijure/models/rife",
+        "r2:vivijure/models/GFPGANv1.4",
+        "r2:vivijure/models/facexlib",
+    ]
+    # the hf-cache leg still carries the lazy/dead-repo excludes (behavior preserved)
+    hf_argv = calls[0][0]
+    for repo in DEFAULT_SKIP_REPOS:
+        assert f"hub/{repo}/**" in hf_argv

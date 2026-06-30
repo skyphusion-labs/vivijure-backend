@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import statistics
@@ -113,7 +114,7 @@ def probe() -> int:
     hub = Path(models_root) / "hf-cache" / "hub"
     i2v_repos = sorted(p.name for p in hub.glob("models--*Wan*")) if hub.is_dir() else []
     finish_dirs = sorted(p.name for p in Path(models_root).iterdir()
-                         if p.is_dir() and p.name in ("antelopev2", "rife", "GFPGANv1.4"))
+                         if p.is_dir() and p.name in ("antelopev2", "rife", "GFPGANv1.4", "facexlib"))
 
     from vivijure_backend.harness.models_mirror import is_baked, repo_in_hf_cache
     from vivijure_backend.models import DEFAULT_SPECS, ModelRole, _select_i2v_weights
@@ -124,7 +125,7 @@ def probe() -> int:
     # runtime asked for the un-baked -fp8 repo, and that LocalEntryNotFoundError reached render. Reuse
     # the runtime's own i2v decision (_select_i2v_weights) so the probe can never assert a different
     # repo than the load resolves; check the keyframe base too (same un-baked-repo-offline class).
-    # Finish models load direct file paths (finish_dirs below), not HF snapshots, so they are separate.
+    # Finish-leg face-restore (facexlib) weights get their own $0 file-presence gate just below.
     i2v_spec = DEFAULT_SPECS[ModelRole.I2V]
     i2v_final = os.environ.get("VJ_I2V_DISTILL", "1") == "0"
     i2v_fp8_present = bool(i2v_spec.fp8_repo_id) and repo_in_hf_cache(i2v_spec.fp8_repo_id) if baked else False
@@ -138,6 +139,62 @@ def probe() -> int:
            render_repos=render_repos, i2v_final_tier=i2v_final,
            hint="runtime would from_pretrained these offline and raise LocalEntryNotFoundError")
         return 1
+
+    # $0 finish-leg gate: the face-restore path (GFPGAN/CodeFormer -> facexlib) loads detection +
+    # parsing weights from <models_root>/facexlib; if absent OR not the pinned bytes, facexlib would
+    # fetch them from github at render time (the finish-leg egress the sm_120 de-risk surfaced), and a
+    # corrupted/substituted .pth would silently degrade face restore. Assert exact size + sha256
+    # against the baked manifest (the SAME pins the staging upload + the build-time bake gate use), so
+    # the three cannot drift. Fail-closed, pre-GPU, $0. Reads the manifest baked at <models_root>/
+    # bake-manifest.json (gated into .vj-baked at build); falls back to presence-only on an older image
+    # that predates the baked manifest, emitting a note so the weaker check is never silent.
+    facexlib_dir = Path(models_root) / "facexlib"
+    manifest_path = Path(models_root) / "bake-manifest.json"
+    fx_pins = []
+    if manifest_path.is_file():
+        try:
+            for entry in json.loads(manifest_path.read_text()).get("finish_dirs", []):
+                if entry.get("dir") == "facexlib":
+                    fx_pins = entry.get("files") or []
+        except (OSError, ValueError) as exc:
+            ev("derisk_fail", stage="finish_manifest_unreadable",
+               manifest=str(manifest_path), error=str(exc))
+            return 1
+    if fx_pins:
+        fx_bad = []
+        for pin in fx_pins:
+            f = facexlib_dir / pin["name"]
+            if not f.is_file():
+                fx_bad.append({"name": pin["name"], "why": "missing"})
+                continue
+            size = f.stat().st_size
+            if size != pin["size"]:
+                fx_bad.append({"name": pin["name"], "why": "size", "got": size, "pin": pin["size"]})
+                continue
+            h = hashlib.sha256()
+            with open(f, "rb") as fh:
+                for block in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(block)
+            got = h.hexdigest()
+            if got != pin["sha256"]:
+                fx_bad.append({"name": pin["name"], "why": "sha256", "got": got, "pin": pin["sha256"]})
+        if fx_bad:
+            ev("derisk_fail", stage="finish_weights_sha_mismatch", bad=fx_bad,
+               facexlib_dir=str(facexlib_dir),
+               hint="baked facexlib weight is missing or does not match its pinned sha256")
+            return 1
+        ev("finish_weights_ok", facexlib_dir=str(facexlib_dir),
+           verified=[pin["name"] for pin in fx_pins], source="manifest_sha256")
+    else:
+        facexlib_missing = [fn for fn in ("detection_Resnet50_Final.pth", "parsing_parsenet.pth")
+                            if not (facexlib_dir / fn).is_file()]
+        if facexlib_missing:
+            ev("derisk_fail", stage="finish_weights_not_cached", missing=facexlib_missing,
+               facexlib_dir=str(facexlib_dir),
+               hint="facexlib would fetch these from github at face-restore time (finish-leg egress)")
+            return 1
+        ev("finish_weights_present_unpinned", facexlib_dir=str(facexlib_dir),
+           note="no baked bake-manifest.json; presence-only check (pre-pin image)")
 
     import torch
     cuda_ok = torch.cuda.is_available()

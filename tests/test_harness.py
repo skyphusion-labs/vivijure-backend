@@ -13,7 +13,7 @@ import yaml
 from vivijure_backend.harness import keys
 from vivijure_backend.harness.handler import HarnessError, Outputs, run_job
 from vivijure_backend.contract import RenderRequest
-from vivijure_backend.harness.models_mirror import mirror_cmd, rclone_conf
+from vivijure_backend.harness.models_mirror import mirror_cmd, rclone_env
 from vivijure_backend.harness.r2 import R2Config
 
 
@@ -52,21 +52,27 @@ def test_key_slug_guards_slot():
 # --------------------------------------------------------------------- models mirror
 
 def test_mirror_cmd_copies_with_links_and_excludes():
-    cmd = mirror_cmd(Path("/c.conf"), "r2:vivijure/models/hf-cache", Path("/hf"),
+    cmd = mirror_cmd("r2:vivijure/models/hf-cache", Path("/hf"),
                      skip_repos=("models--X", "spaces--Y"))
-    assert cmd[:5] == ["rclone", "--config", "/c.conf", "copy", "--links"]
+    assert cmd[:4] == ["rclone", "copy", "--links", "--transfers"]
+    assert "--config" not in cmd                       # remote resolves from env, no on-disk conf
     assert "--exclude" in cmd and "**/*.incomplete" in cmd
     assert "hub/models--X/**" in cmd and "hub/spaces--Y/**" in cmd
     assert cmd[-2:] == ["r2:vivijure/models/hf-cache", "/hf"]  # src, dst last
 
 
-def test_rclone_conf_writes_creds_and_rejects_partial(tmp_path):
-    conf = rclone_conf({"R2_ACCESS_KEY_ID": "k", "R2_SECRET_ACCESS_KEY": "s",
-                        "R2_ENDPOINT": "https://x.r2"}, tmp_path)
-    text = conf.read_text()
-    assert "access_key_id = k" in text and "endpoint = https://x.r2" in text
+def test_rclone_env_carries_creds_in_env_only_and_rejects_partial():
+    # The R2 secret must be configured for rclone via RCLONE_CONFIG_* env vars (never an on-disk
+    # rclone.conf), so this returns a child env carrying the cred and writes nothing to disk.
+    child = rclone_env({"R2_ACCESS_KEY_ID": "k", "R2_SECRET_ACCESS_KEY": "s",
+                        "R2_ENDPOINT": "https://x.r2"})
+    assert child["RCLONE_CONFIG_R2_ACCESS_KEY_ID"] == "k"
+    assert child["RCLONE_CONFIG_R2_SECRET_ACCESS_KEY"] == "s"
+    assert child["RCLONE_CONFIG_R2_ENDPOINT"] == "https://x.r2"
+    assert child["RCLONE_CONFIG_R2_TYPE"] == "s3" and child["RCLONE_CONFIG_R2_PROVIDER"] == "Cloudflare"
+    assert child["RCLONE_CONFIG_R2_NO_CHECK_BUCKET"] == "true"
     with pytest.raises(RuntimeError, match="incomplete R2 creds"):
-        rclone_conf({"R2_ACCESS_KEY_ID": "k"}, tmp_path)
+        rclone_env({"R2_ACCESS_KEY_ID": "k"})
 
 
 def test_r2config_from_env_validates():

@@ -153,3 +153,121 @@ def test_derisk_driver_keeps_the_build_render_inputs_marker():
     integrity gate's discriminator stays valid."""
     root = Path(__file__).resolve().parents[1]
     assert "def build_render_inputs" in (root / "deploy" / "vj_derisk.py").read_text()
+
+
+# ----------------------------------------------------------- facexlib baked as a finish_dir (offline)
+
+def test_bake_manifest_declares_facexlib_finish_dir():
+    """The face-restore finish leg pulls facexlib detection+parsing weights; they must be baked like
+    the other finish_dirs (rife/GFPGANv1.4) so face restore is offline. Guards manifest drift."""
+    import json
+    root = Path(__file__).resolve().parents[1]
+    m = json.loads((root / "deploy" / "bake-manifest.json").read_text())
+    dirs = {fd["dir"] for fd in m["finish_dirs"]}
+    assert "facexlib" in dirs, "facexlib missing from bake-manifest finish_dirs"
+
+
+def test_mirror_pulls_facexlib_finish_dir():
+    """The R2 cold-mirror fallback must pull facexlib alongside rife/GFPGANv1.4, or a non-baked worker
+    would fetch facexlib from github at render time."""
+    root = Path(__file__).resolve().parents[1]
+    src = (root / "src" / "vivijure_backend" / "harness" / "models_mirror.py").read_text()
+    assert "facexlib" in src, "models_mirror does not mirror facexlib"
+
+
+# ----------------------------------------- facexlib sha256 PIN: single source of truth + both gates
+
+import hashlib as _hashlib
+import json as _json
+import re as _re
+
+import pytest
+
+
+def _load_deploy_mod(name):
+    path = Path(__file__).resolve().parents[1] / "deploy" / (name + ".py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _tiny_manifest(tmp_path, files):
+    """Write a throwaway bake-manifest.json pinning the given {name: bytes} under finish_dirs/facexlib,
+    materialize each file under <tmp_path>/facexlib, and return the manifest path."""
+    fx = tmp_path / "facexlib"
+    fx.mkdir(exist_ok=True)
+    pins = []
+    for name, payload in files.items():
+        (fx / name).write_bytes(payload)
+        pins.append({"name": name, "url": "https://example/" + name,
+                     "size": len(payload), "sha256": _hashlib.sha256(payload).hexdigest()})
+    mp = tmp_path / "bake-manifest.json"
+    mp.write_text(_json.dumps({"finish_dirs": [{"dir": "facexlib", "files": pins}]}))
+    return mp
+
+
+def test_facexlib_manifest_pins_are_complete_and_well_formed():
+    """The pins ARE the source of truth, so each must carry a real 64-hex sha256, a positive int size,
+    and the official facexlib release URL -- a band/magic gate is not enough for a public artifact."""
+    pins = _load_deploy_mod("facexlib_pins").load_facexlib_pins()
+    assert {p["name"] for p in pins} == {"detection_Resnet50_Final.pth", "parsing_parsenet.pth"}
+    for p in pins:
+        assert _re.fullmatch(r"[0-9a-f]{64}", p["sha256"]), p
+        assert isinstance(p["size"], int) and p["size"] > 0
+        assert p["url"].startswith("https://github.com/xinntao/facexlib/releases/")
+
+
+def test_assert_finish_shas_passes_on_matching_bytes(tmp_path):
+    bl = _load_deploy_mod("bake_layers")
+    mp = _tiny_manifest(tmp_path, {"detection_Resnet50_Final.pth": b"\x80det-bytes",
+                                   "parsing_parsenet.pth": b"\x80par-bytes"})
+    out = bl.assert_finish_shas(tmp_path, mp, log=lambda *a, **k: None)
+    assert sorted(out["verified"]) == ["detection_Resnet50_Final.pth", "parsing_parsenet.pth"]
+
+
+def test_assert_finish_shas_fails_closed_on_corrupt_byte(tmp_path):
+    bl = _load_deploy_mod("bake_layers")
+    mp = _tiny_manifest(tmp_path, {"detection_Resnet50_Final.pth": b"\x80good-bytes"})
+    (tmp_path / "facexlib" / "detection_Resnet50_Final.pth").write_bytes(b"\x80bAd!-bytes")  # same len, diff sha
+    with pytest.raises(SystemExit):
+        bl.assert_finish_shas(tmp_path, mp, log=lambda *a, **k: None)
+
+
+def test_assert_finish_shas_fails_on_size_mismatch(tmp_path):
+    bl = _load_deploy_mod("bake_layers")
+    mp = _tiny_manifest(tmp_path, {"parsing_parsenet.pth": b"\x80abcdef"})
+    (tmp_path / "facexlib" / "parsing_parsenet.pth").write_bytes(b"\x80abcdefEXTRA")  # wrong size
+    with pytest.raises(SystemExit):
+        bl.assert_finish_shas(tmp_path, mp, log=lambda *a, **k: None)
+
+
+def test_assert_finish_shas_fails_when_file_missing(tmp_path):
+    bl = _load_deploy_mod("bake_layers")
+    mp = _tiny_manifest(tmp_path, {"detection_Resnet50_Final.pth": b"\x80present"})
+    (tmp_path / "facexlib" / "detection_Resnet50_Final.pth").unlink()  # baked file absent
+    with pytest.raises(SystemExit):
+        bl.assert_finish_shas(tmp_path, mp, log=lambda *a, **k: None)
+
+
+def test_dockerfile_runs_the_finish_sha_gate_before_the_sentinel():
+    """assert-finish-shas must run in the same && chain that gates the .vj-baked write, so the sentinel
+    can never be stamped over a corrupted/substituted facexlib weight."""
+    df = (Path(__file__).resolve().parents[1] / "deploy" / "Dockerfile").read_text()
+    assert "assert-finish-shas" in df
+    assert df.index("assert-finish-shas") < df.index("/opt/models/.vj-baked")
+
+
+def test_stage_script_asserts_the_manifest_pin_not_a_literal():
+    """The staging upload must assert the manifest sha256 pin (single source of truth), not a hardcoded
+    literal or a size-band-only gate."""
+    src = (Path(__file__).resolve().parents[1] / "deploy" / "stage_facexlib_to_r2.py").read_text()
+    assert "load_facexlib_pins" in src and "verify_file" in src
+
+
+def test_vj_derisk_probe_asserts_facexlib_sha_from_baked_manifest():
+    """The de-risk runtime probe must upgrade from a presence check to an exact sha256 assert read from
+    the baked manifest, and fail-closed on a mismatch."""
+    src = (Path(__file__).resolve().parents[1] / "deploy" / "vj_derisk.py").read_text()
+    assert "bake-manifest.json" in src
+    assert "finish_weights_sha_mismatch" in src
