@@ -86,5 +86,12 @@ while True:
     push()
 PY
 
-# Run the committed inner, tee-ing its @event stream to the (already identity-stamped) polled log.
-echo "$DERISK_INNER_B64" | base64 -d | bash 2>&1 | tee -a "$LOG"
+# Run the committed inner from a FILE (NOT piped into bash's stdin) with stdin redirected from
+# /dev/null. Piping the script into `bash` makes the SCRIPT bash's stdin, so a render subprocess that
+# reads stdin (a finish-stage download / torch / hf) consumes the rest of the script off the pipe --
+# the stdin-eats-the-script classic. That ate the landscape render line after portrait completed, so
+# bash resumed mid-"$RUN" and parsed the fragment "UN" -> derisk_fail render_landscape, even though the
+# committed inner was byte-clean. Running from a file + </dev/null closes it: bash reads the script from
+# disk, and no child can consume it.
+echo "$DERISK_INNER_B64" | base64 -d > /workspace/inner.sh
+bash /workspace/inner.sh </dev/null 2>&1 | tee -a "$LOG"
