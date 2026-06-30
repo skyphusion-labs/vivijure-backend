@@ -476,3 +476,30 @@ def test_not_baked_without_creds_does_not_falsely_skip_as_baked(tmp_path):
     e = {"VJ_MODELS_ROOT": str(root), "HF_HOME": str(root / "hf-cache")}
     assert is_baked(e) is False
     assert ensure_models(env=e) is False  # no_creds skip, but NOT via the baked branch
+
+
+# ------------------------------------------------------- repo_in_hf_cache (offline presence gate)
+
+def test_repo_in_hf_cache_true_only_with_a_populated_snapshot(tmp_path):
+    env = {"HF_HOME": str(tmp_path / "hf-cache")}
+    repo = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+    cache = tmp_path / "hf-cache" / "hub" / "models--Wan-AI--Wan2.2-I2V-A14B-Diffusers"
+    assert models_mirror.repo_in_hf_cache(repo, env) is False          # absent entirely
+    (cache / "snapshots").mkdir(parents=True)
+    assert models_mirror.repo_in_hf_cache(repo, env) is False          # empty snapshots/
+    snap = cache / "snapshots" / "abc123"
+    snap.mkdir()
+    assert models_mirror.repo_in_hf_cache(repo, env) is False          # empty snapshot hash dir
+    (snap / "model_index.json").write_text("{}")
+    assert models_mirror.repo_in_hf_cache(repo, env) is True           # populated -> loadable
+
+
+def test_repo_in_hf_cache_unbaked_fp8_repo_is_false(tmp_path):
+    # The exact de-risk failure: bf16 repo present, -fp8 repo absent.
+    env = {"HF_HOME": str(tmp_path / "hf-cache")}
+    bf16 = (tmp_path / "hf-cache" / "hub" / "models--Wan-AI--Wan2.2-I2V-A14B-Diffusers"
+            / "snapshots" / "h")
+    bf16.mkdir(parents=True)
+    (bf16 / "model_index.json").write_text("{}")
+    assert models_mirror.repo_in_hf_cache("Wan-AI/Wan2.2-I2V-A14B-Diffusers", env) is True
+    assert models_mirror.repo_in_hf_cache("Wan-AI/Wan2.2-I2V-A14B-Diffusers-fp8", env) is False
