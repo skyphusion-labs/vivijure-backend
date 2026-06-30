@@ -163,8 +163,8 @@ def test_evaluate_fails_on_slow_first_frame():
 # ----------------------------------------------------------------- cost + gpu selection
 
 def test_cost_estimate_conservative_and_positive():
-    # 30 min on H200 at 3.99/hr ~= 1.995
-    assert rv.cost_estimate_usd("NVIDIA H200", 1800) == pytest.approx(1.995, abs=1e-3)
+    # 30 min on H200 at the conservative-high secure rate 4.39/hr ~= 2.195
+    assert rv.cost_estimate_usd("NVIDIA H200", 1800) == pytest.approx(2.195, abs=1e-3)
     assert rv.cost_estimate_usd("unknown-card", 3600) == pytest.approx(4.0, abs=1e-6)  # default high
 
 
