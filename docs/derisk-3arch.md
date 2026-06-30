@@ -82,3 +82,63 @@ leaves a pod billing silently.
 - a render FAILS on any arch -- flag, no promote; leave that pod stopped-not-deleted for debug.
 - prod **promote** of the serverless endpoint (separate task) needs Conrad's explicit word -- it touches
   prod / downtime. Everything up to the promote is GO on the authorized spend.
+
+## Canonical start command + read path (committed)
+
+The pod start command is committed at **`deploy/derisk_pod_start.sh`** -- deploy it byte-faithfully by
+base64-ing that file into `runpodctl --args` (see its header). It self-runs the de-risk and provides its
+own observability, because:
+
+- RunPod pod container stdout is **not** API/CLI-readable (console websocket only; `runpodctl` has no
+  `logs`, the MCP `get-pod` returns status only), and
+- this image ships **no** openssh-server.
+
+So the wrapper **self-tees** all output to `/workspace/derisk.log` and, from a **mandatory** `PUBLIC_KEY`
+pod-env, apt-installs + starts `sshd` BEFORE the de-risk so the operator can `ssh` in and `tail -f
+/workspace/derisk.log` live. No `PUBLIC_KEY` = blind pod (do not fire).
+
+The driver `deploy/vj_derisk.py` is curled at the pinned commit
+`481f8277eeafa0b045e97075bf5b2191e933b263` (#144) -- the pod runs exactly the reviewed code.
+
+### Open mechanism follow-ups (#146)
+
+The RunPod MCP cannot deploy a custom-start-command pod: `create-pod` exposes no `dockerStartCmd`/
+`templateId`; `create-template` silently drops `dockerStartCmd` (`args` stays empty); there is no MCP
+template-to-pod deploy; and no pod-log API. Hence the runpodctl/console + ssh-tee path. #9 (the
+automated regression engine) needs an MCP enhancement or a runpodctl/GraphQL shim in
+`runpod_verify.py`'s PodClient seam, and a baked sshd/debug-entrypoint in the image.
+
+## backend-v0.3.1 artifact evidence (registry-proven, #14)
+
+The first REAL weighted bf16 image. Run 28411899140 completed/success; `:0.3.1` + `:latest` live in the
+PUBLIC GHCR package. Verified against the artifact, not records:
+
+- **assert-weights (gates the `.vj-baked` write via `&&`):** `assert-weights OK -- 104.7 GB across 155
+  files, largest 4.78 GB, 40 shard(s) >= 1.0 GB (floor 60.0 GB)`. 40 multi-GB shards, ~75% over the
+  60 GB bf16 floor -- a hollow image physically cannot reach this census (the #4/:0.3.0 trap was that
+  size != baked; the shard census is the real proof).
+- **Sentinel stamp:** `.vj-baked (baked_utc=2026-06-30T00:42:06Z precision=bf16 model_version=1)`.
+- **Bin-pack:** 104.7 GB into 24 bins, largest bin 9.00 GB (< 9.0 ceiling). **verify-image:** all layers
+  < 10 GB GHCR ceiling. **import smoke:** All 6 finish-stage imports OK.
+- **GHCR OCI manifest (registry, no pull):** 51 layers, 96.72 GiB compressed; 15 layers >= 1 GB (weight
+  layers), largest 7.64 GiB. NOT the 12.72 GB config-only stub that prod `:0.2.28` is.
+
+Still pending to fully close #14: the `get_arch_list()` {sm_90, sm_100, sm_120} STOP-gate, which runs as
+the first command (`arch-gate`) on the canary.
+
+## RESUME (post-checkpoint, step one)
+
+Held at the clean pre-fire boundary (no GPU pods running; nothing to revert; prod `:0.2.28` untouched).
+To resume the #15 3-arch de-risk:
+
+1. Rollins pings Strummer to FIRE the **RTX PRO 6000 Blackwell Server Edition (sm_120) canary** from
+   `deploy/derisk_pod_start.sh` (base64 via runpodctl), image `:0.3.1`, NO volume, `PUBLIC_KEY` set,
+   #136 caps (~$50 / 60-min manual terminate). Strummer sends the pod ID to the lead.
+2. Watch for `@event arch_gate {... "missing": [], "passed": true}` -- report the raw `arch_list`
+   verbatim (closes #14). A missing base arch = hard STOP, do-not-promote, flag.
+3. On `@event derisk_pass` (canary green), fan out **H200 (sm_90)** + **B200 (sm_100)** in parallel.
+4. Per pod assert: `gpu_probe` kernel_ok + capability_in_arch_list; `baked_probe` vj_baked +
+   precision=bf16 + a Wan i2v repo (image, not a mount); `rclone_tripwire fired=false` (no-pull);
+   `render_done film_bytes>0`; `i2v_jit` first-call JIT captured per arch.
+5. PRs awaiting the lead's merge: #145 (H200 conservative-high cost) and #147 (this wrapper + runbook).
+   #5 serverless prod promote remains gated on Conrad.
