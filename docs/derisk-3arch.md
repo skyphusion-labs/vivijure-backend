@@ -213,8 +213,17 @@ export DERISK_INNER_B64="$(base64 -w0 deploy/derisk_pod_start.sh)"   # de-risk i
 export DERISK_DRIVER_B64="$(gzip -c deploy/vj_derisk.py | base64 -w0)"  # injected driver (gzip+b64, ~8.6KB, sha256-gated)
 WRAP_B64="$(base64 -w0 deploy/derisk_read_wrapper.sh)"               # boto3->R2 read-path outer
 
-# --env is a JSON OBJECT (the fix): build it without echoing the secret.
-ENVJSON="$(python3 -c 'import os,json;print(json.dumps({k:os.environ[k] for k in ["DERISK_LABEL","DERISK_FIRE_TS","DERISK_INNER_B64","DERISK_DRIVER_B64","R2_S3_ENDPOINT","R2_S3_ACCESS_KEY_ID","R2_S3_SECRET_ACCESS_KEY","R2_S3_BUCKET"]}))')"
+# EGRESS-BLOCKED run ONLY (the #17 fan-out): also `export DERISK_EGRESS_LOCK=1` so it rides in --env
+# (pod-level). The inner $RUN render children inherit it and vj_derisk.py installs the userspace egress
+# guard (PR #161). A baseline (non-egress) run leaves it UNSET -> the key is omitted -> zero behavior change.
+# R2_S3_ENDPOINT stays pod-level either way (the boto3 uploader needs it; it is also the guard positive control).
+
+# --env is a JSON OBJECT (the fix): build it without echoing the secret. DERISK_EGRESS_LOCK is appended
+# ONLY when set, so an unset baseline run produces the exact same object as before.
+ENVJSON="$(python3 -c 'import os,json
+keys=["DERISK_LABEL","DERISK_FIRE_TS","DERISK_INNER_B64","DERISK_DRIVER_B64","R2_S3_ENDPOINT","R2_S3_ACCESS_KEY_ID","R2_S3_SECRET_ACCESS_KEY","R2_S3_BUCKET"]
+if os.environ.get("DERISK_EGRESS_LOCK"): keys.append("DERISK_EGRESS_LOCK")
+print(json.dumps({k:os.environ[k] for k in keys}))')"
 TERM_AFTER="$(date -u -d '+60 minutes' +%Y-%m-%dT%H:%M:%SZ)"         # native hard TTL
 DC=US-KS-2   # probe DCs until one places; see the placement note above
 

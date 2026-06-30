@@ -28,6 +28,8 @@
 #   DERISK_LABEL      per-card label -> object key derisk/<label>/derisk.log (sm120 / sm90 / sm100)
 #   DERISK_FIRE_TS    operator fire timestamp (UTC, ISO8601 Z); stamped into derisk_meta for identity
 #                     (optional -- defaults to "unset"; the pod_id stamp alone still disambiguates)
+#   DERISK_EGRESS_LOCK  "1" for an egress-blocked (#17) run -> stamped into derisk_meta as egress_lock
+#                     so the watcher can assert the lock was active; absent/"0" on a baseline run (optional)
 #   R2_S3_*           the four exfil-key vars above
 #   RUNPOD_POD_ID     auto-injected by RunPod; stamped into derisk_meta as the run identity
 #
@@ -42,13 +44,14 @@ mkdir -p /workspace/out
 LOG=/workspace/out/derisk.log
 POD_ID="${RUNPOD_POD_ID:-unknown}"
 FIRE_TS="${DERISK_FIRE_TS:-unset}"
+LOCK="${DERISK_EGRESS_LOCK:-0}"   # "1" when the egress guard (PR #161) was requested; stamped for the watcher
 BOOT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # Seed the persistent log with the identity stamp + the read-path self-proof. Both are written INTO the
 # log file (not PUT as a one-shot object body), so they survive every ~15s re-PUT instead of being
 # clobbered. A reader matches pod_id + fire_ts against the fire they recorded.
 {
-  printf '@event derisk_meta {"pod_id": "%s", "fire_ts": "%s", "boot_utc": "%s", "label": "%s"}\n' "$POD_ID" "$FIRE_TS" "$BOOT_UTC" "$DERISK_LABEL"
+  printf '@event derisk_meta {"pod_id": "%s", "fire_ts": "%s", "boot_utc": "%s", "label": "%s", "egress_lock": "%s"}\n' "$POD_ID" "$FIRE_TS" "$BOOT_UTC" "$DERISK_LABEL" "$LOCK"
   printf '@event derisk_boot {"label": "%s", "pod_id": "%s", "boot_utc": "%s"}\n' "$DERISK_LABEL" "$POD_ID" "$BOOT_UTC"
 } > "$LOG"
 
