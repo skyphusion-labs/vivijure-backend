@@ -35,6 +35,7 @@ import base64
 import hashlib
 import json
 import os
+import socket
 import statistics
 import subprocess
 import sys
@@ -95,6 +96,117 @@ def _check_tripwire(where: str) -> None:
         ev("rclone_tripwire", where=where, armed=False)
         return
     ev("rclone_tripwire", where=where, armed=True, path=trip, fired=Path(trip).exists())
+
+
+# --------------------------------------------------------------------- egress guard (#17 / #159)
+# Layer-2 of the offline-correctness proof, FULL-BLOCK design (B). iptables/nft OUTPUT-DROP is NOT
+# available on RunPod (no CAP_NET_ADMIN: `runpodctl pod create` exposes no --cap-add/--privileged and
+# containers drop the cap), so the block is a USERSPACE socket guard installed in THIS render process,
+# behind the DERISK_EGRESS_LOCK flag. The render process is baked + cred-free and needs ZERO network
+# (R2 included -- the @event telemetry rides a SEPARATE uploader process, untouched by this in-process
+# guard), so the guard allows ONLY AF_UNIX + loopback and DROPs every other connect. A render_done under
+# the total block, with huggingface.co + github.com reaches BLOCKED (negative controls) and loopback
+# still working (positive sanity), is positive proof the GPU render does no phone-home.
+#
+# getaddrinfo is left UNWRAPPED so name resolution still works (no import-time crash); only the CONNECT
+# is blocked, so a phone-home attempt fails loudly at connect and surfaces -- never silently allowed. A
+# lazy R2 pull or any other egress under the lock is DESIRED to fail (proves the baked image needs zero
+# network) and shows up as a loud derisk_fail, never a silent skip.
+#
+# Honest limit: this catches the PYTHON egress surface (hf_hub, torch.hub, requests/urllib3, boto3) --
+# every phone-home vector in this stack. A native lib opening its own raw socket would bypass it (none
+# here); the kernel-airtight zero-network proof is Layer 1 (docker --network=none, the CPU legs). We do
+# NOT claim kernel-airtight for the GPU leg.
+
+_LOOPBACK = ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1")
+
+
+def _flag_on(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _egress_allowed(family, address):
+    """Pure connect-allow decision -> (allowed, reason). FULL block: only AF_UNIX + loopback pass; every
+    other connect (R2, HF, github, pypi, torch.hub, DNS-over-TCP, ...) is DROPPED."""
+    if family == socket.AF_UNIX:
+        return True, "af_unix"
+    if not isinstance(address, tuple) or not address:
+        return True, "non_inet"
+    if address[0] in _LOOPBACK:
+        return True, "loopback"
+    return False, "blocked"
+
+
+_EGRESS = {"on": False}
+
+
+def _install_egress_guard() -> None:
+    """Install the userspace full-block egress guard on socket.connect/connect_ex (idempotent).
+    getaddrinfo is left intact so resolution works; only the connect is gated. Emits
+    @event egress_guard_installed."""
+    if _EGRESS["on"]:
+        return
+    _orig_connect = socket.socket.connect
+    _orig_connect_ex = socket.socket.connect_ex
+
+    def _mk(orig):
+        def wrapper(self, address, *a, **k):
+            ok, _why = _egress_allowed(getattr(self, "family", None), address)
+            if not ok:
+                raise OSError("egress_guard: blocked connect to %r (allow: AF_UNIX + loopback ONLY)"
+                              % (address,))
+            return orig(self, address, *a, **k)
+        return wrapper
+
+    socket.socket.connect = _mk(_orig_connect)
+    socket.socket.connect_ex = _mk(_orig_connect_ex)
+    _EGRESS["on"] = True
+    ev("egress_guard_installed", layer="socket_userspace", mode="full_block",
+       allow=["af_unix", "loopback"])
+
+
+def _egress_controls() -> bool:
+    """Controls that PROVE the guard is live. NEGATIVE: huggingface.co:443 AND github.com:443 MUST both
+    fail (HF is the real model phone-home host). POSITIVE: a loopback connect MUST still succeed (the
+    guard did not nuke sockets wholesale). Emits @events; returns True iff all hold."""
+    all_ok = True
+    blocked = {}
+    for host in ("huggingface.co", "github.com"):
+        try:
+            c = socket.create_connection((host, 443), timeout=8)
+            c.close()
+            blocked[host] = False
+            all_ok = False
+        except OSError:
+            blocked[host] = True
+    hf_b = blocked.get("huggingface.co", False)
+    gh_b = blocked.get("github.com", False)
+    ev("egress_guard_proven", control="negative", hf_blocked=hf_b, github_blocked=gh_b,
+       ok=(hf_b and gh_b))
+    try:
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        cli = socket.create_connection(srv.getsockname(), timeout=5)
+        cli.close()
+        srv.close()
+        ev("egress_guard_sane", control="positive", loopback_ok=True, ok=True)
+    except OSError as exc:
+        ev("egress_guard_sane", control="positive", loopback_ok=False, ok=False, detail=str(exc)[:140])
+        all_ok = False
+    return all_ok
+
+
+def _maybe_lock_egress() -> int:
+    """If DERISK_EGRESS_LOCK is on, install the full-block guard + run the controls. Returns 0 to
+    proceed, 1 to fail the render (@event derisk_fail stage=egress_guard_inactive) on any control miss."""
+    if not _flag_on("DERISK_EGRESS_LOCK"):
+        return 0
+    _install_egress_guard()
+    if not _egress_controls():
+        ev("derisk_fail", stage="egress_guard_inactive")
+        return 1
+    return 0
 
 
 # --------------------------------------------------------------------------- probe
@@ -388,6 +500,10 @@ def build_render_inputs(aspect: str, tier: str, out_dir: Path, frames: int, i2v_
 
 
 def render(aspect: str, tier: str, out_dir: Path, frames: int, i2v_steps: int, kf_steps: int) -> int:
+    # Layer-2 egress lock (gated on DERISK_EGRESS_LOCK): block all phone-home except DNS + R2 before any
+    # model import/load, with negative (github) + positive (R2 TCP) controls proving the guard is live.
+    if _maybe_lock_egress() != 0:
+        return 1
     from vivijure_backend.orchestrator import plan as make_plan
     from vivijure_backend.pipeline import GpuPipeline
     from vivijure_backend.assemble import ClipInput, assemble, order_for_storyboard
