@@ -24,6 +24,7 @@ detector + parsenet parser) and what the bake/probe assert, so baked == staged =
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import tempfile
@@ -53,7 +54,11 @@ def _verify(path: Path, pin: dict) -> str:
     return pin["sha256"]
 
 
-def _rclone_conf(env_file: Path, conf_dir: Path) -> Path:
+def _rclone_env(env_file: Path) -> dict:
+    """Read the R2_S3_* staging creds and return a child env that configures rclone's `r2fx:` remote
+    ENTIRELY via RCLONE_CONFIG_* env vars, so the scoped secret is passed to the rclone subprocess in
+    its environment and NEVER written to a config file on disk (py/clear-text-storage-sensitive-data;
+    the same pattern as harness/models_mirror.rclone_env)."""
     env = {}
     for line in env_file.read_text().splitlines():
         line = line.strip()
@@ -63,16 +68,17 @@ def _rclone_conf(env_file: Path, conf_dir: Path) -> Path:
     miss = [k for k in ("R2_S3_ENDPOINT", "R2_S3_ACCESS_KEY_ID", "R2_S3_SECRET_ACCESS_KEY") if not env.get(k)]
     if miss:
         sys.exit("env file missing: " + ", ".join(miss))
-    conf = conf_dir / "rclone.conf"
-    conf.write_text(
-        "[r2fx]\ntype = s3\nprovider = Cloudflare\n"
-        "access_key_id = " + env["R2_S3_ACCESS_KEY_ID"] + "\n"
-        "secret_access_key = " + env["R2_S3_SECRET_ACCESS_KEY"] + "\n"
-        "endpoint = " + env["R2_S3_ENDPOINT"] + "\n"
-        "acl = private\nno_check_bucket = true\n"
-    )
-    conf.chmod(0o600)
-    return conf
+    child = dict(os.environ)
+    child.update({
+        "RCLONE_CONFIG_R2FX_TYPE": "s3",
+        "RCLONE_CONFIG_R2FX_PROVIDER": "Cloudflare",
+        "RCLONE_CONFIG_R2FX_ACCESS_KEY_ID": env["R2_S3_ACCESS_KEY_ID"],
+        "RCLONE_CONFIG_R2FX_SECRET_ACCESS_KEY": env["R2_S3_SECRET_ACCESS_KEY"],
+        "RCLONE_CONFIG_R2FX_ENDPOINT": env["R2_S3_ENDPOINT"],
+        "RCLONE_CONFIG_R2FX_ACL": "private",
+        "RCLONE_CONFIG_R2FX_NO_CHECK_BUCKET": "true",
+    })
+    return child
 
 
 def main() -> int:
@@ -82,9 +88,9 @@ def main() -> int:
     args = ap.parse_args()
 
     pins = load_facexlib_pins()   # from deploy/bake-manifest.json
+    renv = _rclone_env(Path(args.env).expanduser())   # r2fx: remote via env; secret never on disk
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
-        conf = _rclone_conf(Path(args.env).expanduser(), tdp)
         shas = {}
         for pin in pins:
             local = tdp / pin["name"]
@@ -95,9 +101,9 @@ def main() -> int:
             urllib.request.urlretrieve(pin["url"], local)   # noqa: S310 (pinned github release URL)
             shas[pin["name"]] = _verify(local, pin)
             subprocess.run(
-                ["rclone", "--config", str(conf), "copyto", str(local),
+                ["rclone", "copyto", str(local),
                  DST + "/" + pin["name"], "--s3-no-check-bucket", "--stats-one-line"],
-                check=True)
+                check=True, env=renv)
             print("  staged -> " + DST + "/" + pin["name"])
         if not args.dry_run:
             print("\n=== staged sha256 (all matched the manifest pin) ===")

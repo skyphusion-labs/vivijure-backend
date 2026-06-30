@@ -18,7 +18,6 @@ import os
 import random
 import shutil
 import subprocess
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -102,28 +101,36 @@ def repo_in_hf_cache(repo_id: str, env: dict | None = None) -> bool:
 _DEFAULT_MODEL_VERSION = "1"
 
 
-def rclone_conf(env: dict, conf_dir: Path) -> Path:
-    """Write an rclone.conf for the R2 store from the worker's R2_* env. Raises if creds are
-    incomplete so the worker fails here, loudly, not later at the model-presence gate."""
+def rclone_env(env: dict) -> dict:
+    """Build the child-process environment that configures rclone's `r2:` remote ENTIRELY via
+    RCLONE_CONFIG_* env vars, so the R2 secret is passed to the rclone subprocess in its environment
+    and NEVER written to a config file on disk (py/clear-text-storage-sensitive-data). Raises if creds
+    are incomplete so the worker fails here, loudly, not later at the model-presence gate.
+
+    Returns a COPY of the current process env with the RCLONE_CONFIG_R2_* keys overlaid, suitable to
+    pass as subprocess(..., env=...). PATH etc. are preserved (so rclone resolves) and the secret lives
+    only in process/child memory. The remote name is "r2", matching the r2: prefix every leg uses."""
     missing = [k for k in ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_ENDPOINT") if not env.get(k)]
     if missing:
         raise RuntimeError("models_mirror: incomplete R2 creds; missing: " + ", ".join(missing))
-    conf_dir.mkdir(parents=True, exist_ok=True)
-    conf = conf_dir / "rclone.conf"
-    conf.write_text(
-        "[r2]\ntype = s3\nprovider = Cloudflare\n"
-        f"access_key_id = {env['R2_ACCESS_KEY_ID']}\n"
-        f"secret_access_key = {env['R2_SECRET_ACCESS_KEY']}\n"
-        f"endpoint = {env['R2_ENDPOINT']}\n"
-        "acl = private\nno_check_bucket = true\n"
-    )
-    conf.chmod(0o600)
-    return conf
+    child = dict(os.environ)
+    child.update({
+        "RCLONE_CONFIG_R2_TYPE": "s3",
+        "RCLONE_CONFIG_R2_PROVIDER": "Cloudflare",
+        "RCLONE_CONFIG_R2_ACCESS_KEY_ID": env["R2_ACCESS_KEY_ID"],
+        "RCLONE_CONFIG_R2_SECRET_ACCESS_KEY": env["R2_SECRET_ACCESS_KEY"],
+        "RCLONE_CONFIG_R2_ENDPOINT": env["R2_ENDPOINT"],
+        "RCLONE_CONFIG_R2_ACL": "private",
+        "RCLONE_CONFIG_R2_NO_CHECK_BUCKET": "true",
+    })
+    return child
 
 
-def mirror_cmd(conf: Path, src: str, dst: Path, *, skip_repos: tuple[str, ...] = ()) -> list[str]:
-    """argv for one `rclone copy --links` mirror leg. Pure: built and asserted without rclone."""
-    cmd = ["rclone", "--config", str(conf), "copy", "--links",
+def mirror_cmd(src: str, dst: Path, *, skip_repos: tuple[str, ...] = ()) -> list[str]:
+    """argv for one `rclone copy --links` mirror leg. The r2: remote resolves from the RCLONE_CONFIG_*
+    child env (see rclone_env); there is no rclone config file, so the R2 secret never touches disk.
+    Pure: built and asserted without rclone."""
+    cmd = ["rclone", "copy", "--links",
            "--transfers", "16", "--checkers", "16",
            "--multi-thread-streams", "8", "--multi-thread-cutoff", "100M",
            "--stats", "60s", "--stats-one-line", "-v",
@@ -394,7 +401,7 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     if shutil.which("rclone") is None:
         raise RuntimeError("models_mirror: rclone is not installed in the image")
 
-    conf = rclone_conf(e, Path(tempfile.gettempdir()) / "vj-rclone")
+    renv = rclone_env(e)
     hf_home.mkdir(parents=True, exist_ok=True)
     log(f"models_mirror: cold worker -> mirroring r2:{bucket}/models to {hf_home} "
         f"(skipping {len(skip_repos)} lazy repos)...")
@@ -405,13 +412,13 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     legs: list[tuple[str, float]] = []
     legs.append(("hf-cache", _timed(
         subprocess.run,
-        mirror_cmd(conf, f"r2:{bucket}/models/hf-cache", hf_home, skip_repos=skip_repos),
-        check=True)))
+        mirror_cmd(f"r2:{bucket}/models/hf-cache", hf_home, skip_repos=skip_repos),
+        check=True, env=renv)))
 
     antelope = models_root / "antelopev2"
     antelope.mkdir(parents=True, exist_ok=True)
     legs.append(("antelopev2", _timed(
-        subprocess.run, mirror_cmd(conf, f"r2:{bucket}/models/antelopev2", antelope), check=True)))
+        subprocess.run, mirror_cmd(f"r2:{bucket}/models/antelopev2", antelope), check=True, env=renv)))
 
     # Finishing-stage weights: stored at fixed paths under models_root (NOT in the HF cache).
     # ModelServer.frame_interpolator loads $VJ_MODELS_ROOT/rife/flownet.pkl and
@@ -421,7 +428,7 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
         dst = models_root / subdir
         dst.mkdir(parents=True, exist_ok=True)
         legs.append((subdir, _timed(
-            subprocess.run, mirror_cmd(conf, f"r2:{bucket}/models/{subdir}", dst), check=True)))
+            subprocess.run, mirror_cmd(f"r2:{bucket}/models/{subdir}", dst), check=True, env=renv)))
 
     # rclone --links stores HF-cache symlinks as `<name>.rclonelink` text files (the link target),
     # and rclone >= 1.7x does NOT translate them back to real symlinks on download -- it leaves the
@@ -497,7 +504,7 @@ def ensure_i2v_models(*, env: dict | None = None, log: Callable[[str], None] = p
     if shutil.which("rclone") is None:
         raise RuntimeError("models_mirror: rclone is not installed in the image")
 
-    conf = rclone_conf(e, Path(tempfile.gettempdir()) / "vj-rclone")
+    renv = rclone_env(e)
     hub = hf_home / "hub"
     hub.mkdir(parents=True, exist_ok=True)
     legs: list[tuple[str, float]] = []
@@ -505,7 +512,7 @@ def ensure_i2v_models(*, env: dict | None = None, log: Callable[[str], None] = p
         log(f"models_mirror: lazy i2v pull -> mirroring {repo} from R2...")
         legs.append((repo, _timed(
             subprocess.run,
-            mirror_cmd(conf, f"r2:{bucket}/models/hf-cache/hub/{repo}", hub / repo), check=True)))
+            mirror_cmd(f"r2:{bucket}/models/hf-cache/hub/{repo}", hub / repo), check=True, env=renv)))
     _reconstruct_symlinks(hf_home, log)
     sentinel.write_text(model_version + "\n")
     # Best-effort telemetry (see ensure_models): never fail a good lazy pull on a _dir_bytes walk.
