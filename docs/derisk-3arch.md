@@ -101,8 +101,12 @@ has no model-pull creds at all. The boto3 client must match `src/vivijure_backen
 `signature_version="s3v4"`, `region_name="auto"`, no path-style. (An sshd read path was prototyped and
 dropped: this image has no openssh-server and pod ssh was uncertain; boto3->R2 is guaranteed.)
 
-The driver `deploy/vj_derisk.py` is curled at the pinned commit
-`481f8277eeafa0b045e97075bf5b2191e933b263` (#144) -- the pod runs exactly the reviewed code.
+The driver `deploy/vj_derisk.py` is INJECTED, not fetched: the deploy gzip+base64s the committed driver
+into `DERISK_DRIVER_B64`, the inner materializes it and sha256-gates it (`@event driver_integrity` on pass,
+`@event driver_corrupt` -> $0 pre-GPU stop on mismatch) before any GPU work. The inner used to curl the
+driver by pinned SHA, but raw.githubusercontent served STALE bytes in the post-#151/#152-merge propagation
+window (2026-06-30) and the pod ran the old driver; injection removes the network/CDN dependency so the pod
+runs EXACTLY the reviewed code.
 
 ### Open mechanism follow-ups (#146)
 
@@ -201,15 +205,16 @@ done
 
 export DERISK_LABEL=sm120
 export DERISK_INNER_B64="$(base64 -w0 deploy/derisk_pod_start.sh)"   # de-risk inner
+export DERISK_DRIVER_B64="$(gzip -c deploy/vj_derisk.py | base64 -w0)"  # injected driver (gzip+b64, ~8.6KB, sha256-gated)
 WRAP_B64="$(base64 -w0 deploy/derisk_read_wrapper.sh)"               # boto3->R2 read-path outer
 
 # --env is a JSON OBJECT (the fix): build it without echoing the secret.
-ENVJSON="$(python3 -c 'import os,json;print(json.dumps({k:os.environ[k] for k in ["DERISK_LABEL","DERISK_INNER_B64","R2_S3_ENDPOINT","R2_S3_ACCESS_KEY_ID","R2_S3_SECRET_ACCESS_KEY","R2_S3_BUCKET"]}))')"
+ENVJSON="$(python3 -c 'import os,json;print(json.dumps({k:os.environ[k] for k in ["DERISK_LABEL","DERISK_INNER_B64","DERISK_DRIVER_B64","R2_S3_ENDPOINT","R2_S3_ACCESS_KEY_ID","R2_S3_SECRET_ACCESS_KEY","R2_S3_BUCKET"]}))')"
 TERM_AFTER="$(date -u -d '+60 minutes' +%Y-%m-%dT%H:%M:%SZ)"         # native hard TTL
 DC=US-KS-2   # probe DCs until one places; see the placement note above
 
 runpodctl pod create \
-  --name vj-derisk-sm120-rtxpro6000 \
+  --name "vj-derisk-sm120-rtxpro6000-$(date -u +%H%M%S)" \   # unique per fire (no --name reuse)
   --image ghcr.io/skyphusion-labs/vivijure-backend:0.3.1 \
   --gpu-id "NVIDIA RTX PRO 6000 Blackwell Server Edition" \
   --gpu-count 1 --cloud-type SECURE \
