@@ -95,7 +95,11 @@ own observability, because:
 So the deploy wraps the committed inner in a **boto3 -> R2** observability scaffold: it tees output to
 `/workspace/out/derisk.log` and uploads it to `r2:vivijure/derisk/<label>/derisk.log` every ~15s; the
 operator polls R2 to read the @event stream. boto3 ONLY (never rclone, so the tripwire stays clean), and
-a `derisk_boot` marker self-proves the read path within ~15s of boot, BEFORE any GPU render spend.
+a `derisk_boot` marker self-proves the read path within ~15s of boot, BEFORE any GPU render spend. The
+log is seeded with `@event derisk_meta {pod_id, fire_ts, boot_utc, label}` as its first line so every
+uploaded object carries the run identity (a reader matches `pod_id`/`fire_ts` against the fire), and the
+uploader clears any stale object for the key at boot -- together these make a stale-log read structurally
+impossible to mistake for a live one.
 Inject ONLY `R2_S3_*` creds (the exfil key), never the backend's `R2_*` names -- then the baked backend
 has no model-pull creds at all. The boto3 client must match `src/vivijure_backend/harness/r2.py`:
 `signature_version="s3v4"`, `region_name="auto"`, no path-style. (An sshd read path was prototyped and
@@ -204,12 +208,13 @@ for v in R2_S3_ENDPOINT R2_S3_ACCESS_KEY_ID R2_S3_SECRET_ACCESS_KEY R2_S3_BUCKET
 done
 
 export DERISK_LABEL=sm120
+export DERISK_FIRE_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"               # stamped into derisk_meta (run identity)
 export DERISK_INNER_B64="$(base64 -w0 deploy/derisk_pod_start.sh)"   # de-risk inner
 export DERISK_DRIVER_B64="$(gzip -c deploy/vj_derisk.py | base64 -w0)"  # injected driver (gzip+b64, ~8.6KB, sha256-gated)
 WRAP_B64="$(base64 -w0 deploy/derisk_read_wrapper.sh)"               # boto3->R2 read-path outer
 
 # --env is a JSON OBJECT (the fix): build it without echoing the secret.
-ENVJSON="$(python3 -c 'import os,json;print(json.dumps({k:os.environ[k] for k in ["DERISK_LABEL","DERISK_INNER_B64","DERISK_DRIVER_B64","R2_S3_ENDPOINT","R2_S3_ACCESS_KEY_ID","R2_S3_SECRET_ACCESS_KEY","R2_S3_BUCKET"]}))')"
+ENVJSON="$(python3 -c 'import os,json;print(json.dumps({k:os.environ[k] for k in ["DERISK_LABEL","DERISK_FIRE_TS","DERISK_INNER_B64","DERISK_DRIVER_B64","R2_S3_ENDPOINT","R2_S3_ACCESS_KEY_ID","R2_S3_SECRET_ACCESS_KEY","R2_S3_BUCKET"]}))')"
 TERM_AFTER="$(date -u -d '+60 minutes' +%Y-%m-%dT%H:%M:%SZ)"         # native hard TTL
 DC=US-KS-2   # probe DCs until one places; see the placement note above
 
@@ -250,7 +255,9 @@ while sleep 12; do
 done
 ```
 
-Watch, in order: `@event derisk_boot` (read path proven); `@event arch_gate ... "passed": true` (record
+FIRST confirm `@event derisk_meta` carries YOUR `pod_id` (the id `pod create` returned) and `fire_ts`; a
+mismatch == a stale/foreign object, do NOT read it as your run. Then watch, in order: `@event
+derisk_boot` (read path proven); `@event arch_gate ... "passed": true` (record
 the raw `arch_list` VERBATIM -- closes #14); `@event gpu_probe`/`baked_probe`/`rclone_tripwire
 fired=false`; `@event render_done film_bytes>0`; `@event i2v_jit ... first_call_jit_seconds` (per-arch
 JIT cost); terminal `@event derisk_pass` (green) or `@event derisk_fail stage=<...>`.
@@ -260,9 +267,13 @@ JIT cost); terminal `@event derisk_pass` (green) or `@event derisk_fail stage=<.
 `runpodctl pod create --terminate-after <ISO8601 Z>` IS a native hard TTL -- set it to fire+60min so the
 pod self-terminates regardless of outcome. The lead's independent ~75-min RunPod-MCP sweep stays as the
 second layer (send the **pod ID + fire timestamp** the instant the pod is up).
-- On a terminal `@event` (pass or fail) OR at the TTL, whichever first -- `runpodctl remove pod <podId>`
-  on PASS; `runpodctl pod stop <podId>` on FAIL (keep the disk for a debug re-spin, emit the resume
-  handle). NEVER leave a pod billing past the watch.
+- On a terminal `@event` (pass or fail) OR at the TTL, whichever first -- tear down with `runpodctl
+  remove pod <podId>` and output SUPPRESSED/parsed. NEVER `runpodctl pod stop`/`get` (nor MCP
+  get-pod/list-pods) on a secret-bearing pod: they print the FULL pod object, INCLUDING the env block
+  (the R2 secret), to stdout -- that is how a throwaway exfil token reached an operator transcript. If a
+  FAIL needs disk forensics, prefer `remove` + reproduce from the PUBLIC image (`docker run ... :<ver>`)
+  over a `stop` that leaks env; the baked artifact lives in the image, not pod-specific state. NEVER
+  leave a pod billing past the watch.
 - Teardown also REVOKES the throwaway R2 exfil token (bucket-level R+W on `vivijure` -- revoke promptly).
 
 ## RESUME (post-checkpoint, step one)
@@ -282,5 +293,6 @@ To resume the #15 3-arch de-risk:
 4. Per pod assert: `gpu_probe` kernel_ok + capability_in_arch_list; `baked_probe` vj_baked +
    precision=bf16 + a Wan i2v repo (image, not a mount); `rclone_tripwire fired=false` (no-pull);
    `render_done film_bytes>0`; `i2v_jit` first-call JIT captured per arch.
-5. Teardown: `runpodctl remove pod` each pod (or `stop` on fail) and REVOKE the throwaway exfil token.
+5. Teardown: `runpodctl remove pod` each pod (output suppressed; NEVER `stop`/`get` -- they leak the
+   env/secret to stdout) and REVOKE the throwaway exfil token.
    #5 serverless prod promote remains gated on Conrad.
