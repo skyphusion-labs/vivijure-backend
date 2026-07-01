@@ -26,3 +26,6 @@ hf-cache/
 # os / editor
 .DS_Store
 *.swp
+
+# Real deploy.env holds YOUR RunPod + R2 keys (rendered from deploy.env.example); never commit it.
+/deploy.env
