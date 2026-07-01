@@ -155,6 +155,12 @@ prohibited; CSAM is also a crime (18 U.S.C. 1466A / 2252A). That bright line is 
 spine. The full policy is the
 [Vivijure Acceptable Use Policy](https://github.com/skyphusion-labs/vivijure/blob/main/docs/legal/ACCEPTABLE-USE.md).
 
+## Support
+
+Questions, bugs, or ideas? Start with this repo's [GitHub Issues](../../issues); see
+[SUPPORT.md](SUPPORT.md) for how to ask and what to include. Found a security problem? Report it
+privately per [SECURITY.md](SECURITY.md), never as a public issue.
+
 ## License
 
 **AGPL-3.0-only.** A labor of love, given freely: use it, learn from it, self-host it, build your

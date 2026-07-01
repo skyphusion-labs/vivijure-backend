@@ -8,22 +8,26 @@ to the newest tag to pick them up.
 
 ## Reporting a vulnerability
 
-Please do not file a public GitHub issue for security problems. Instead, report it
-privately through GitHub's private vulnerability reporting: open the repository's
-**Security** tab and click **"Report a vulnerability"**. This creates a private advisory
-visible only to you and the maintainers. (If that option is not visible, open a minimal
-public issue asking for a private channel, without disclosing any details.)
+Please do not file a public GitHub issue for a security problem. Report it privately to
+**security@skyphusion.org**. If you would rather use GitHub, open the repository's **Security** tab and
+click **"Report a vulnerability"** to file a private advisory that only you and the maintainers can
+see.
 
 Please include:
 
-- A description of the issue
+- A description of the issue and its impact
 - Steps to reproduce, including a minimal example if possible
 - The affected version (tag or commit SHA if known)
 - Any suggestions for remediation
 
-Reports will be acknowledged within a reasonable window (target: 5 business days).
-Time-sensitive issues should say so. Please allow up to 90 days for a coordinated fix
-before public disclosure.
+What to expect:
+
+- **Acknowledgment** within a reasonable window (target: 5 business days).
+- A **fix** in the latest release once we confirm the issue; time-sensitive reports should say so.
+- **Credit** for your report when the fix ships, unless you would rather stay anonymous.
+
+Please give us a chance to ship a fix before any public disclosure (target: up to 90 days for a
+coordinated fix).
 
 ## Scope
 
