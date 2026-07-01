@@ -5,6 +5,36 @@ pre-1.0: PATCH for fixes and backend-only tweaks, MINOR for new features). Entri
 newest-first. History before this file was introduced lives in the git tags; the recent
 releases are summarized below from that history.
 
+## [0.3.3] -- 2026-06-30
+
+**feat(bake): facexlib baked offline + FIRST BAKED IMAGE CONFIRMED IN PRODUCTION (#158)**
+
+The first vivijure-backend image with model weights baked into the image layers (no R2 cold-pull), deployed to the production serverless endpoint (`t9wcvlxh8rc5la`) and confirmed end-to-end on both production GPU arches through the real serverless handler. Bakes the facexlib detection + parsing weights so GFPGAN face-restore runs fully offline. Full confirmation record in `docs/serverless-0.3.3.md`.
+
+- **Baked, proven:** all 28 confirmation renders emitted `mirror_done { pulled: false }` -- the weights came from the image, not R2.
+- **Kernels:** the prebuilt `cu128` wheels carry `sm_90` / `sm_100` / `sm_120`; the `get_arch_list()` build-gate enforces all three.
+- **28/28 clean serverless renders, ZERO errors:** H200 (`sm_90`) 17/17 under concurrent load; B200 (`sm_100`) 11/11. True-cold `sm_100` i2v JIT measured for the first time (steady ~3.45 s/step, faster than H200's ~5.0 s/step).
+- Production serverless tier confirmed as **H200 | B200 only**.
+
+## [0.3.2] -- 2026-06-30
+
+**fix(models): the baked path never references an un-baked repo + baked_probe hardening (#155, #156)**
+
+- **i2v offline-load fix** (`models.py`): the baked fast-path loaded the `-fp8` i2v repo, which the bf16 bake never staged, so `from_pretrained` failed offline with `LocalEntryNotFoundError`. `_select_i2v_weights()` now gates the fp8 fast-path on the fp8 repo actually being cached, else loads the baked bf16 repo offline (bf16 throughout; fp8 buys nothing on the 96-141 GB pool).
+- **baked_probe hardening** (`vj_derisk.py`): asserts the exact runtime repo is cached before the CUDA kernel ($0, pre-GPU); CI guards the driver sha + marker to kill the drift class permanently.
+
+## [0.3.1] -- 2026-06-29
+
+**feat(bake): first REAL bf16 baked image (#14)**
+
+First image built from the staged bf16 weight seed (~105 GB, 15 multi-GB layers): the #138 gates pass on real weights and `.vj-baked` is stamped `precision=bf16`. 3-arch coverage rides on the prebuilt `cu128` wheels; the build-time proof is `get_arch_list() == {sm_90, sm_100, sm_120}`. Supersedes the burned `:0.3.0`.
+
+## [0.3.0] -- 2026-06-29
+
+**feat(bake): bake pipeline (#127) -- BURNED, do not pin**
+
+First bake attempt. The seed prefix was empty, so the bake produced a hollow image (config stubs, zero weight shards) while still writing `.vj-baked` -- caught by the #4 manual de-risk. The lying sentinel is fixed in `:0.3.1`+ by the #138 empty-bake gate (assert-weights gates the sentinel write via `&&`). Do not pin `:0.3.0`.
+
 ## [0.2.16] -- 2026-06-14
 
 **fix(harness): worker hygiene -- Sprint 1 batch (#24, #25, #26, #46)**
