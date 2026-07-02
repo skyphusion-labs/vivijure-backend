@@ -61,7 +61,12 @@ API; the GPU is the pod, not the runner.
 ## The pod verify channel (the `@event` contract)
 
 The pod runs `python -m vivijure_backend.verify` (module `src/vivijure_backend/verify.py`) as its
-verify entrypoint. It is the **writer**; the harness (`deploy/runpod_verify.py`) is the **reader**.
+verify entrypoint. The harness LAUNCHES it: it spins the pod with the verify command as the RunPod
+container start command (`docker_args`, wrapped in the image conda env), NOT the image default CMD
+(the serverless worker, which emits no @event contract). **The image under test must therefore
+contain the verify module** -- i.e. it is built from code that carries `vivijure_backend.verify`
+(post the emitter landing); an older baked image predating it cannot be gated, since the entrypoint
+would not exist. It is the **writer**; the harness (`deploy/runpod_verify.py`) is the **reader**.
 The module is the single source of the wire contract they share; this section reproduces it so the
 gate is auditable from the docs alone (ICD standard).
 
