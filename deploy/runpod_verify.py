@@ -682,7 +682,7 @@ def pick_gpu_type(available: list[dict[str, Any]], tier: str) -> str | None:
 
 def run_verify(client: PodClient, cfg: VerifyConfig,
                *, clock: Callable[[], float], poll_sleep: Callable[[float], None] | None = None,
-               max_polls: int = 600,
+               max_polls: int | None = None,
                evaluator: Callable[[list[tuple[str, dict]], VerifyConfig], VerifyResult] = evaluate,
                event_reader: Callable[[], tuple[list[tuple[str, dict]], str | None]] | None = None,
                on_pod_created: Callable[[str], None] | None = None) -> dict:
@@ -698,6 +698,11 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
     time or pod. Never raises on a verify FAILURE (that is a normal reported outcome); only a genuine
     client/transport fault propagates, after a best-effort stop."""
     poll_sleep = poll_sleep or (lambda _s: None)
+    poll_step = min(5.0, cfg.ttl_seconds)
+    if max_polls is None:
+        # Make the hard TTL the TRUE ceiling: enough polls to span ttl_seconds at poll_step, + margin.
+        # (A fixed cap like 600 x 5s = 3000s would cut a longer-TTL run short before the wall-clock.)
+        max_polls = int(cfg.ttl_seconds / poll_step) + 5 if poll_step > 0 else 600
     report: dict[str, Any] = {"image": cfg.image, "tier": cfg.tier}
 
     gpu_id = pick_gpu_type(client.list_gpu_types(), cfg.tier)
@@ -760,7 +765,7 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
                     result.passed = False
                     result.reasons.append("verify channel reported status=error before all gates passed")
                 break
-            poll_sleep(min(5.0, cfg.ttl_seconds))
+            poll_sleep(poll_step)
         else:
             timed_out = True
         if result is None:  # never reached a terminal status within TTL/polls -> evaluate what we have
