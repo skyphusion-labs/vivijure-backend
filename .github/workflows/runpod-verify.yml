@@ -130,11 +130,21 @@ jobs:
 
       - name: Live verify gate (SECURE pod -> @event verify -> delete+confirm-zero; promote gated)
         run: |
+          # SHARPNESS CALIBRATION (option 1, 2026-07-03) -- baseline 75.0, NOT the old 100.0 placeholder.
+          # Measured Laplacian 77.5 on the visually-confirmed-good draft-fp8 clip from run 28624514409
+          # (2026-07-03; lead eyeballed full.mp4: crisp rack edges, readable panel labels, in focus). So
+          # 77.5 is the HONEST sharpness of a good draft-fp8 clip of this bundle; 100.0 predated any real
+          # clip existing. 75.0 pins the 0.97 ratio floor at ~72.8, leaving headroom for fp8-kernel
+          # nondeterminism and the #191 torch re-pin on the next bake. A REAL quant regression craters
+          # sharpness far below that, so the #118 method-ii detector keeps its teeth.
+          # RECALIBRATION DOCTRINE: re-measure the baseline from a confirmed-good clip whenever the smoke
+          # bundle content or the i2v config changes -- NEVER move this number to make a failing run pass.
           python deploy/runpod_verify.py --live \
             --report-file verify-report.json \
             --image "${{ inputs.image }}" \
             --tier "${{ inputs.tier }}" \
             --bundle-key "${{ inputs.bundle_key }}" \
+            --sharpness-baseline 75.0 \
             ${{ inputs.promote && '--promote' || '' }}
 
       - name: Upload verify evidence (always)
