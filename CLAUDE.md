@@ -63,10 +63,11 @@ managed** (RunPod MCP v1.4.0+): create the container-registry-auth and attach it
 
 ## Verifying changes
 
-`pytest` is the suite (CI: `.github/workflows/tests.yml`). The GPU path is verified against a LIVE
-RunPod endpoint by `.github/workflows/runpod-verify.yml` (the real-artifact gate -- verify against the
-deployed image/endpoint, never the tag or our records). `release.yml` cuts releases; `docs/release-gate.md`
-is the checklist. For a local stage check, run the `scripts/run_*.py` entries.
+`pytest` is the suite (CI: `.github/workflows/tests.yml`). The live pod-staging gate is NOT built
+yet: `.github/workflows/runpod-verify.yml` runs the verify harness DRY-RUN only (mocked client, no
+GPU), and promotion to the prod endpoint is a manual, deliberate endpoint pin to a `:version` tag.
+GPU-path verification against the deployed image/endpoint is done by hand (never trust the tag or
+our records). `release.yml` cuts releases; `docs/release-gate.md` records the intended design. For a local stage check, run the `scripts/run_*.py` entries.
 
 ## Architecture (load-bearing)
 

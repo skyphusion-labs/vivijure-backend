@@ -115,6 +115,7 @@ routing flags it still reads off it (e.g. `finish_offloaded`).
 | `pretrained_loras` | dict[slot, str] | `{}` | Slot -> already-trained LoRA (R2 key or local path); skips that slot's training. |
 | `process_shot_ids` | list[str] \| null | null | Restrict `finalize` / `regen_shot` to a subset of shots. |
 | `audio_key` | str \| null | null | R2 key of an audio bed to mux under the final video. |
+| `keyframes_only` | bool | `false` | DEPRECATED, kept for compat: on a `render`, draw keyframes (training the LoRAs they need) then short-circuit before any i2v/finish GPU-seconds. The studio stopped sending it in v0.160.0 and sends `action:"preview"` instead; do not build new callers on it. |
 
 ### Actions
 
@@ -144,7 +145,7 @@ restores on the next render of this project.
 | `output_key` | str \| null | R2 key of the final muxed MP4 (`null` for preview / train-only). |
 | `seconds` | float \| null | Total duration of the final video. |
 | `has_audio` | bool | Whether an audio bed was muxed. |
-| `keyframes` | list[{shot_id, key}] | Per-shot keyframe PNG keys (generated, reused, and injected). |
+| `keyframes` | list[{shot_id, key}] | Per-shot keyframe PNG keys (generated, reused, and injected). Naming seam: the studio's `motion.backend` hook calls this field `keyframe_key`; this backend returns `key`, and the studio's own-gpu module translates `key` -> `keyframe_key` when mapping the result into the hook output. |
 | `clips` | list[{shot_id, key, target_seconds?}] | Per-shot clip keys (present when shots were animated). |
 | `lora` | dict[slot, {lora_id}] | Trained and passed-through adapters by slot. |
 | `state_key` | str \| null | R2 key of the project state tarball for incremental re-render. |

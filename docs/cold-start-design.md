@@ -237,9 +237,10 @@ baked image the hot common path -- on every host, in every datacenter, with no R
 > **Build + ship pipeline (see `deploy/`, the release + verify workflows, and
 > `docs/release-gate.md`):** `release.yml` builds + pushes the baked image on `vivijure-bake`
 > (stage seed -> reconstruct symlinks -> bin-pack -> build -> per-layer gate -> CPU import smoke ->
-> push). `runpod-verify.yml` is the **staging gate**: it spins a GPU **pod** on the image, runs the
-> structured-`@event` verify, and **only a passing image is promoted onto the production serverless
-> endpoint**. Pod = staging/debug; serverless = production.
+> push). `runpod-verify.yml` was DESIGNED as the **staging gate** (spin a GPU **pod** on the image,
+> run the structured-`@event` verify, promote only a passing image); the live gate is NOT built yet
+> and the workflow runs the harness dry-run only -- see `docs/release-gate.md` (status banner).
+> Pod = staging/debug; serverless = production.
 
 ## Open questions to settle before building
 
