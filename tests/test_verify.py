@@ -244,6 +244,58 @@ def test_run_verify_render_crash_records_error():
     assert em._summary["error"]["stage"] == "render"
 
 
+# --------------------------------------------------------------------------- pod render seam (registration)
+
+def test_pod_draft_render_registers_pipeline_before_handling(monkeypatch):
+    """Regression lock for the S1 watched-pod bug: `python -m vivijure_backend.verify` is a DIFFERENT
+    entrypoint than the worker, so calling the inner harness handler directly left the GPU pipeline
+    registry EMPTY and the render died with "no GPU Pipeline registered". The seam now routes through
+    `worker.handler`, which registers the per-job pipeline first. This proves registration happens
+    before the render runs, on CPU, by stubbing the deferred GPU/R2/clip pieces."""
+    from pathlib import Path
+    from vivijure_backend import worker as wmod
+    from vivijure_backend.harness import handler as hmod
+    from vivijure_backend.harness import pipeline_registry
+    from vivijure_backend.harness import r2 as r2mod
+
+    monkeypatch.setattr(pipeline_registry, "_PIPELINE", None)   # start with an empty registry
+    sentinel = object()
+    monkeypatch.setattr(wmod, "build_pipeline", lambda req: sentinel)  # no ModelServer/torch
+
+    seen = {}
+    def fake_harness_handler(job):
+        # the whole point: by the time the render runs, worker.handler must have registered a pipeline
+        seen["registered"] = pipeline_registry.get_pipeline()
+        return {"output_key": "renders/verify/full.mp4", "clip_bytes": 500_000}
+    monkeypatch.setattr(hmod, "handler", fake_harness_handler)
+
+    class FakeR2:
+        def __init__(self, *a, **k):
+            pass
+        def get_file(self, key, dest):
+            Path(dest).parent.mkdir(parents=True, exist_ok=True)
+            Path(dest).write_bytes(b"clip-bytes")
+            return dest
+    monkeypatch.setattr(r2mod, "R2", FakeR2)
+    monkeypatch.setattr(r2mod, "R2Config", type("C", (), {"from_env": staticmethod(lambda e: object())}))
+    monkeypatch.setattr(verify, "_first_frame_array", lambda p: None)
+    monkeypatch.setattr(verify, "_first_frame_seconds", lambda store, project, job_id: 3.0)
+
+    em = verify.VerifyEmitter(None, "run-x", clock=_clock())
+    env = {"VJ_VERIFY_BUNDLE_KEY": "bundles/x.tgz", "VJ_VERIFY_PROJECT": "verify"}
+    outcome = verify._pod_draft_render(em, env)
+
+    assert seen["registered"] is sentinel                      # pipeline WAS registered before render
+    assert outcome.output_key == "renders/verify/full.mp4"
+    assert outcome.clip_bytes == len(b"clip-bytes")            # measured from the pulled clip
+
+
+def test_pod_draft_render_requires_bundle_key():
+    em = verify.VerifyEmitter(None, "run-x", clock=_clock())
+    with pytest.raises(RuntimeError, match="VJ_VERIFY_BUNDLE_KEY"):
+        verify._pod_draft_render(em, {})
+
+
 # --------------------------------------------------------------------------- main() gate
 
 def test_main_is_noop_without_flag(capsys):
