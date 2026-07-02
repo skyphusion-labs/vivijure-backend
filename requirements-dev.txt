@@ -5,3 +5,5 @@ pytest>=8.0
 # deploy/requirements.txt; the test env needs it explicitly.
 Pillow>=12.2.0  # 12.2.0 clears 6 CVEs (GHSA-pwv6/r73j/wjx4/5xmw/whj4/cfh3)
 pytest-cov # For code coverage testing (GitHub)
+numpy  # verify.frame_sharpness (the #118 method-ii metric) computes variance-of-Laplacian
+       # in pure numpy; it is already a deferred runtime dep on the GPU image (finish.py).
