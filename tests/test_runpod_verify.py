@@ -255,16 +255,30 @@ def test_main_dry_run_passes_offline():
 class FakeSdk:
     """Records every SDK call; returns canned shapes. Injected into RunpodSdkPodClient(sdk=...)."""
 
-    def __init__(self, gpus=None, pods=None):
+    def __init__(self, gpus=None, detail=None, pods=None):
+        # get_gpus() = the REAL minimal list shape: id/displayName(short)/memoryInGb, NO cloud fields.
         self._gpus = gpus if gpus is not None else [
-            {"id": "NVIDIA H200", "displayName": "NVIDIA H200", "secureCloud": True},
-            {"id": "NVIDIA RTX 4090", "displayName": "NVIDIA RTX 4090", "secureCloud": False}]
+            {"id": "NVIDIA H200", "displayName": "H200", "memoryInGb": 141},
+            {"id": "NVIDIA L4", "displayName": "L4", "memoryInGb": 24},
+            {"id": "NVIDIA GeForce RTX 4090", "displayName": "RTX 4090", "memoryInGb": 24}]
+        # get_gpu(id) = the detail shape carrying secureCloud (H200 + L4 secure; 4090 community-only).
+        self._detail = detail if detail is not None else {
+            "NVIDIA H200": {"id": "NVIDIA H200", "secureCloud": True},
+            "NVIDIA L4": {"id": "NVIDIA L4", "secureCloud": True},
+            "NVIDIA GeForce RTX 4090": {"id": "NVIDIA GeForce RTX 4090", "secureCloud": False}}
         self._pods = pods if pods is not None else []
         self.calls = []
 
     def get_gpus(self):
         self.calls.append(("get_gpus",))
         return self._gpus
+
+    def get_gpu(self, gid):
+        self.calls.append(("get_gpu", gid))
+        d = self._detail.get(gid)
+        if d is None:
+            raise ValueError("No GPU found with the specified ID")
+        return d
 
     def create_pod(self, **kw):
         self.calls.append(("create_pod", kw))
@@ -291,11 +305,15 @@ def test_sdk_client_list_gpu_types_marks_only_secure_available():
     sdk = FakeSdk()
     client = rv.RunpodSdkPodClient(sdk=sdk)
     gpus = client.list_gpu_types()
-    by = {g["displayName"]: g["available"] for g in gpus}
+    # displayName is the canonical id (what GPU_TIERS/pick_gpu_type match on), available from get_gpu.
+    by = {g["id"]: g["available"] for g in gpus}
     assert by["NVIDIA H200"] is True
-    assert by["NVIDIA RTX 4090"] is False  # community-only SKU is never "available"
-    # and pick_gpu_type refuses the non-secure card for the i2v tier
+    assert by["NVIDIA L4"] is True
+    assert by["NVIDIA GeForce RTX 4090"] is False  # community-only SKU is never "available"
+    assert all(g["displayName"] == g["id"] for g in gpus)
+    # i2v picks the secure H200; base skips the community-only 4090 and lands on the secure L4.
     assert rv.pick_gpu_type(gpus, "i2v") == "NVIDIA H200"
+    assert rv.pick_gpu_type(gpus, "base") == "NVIDIA L4"
 
 
 def test_sdk_client_create_pod_forces_secure_cloud():
@@ -369,3 +387,18 @@ def test_sdk_client_missing_log_channel_fails_closed_and_tears_down():
 
 def test_mcp_alias_points_at_sdk_client():
     assert rv.RunpodMcpPodClient is rv.RunpodSdkPodClient
+
+
+def test_gpu_tier_ids_all_have_a_real_price():
+    # The tier ids and the price table must never drift apart: every GPU_TIERS id resolves a REAL price
+    # in GPU_HOURLY_USD (not the conservative 4.0/hr default), so a spend estimate never quotes a wrong
+    # rate for a listed card. Regression guard: the "NVIDIA RTX 4090" -> "NVIDIA GeForce RTX 4090"
+    # rename once left the price row behind.
+    for tier, ids in rv.GPU_TIERS.items():
+        for gid in ids:
+            assert gid in rv.GPU_HOURLY_USD, f"{gid} ({tier} tier) has no GPU_HOURLY_USD price row"
+
+
+def test_cost_estimate_uses_real_rate_for_geforce_4090():
+    # The corrected canonical id resolves its real 0.69/hr rate, not the 4.0/hr fallback.
+    assert rv.cost_estimate_usd("NVIDIA GeForce RTX 4090", 3600.0) == 0.69

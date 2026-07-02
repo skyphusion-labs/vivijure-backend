@@ -53,14 +53,14 @@ from typing import Any, Callable, Protocol
 # live availability (PodClient.list_gpu_types) at spin time, never a sold-out SKU. PREFERENCE ORDERS.
 GPU_TIERS: dict[str, tuple[str, ...]] = {
     "i2v": ("NVIDIA H200", "NVIDIA B200", "NVIDIA RTX PRO 6000 Blackwell Server Edition"),
-    "base": ("NVIDIA RTX 4090", "NVIDIA RTX A5000", "NVIDIA A10", "NVIDIA L4"),
+    "base": ("NVIDIA GeForce RTX 4090", "NVIDIA RTX A5000", "NVIDIA A10", "NVIDIA L4"),  # ids are the canonical RunPod get_gpus() ids
 }
 
 # Per-GPU on-demand $/hr (estimate only, for the per-run cost line; the live client may override from
 # list_gpu_types pricing). Kept conservative-high so the printed estimate never UNDERstates spend.
 GPU_HOURLY_USD: dict[str, float] = {
     "NVIDIA H200": 4.39, "NVIDIA H100 NVL": 2.79, "NVIDIA H100 80GB HBM3": 2.69,
-    "NVIDIA B200": 5.99, "NVIDIA RTX 4090": 0.69, "NVIDIA RTX A5000": 0.36,
+    "NVIDIA B200": 5.99, "NVIDIA GeForce RTX 4090": 0.69, "NVIDIA RTX A5000": 0.36,
     "NVIDIA A10": 0.45, "NVIDIA L4": 0.43,
     "NVIDIA RTX PRO 6000 Blackwell Server Edition": 2.49,
 }
@@ -183,13 +183,25 @@ class RunpodSdkPodClient:
         self._name_prefix = name_prefix
 
     def list_gpu_types(self):
-        """SECURE-cloud GPU types in the harness shape ({id, displayName, available}). `available` is
-        True iff RunPod offers the card on SECURE cloud, so pick_gpu_type can never select a
-        COMMUNITY-only SKU."""
+        """SECURE-cloud GPU types in the harness shape ({id, displayName, available}). The RunPod SDK
+        `get_gpus()` list carries only id/displayName/memoryInGb -- NOT cloud availability -- and its
+        `displayName` is a SHORT label ("L4"), while GPU_TIERS matches the canonical id ("NVIDIA L4").
+        So `displayName` is set to the id (what pick_gpu_type matches on), and SECURE availability is
+        resolved from the per-GPU `get_gpu(id)` detail (`secureCloud`). Only the ids some tier actually
+        prefers are detail-fetched (a handful, not all ~50), so `available` is True exactly for a
+        tier-relevant card RunPod offers on SECURE -- pick_gpu_type can never pick a community-only or
+        off-tier SKU."""
+        universe = [g.get("id") for g in (self._sdk.get_gpus() or []) if g.get("id")]
+        wanted = {gid for prefs in GPU_TIERS.values() for gid in prefs}
         out = []
-        for g in (self._sdk.get_gpus() or []):
-            out.append({"id": g.get("id"), "displayName": g.get("displayName") or g.get("id"),
-                        "available": bool(g.get("secureCloud"))})
+        for gid in universe:
+            secure = False
+            if gid in wanted:
+                try:
+                    secure = bool((self._sdk.get_gpu(gid) or {}).get("secureCloud"))
+                except Exception:  # noqa: BLE001 -- a detail miss is "not available", never a crash
+                    secure = False
+            out.append({"id": gid, "displayName": gid, "available": secure})
         return out
 
     def create_pod(self, *, image, gpu_type_id, env, registry_auth_id, ttl_seconds):
