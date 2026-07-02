@@ -1,12 +1,15 @@
 # Release gate: pod = staging, serverless = production
 
-> **STATUS (2026-07-02, truth-pass S6): live client landed; live gate still gated.** The live RunPod
-> client now exists -- `deploy/runpod_verify.py` ships `RunpodSdkPodClient` (SECURE cloud only; the
-> up/down/list lifecycle via the `runpod` SDK, unit-tested end to end through `run_verify`). The gate
-> is NOT yet enforced live because it needs (a) a `RUNPOD_API_KEY` CI secret and (b) the pod-side
-> verify entrypoint that emits the @event contract (the image CMD is the serverless worker, which
-> emits none). Until both land, `.github/workflows/runpod-verify.yml` runs only the harness DRY-RUN
-> and an image reaches prod by a manual `:version` pin. This banner comes down when the live job lands.
+> **STATUS (2026-07-02, truth-pass S7): the LIVE gate is WIRED (dispatch-gated).** Both prerequisites
+> landed -- RUNPOD_API_KEY + R2_* are CI secrets, and the pod-side @event emitter exists
+> (`vivijure_backend.verify`, #175). `.github/workflows/runpod-verify.yml` now carries a `live-gate` job
+> that (on an explicit `live=true` workflow_dispatch) spins ONE SECURE GPU pod on the candidate image,
+> drives the @event verify over the run-scoped R2 `summary.json` channel, and tears the pod down
+> (terminate on PASS / stop on FAIL) with a list-confirm-zero + an always-run STOP backstop. PROMOTE
+> (repin prod `t9wcvlxh8rc5la`) is OFF by default -- a proof run validates up|verify|down without
+> touching prod; a real release turns it on. Per verify-before-require the job goes REQUIRED in branch
+> protection only AFTER a real dispatch passes green end to end; until then an image may still reach
+> prod by a deliberate manual `:version` pin.
 
 The doctrine that governs how a built image becomes a running production worker, and the CI pipeline
 intended to enforce it. ICD-grade: the contract is reproducible from this doc alone.

@@ -402,3 +402,141 @@ def test_gpu_tier_ids_all_have_a_real_price():
 def test_cost_estimate_uses_real_rate_for_geforce_4090():
     # The corrected canonical id resolves its real 0.69/hr rate, not the 4.0/hr fallback.
     assert rv.cost_estimate_usd("NVIDIA GeForce RTX 4090", 3600.0) == 0.69
+
+
+# ================================================================= S1 live channel + promote (S7)
+
+
+class _ConfirmClient(FakePodClient):
+    """FakePodClient that also models list_live_pod_ids so run_verify's teardown-confirm can assert a
+    DELETED pod is actually gone from the live set."""
+
+    def __init__(self, log_lines, gpus=None):
+        super().__init__(log_lines, gpus=gpus)
+        self._deleted = set()
+
+    def delete_pod(self, pod_id):
+        self._deleted.add(pod_id)
+        return super().delete_pod(pod_id)
+
+    def list_live_pod_ids(self):
+        self.calls.append(("list_live_pod_ids",))
+        return [] if "pod-xyz" in self._deleted else ["pod-xyz"]
+
+
+def test_run_verify_uses_injected_event_reader_not_logs_and_confirms_teardown():
+    # Simulate the R2 summary channel: first two polls empty (pod still writing), third terminal.
+    passing = rv.parse_events(_pass_log())
+    seq = [([], None), ([], None), (passing, "complete")]
+    calls = {"n": 0}
+
+    def reader():
+        i = min(calls["n"], len(seq) - 1)
+        calls["n"] += 1
+        return seq[i]
+
+    client = _ConfirmClient(_pass_log())
+    report = rv.run_verify(client, rv.VerifyConfig(image="ghcr.io/x:1"), clock=_clock(),
+                           event_reader=reader)
+    assert report["passed"] is True
+    assert report["signal"] == "promote" and report["teardown"] == "deleted"
+    assert report["teardown_confirmed"] is True          # deleted pod confirmed gone (list-confirm zero)
+    assert report["live_pods_after"] == 0
+    # The R2 channel was used; the pod-log channel (read_logs) was NEVER touched.
+    assert "read_logs" not in [c[0] for c in client.calls]
+
+
+def test_run_verify_error_status_fails_and_stops_pod():
+    probe = rv.parse_events([rv.emit_gpu_probe(
+        {"torch_cuda": True, "kernel_ok": True, "vj_baked": True, "weights_on_disk": True,
+         "vram_free_gb": 120.0, "vram_total_gb": 141.0, "device_name": "NVIDIA H200"})])
+
+    def reader():
+        return probe, "error"
+
+    client = FakePodClient(_pass_log())
+    report = rv.run_verify(client, rv.VerifyConfig(image="img:1"), clock=_clock(), event_reader=reader)
+    assert report["passed"] is False
+    assert report["teardown"] == "stopped"               # FAIL keeps the pod for debug
+    assert any("status=error" in r for r in report["reasons"])
+
+
+def test_run_verify_calls_on_pod_created_with_id():
+    seen = []
+    client = FakePodClient(_pass_log())
+    rv.run_verify(client, rv.VerifyConfig(image="img:1"), clock=_clock(),
+                  on_pod_created=seen.append)
+    assert seen == ["pod-xyz"]                            # id captured for the always-run stop backstop
+
+
+def test_promote_image_repins_prod_endpoint_with_image():
+    seen = {}
+
+    def transport(url, *, headers, payload):
+        seen.update(url=url, headers=headers, payload=payload)
+        return {"id": "t9wcvlxh8rc5la"}
+
+    out = rv.promote_image("ghcr.io/x:2", endpoint_id="t9wcvlxh8rc5la", api_key="k-1",
+                           transport=transport)
+    assert "t9wcvlxh8rc5la" in seen["url"]
+    assert seen["payload"] == {"imageName": "ghcr.io/x:2"}
+    assert seen["headers"]["Authorization"].startswith("Bearer ")
+    assert out["image"] == "ghcr.io/x:2" and out["endpoint_id"] == "t9wcvlxh8rc5la"
+
+
+def test_promote_image_requires_key(monkeypatch):
+    monkeypatch.delenv("RUNPOD_API_KEY", raising=False)
+    with pytest.raises(RuntimeError):
+        rv.promote_image("ghcr.io/x:2", transport=lambda *a, **k: {})
+
+
+def test_r2_summary_event_reader_reads_the_frozen_contract(monkeypatch):
+    # Round-trip through the REAL emitter so the reader is proven against the true wire contract, not a
+    # hand-rolled summary shape.
+    import vivijure_backend.harness.r2 as r2mod
+    from vivijure_backend import verify as vmod
+
+    class _FakeStore:
+        def __init__(self):
+            self.blobs = {}
+
+        def put_bytes(self, data, key, content_type=None):
+            self.blobs[key] = data
+
+        def get_bytes(self, key):
+            return self.blobs[key]
+
+    store = _FakeStore()
+    em = vmod.VerifyEmitter(store, "runX", clock=lambda: 1.0)
+    em.gpu_probe({"torch_cuda": True, "kernel_ok": True, "vj_baked": True, "weights_on_disk": True,
+                  "vram_free_gb": 120.0, "vram_total_gb": 141.0, "device_name": "NVIDIA H200"})
+    em.complete("renders/verify/x.mp4", 1048576)
+
+    monkeypatch.setattr(r2mod.R2Config, "from_env", classmethod(lambda cls, env=None: object()))
+    monkeypatch.setattr(r2mod, "R2", lambda cfg: store)
+    reader = rv.r2_summary_event_reader({"R2_ENDPOINT": "e"}, "runX", prefix="verify")
+    events, terminal = reader()
+    assert terminal == "complete"
+    names = [n for n, _ in events]
+    assert "gpu_probe" in names and "complete" in names
+
+
+def test_r2_summary_event_reader_keeps_polling_until_written(monkeypatch):
+    import vivijure_backend.harness.r2 as r2mod
+
+    class _EmptyStore:
+        def get_bytes(self, key):
+            raise KeyError(key)  # not written yet
+
+    monkeypatch.setattr(r2mod.R2Config, "from_env", classmethod(lambda cls, env=None: object()))
+    monkeypatch.setattr(r2mod, "R2", lambda cfg: _EmptyStore())
+    reader = rv.r2_summary_event_reader({"R2_ENDPOINT": "e"}, "runY")
+    events, terminal = reader()
+    assert events == [] and terminal is None             # honest "keep waiting", never a crash
+
+
+def test_github_env_writer_records_pod_id(tmp_path, monkeypatch):
+    envfile = tmp_path / "gh_env"
+    monkeypatch.setenv("GITHUB_ENV", str(envfile))
+    rv._github_env_writer("VJ_VERIFY_POD_ID")("pod-abc")
+    assert "VJ_VERIFY_POD_ID=pod-abc" in envfile.read_text()

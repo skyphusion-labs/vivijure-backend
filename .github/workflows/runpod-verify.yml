@@ -1,28 +1,61 @@
-name: RunPod verify harness (dry-run)
+name: RunPod verify harness
 
-# STATUS (2026-07-02, truth-pass S6): the LIVE RunPod client now EXISTS -- deploy/runpod_verify.py
-# ships RunpodSdkPodClient, a SECURE-cloud-only client (up/down/list via the `runpod` SDK) that
-# run_verify drives end to end (unit-tested against a fake SDK). What is STILL not wired here, on
-# purpose, is a live JOB, because it needs two things this change does not add:
-#   1. a RUNPOD_API_KEY Actions secret (a deliberate spend + credential decision), and
-#   2. the pod-side verify ENTRYPOINT that emits the @event contract (gpu_probe / first_frame /
-#      sharpness / complete). The image CMD today is the serverless worker, which emits no verify
-#      contract, so a live pod could never reach `@event complete`. read_logs is the seam that pairs
-#      with that emitter (RunpodSdkPodClient.read_logs).
-# Until BOTH land, this workflow runs only the MOCKED DRY-RUN (parse_events + evaluate against the
-# built-in PASS-shaped client) -- no GPU, no pod, no secret, no spend -- and promotion to the prod
-# serverless endpoint stays a manual, deliberate :version pin. When both land, this workflow grows
-# the live job (spin SECURE pod -> verify @events -> promote -> teardown + list-confirm-zero); NOT
-# before, so it can never be a phantom gate.
+# The release-gate staging job (docs/release-gate.md). Build -> pod-verify (staging) -> promote (prod).
+#
+# STATUS (2026-07-02, truth-pass S7): the LIVE gate is now WIRED. Both prerequisites landed --
+# (a) RUNPOD_API_KEY + R2_* are CI secrets, and (b) the pod-side @event emitter exists
+# (vivijure_backend.verify, #175). So this workflow now grows a real live-gate job that spins ONE
+# SECURE GPU pod on the candidate image, drives the structured @event verify over the run-scoped R2
+# summary.json channel, and tears the pod down with a list-confirm-zero + an always-run STOP backstop.
+#
+# SPEND is gated three ways: (1) the workflow is workflow_dispatch ONLY (never a PR/push -- a fork PR
+# can never spin a GPU); (2) the live pod runs ONLY when the `live` input is explicitly true, else the
+# no-spend DRY-RUN job runs instead; (3) a hard TTL auto-stops the pod, teardown fires on PASS
+# (terminate) and FAIL (stop, keep disk for debug), and an always() backstop STOPs any pod the run
+# created even if the job is cancelled/killed.
+#
+# PROMOTE (repin the PROD serverless endpoint t9wcvlxh8rc5la) is OFF by default: a proof run validates
+# up|verify|down without ever touching prod. A real release turns `promote` on. Verify-before-require:
+# this job goes REQUIRED in branch protection only AFTER a real dispatch has passed green end to end.
+#
+# Runner: the control job is a stock ubuntu-latest -- it only drives the RunPod API and reads the R2
+# channel; the GPU is the POD, not the runner.
 
 on:
   workflow_dispatch:
+    inputs:
+      live:
+        description: "Spin a real SECURE GPU pod and run the live verify gate (SPENDS GPU $)."
+        type: boolean
+        default: false
+      image:
+        description: "Image ref to verify (ghcr.io/...:tag)."
+        type: string
+        default: "ghcr.io/skyphusion-labs/vivijure-backend:latest"
+      tier:
+        description: "GPU tier (i2v = the datacenter 3-arch pool)."
+        type: string
+        default: "i2v"
+      bundle_key:
+        description: "R2 key of the draft project bundle the pod renders for the verify."
+        type: string
+        default: "bundles/Packet_Chase.tar.gz"
+      promote:
+        description: "On PASS, repin the PROD serverless endpoint to the image (leave OFF for a proof run)."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
+concurrency:            # never two verify pods at once
+  group: runpod-verify
+  cancel-in-progress: false
+
 jobs:
   harness-dry-run:
+    # The no-spend default: mocked client, no GPU, no pod, no secret. Runs whenever live is not set.
+    if: ${{ inputs.live != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -44,3 +77,56 @@ jobs:
 
       - name: Harness dry-run, full regression evaluator (mocked)
         run: python deploy/runpod_verify.py --regression
+
+  live-gate:
+    # The real staging gate: ONE SECURE GPU pod on the candidate image, @event verify over R2, teardown.
+    if: ${{ inputs.live == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PYTHONPATH: src                       # src-layout: make vivijure_backend importable (pytest.ini parity)
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: vivijure                    # bucket name is not a secret
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install verify-harness deps
+        run: |
+          pip install --upgrade pip
+          pip install -r deploy/requirements-verify.txt
+
+      - name: Preflight -- required secrets present (presence-check only, never a value)
+        run: |
+          set -eu
+          test -n "${RUNPOD_API_KEY:-}" || { echo "RUNPOD_API_KEY secret missing"; exit 1; }
+          test -n "${R2_ENDPOINT:-}" || { echo "R2_ENDPOINT secret missing"; exit 1; }
+          test -n "${R2_ACCESS_KEY_ID:-}" || { echo "R2_ACCESS_KEY_ID secret missing"; exit 1; }
+          test -n "${R2_SECRET_ACCESS_KEY:-}" || { echo "R2_SECRET_ACCESS_KEY secret missing"; exit 1; }
+          echo "all required verify secrets present"
+
+      - name: Live verify gate (SECURE pod -> @event verify -> teardown; promote gated)
+        run: |
+          python deploy/runpod_verify.py --live \
+            --image "${{ inputs.image }}" \
+            --tier "${{ inputs.tier }}" \
+            --bundle-key "${{ inputs.bundle_key }}" \
+            ${{ inputs.promote && '--promote' || '' }}
+
+      - name: Teardown backstop -- STOP any pod this run created (always)
+        if: always()
+        run: |
+          if [ -n "${VJ_VERIFY_POD_ID:-}" ]; then
+            echo "stopping pod ${VJ_VERIFY_POD_ID} (halt billing, keep disk)"
+            python deploy/runpod_verify.py --stop-pod "$VJ_VERIFY_POD_ID" || true
+          else
+            echo "no pod id recorded (never spun, or aborted pre-create); nothing to stop"
+          fi

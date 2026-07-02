@@ -37,7 +37,9 @@ against FakePodClient -- no GPU, no network.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+import os
+import sys
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Protocol
 
 
@@ -650,7 +652,9 @@ def pick_gpu_type(available: list[dict[str, Any]], tier: str) -> str | None:
 def run_verify(client: PodClient, cfg: VerifyConfig,
                *, clock: Callable[[], float], poll_sleep: Callable[[float], None] | None = None,
                max_polls: int = 600,
-               evaluator: Callable[[list[tuple[str, dict]], VerifyConfig], VerifyResult] = evaluate) -> dict:
+               evaluator: Callable[[list[tuple[str, dict]], VerifyConfig], VerifyResult] = evaluate,
+               event_reader: Callable[[], tuple[list[tuple[str, dict]], str | None]] | None = None,
+               on_pod_created: Callable[[str], None] | None = None) -> dict:
     """Drive one bounded verify run and return the JSON report dict. Spend-safe by construction:
 
       - aborts BEFORE any spend if no tier GPU is available (returns a no-spin report);
@@ -677,6 +681,17 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
                             registry_auth_id=cfg.registry_auth_id, ttl_seconds=cfg.ttl_seconds)
     pod_id = pod["id"]
     report["pod_id"] = pod_id
+    if on_pod_created is not None:
+        try:
+            on_pod_created(pod_id)
+        except Exception:  # noqa: BLE001 -- bookkeeping only; must never fail the run
+            pass
+
+    def _log_reader() -> tuple[list[tuple[str, dict]], str | None]:
+        evs = parse_events(client.read_logs(pod_id))
+        return evs, ("complete" if find_event(evs, "complete") is not None else None)
+
+    reader = event_reader or _log_reader
 
     result: VerifyResult | None = None
     timed_out = False
@@ -685,18 +700,22 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
             if clock() - started >= cfg.ttl_seconds:
                 timed_out = True
                 break
-            events = parse_events(client.read_logs(pod_id))
-            if find_event(events, "complete") is not None:
+            events, terminal = reader()
+            if terminal is not None:                 # "complete" OR "error" -- a terminal channel state
                 result = evaluator(events, cfg)
+                if terminal == "error":
+                    result.passed = False
+                    result.reasons.append("verify channel reported status=error before all gates passed")
                 break
             poll_sleep(min(5.0, cfg.ttl_seconds))
         else:
             timed_out = True
-        if result is None:  # never completed within TTL/polls -> evaluate what we have, mark timeout
-            result = evaluator(parse_events(client.read_logs(pod_id)), cfg)
+        if result is None:  # never reached a terminal status within TTL/polls -> evaluate what we have
+            events, _ = reader()
+            result = evaluator(events, cfg)
             if timed_out:
                 result.passed = False
-                result.reasons.append("verify did not reach @event complete before the hard TTL")
+                result.reasons.append("verify did not reach a terminal status (complete/error) before the hard TTL")
     finally:
         elapsed = clock() - started
         report["elapsed_seconds"] = round(elapsed, 1)
@@ -726,7 +745,92 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
             "shell": f"runpodctl exec {pod_id} -- bash  # or SSH per the pod's connection info",
             "note": "pod STOPPED not deleted: disk/state preserved, GPU billing halted.",
         }
+
+    lister = getattr(client, "list_live_pod_ids", None)
+    if callable(lister):
+        try:
+            live_ids = list(lister())
+            report["live_pods_after"] = len(live_ids)
+            # PASS => the pod must be GONE (deleted); FAIL => intentionally KEPT (stopped) for debug.
+            report["teardown_confirmed"] = (pod_id not in live_ids) if result.passed else True
+        except Exception:  # noqa: BLE001 -- a confirm-list fault must not mask the verify result
+            report["teardown_confirmed"] = None
     return report
+
+
+# --------------------------------------------------------------------------- live channel + promote
+
+PROD_ENDPOINT_ID = "t9wcvlxh8rc5la"  # the production serverless endpoint (docs/release-gate.md)
+
+
+def r2_summary_event_reader(env: dict, run_id: str, *, prefix: str = "verify"):
+    """LIVE event source: a zero-arg callable that polls the run-scoped R2 ``summary.json`` the pod-side
+    emitter (``vivijure_backend.verify``) writes, and returns ``(events, terminal_status)`` for
+    ``run_verify``. The FROZEN contract, no prose parsing: ``verify.events_from_summary`` does the JSON
+    shape and the summary's own ``status`` is the terminal signal. A not-yet-written or transiently
+    unreadable object yields ``([], None)`` so the poll loop keeps waiting until the pod writes it (or
+    the hard TTL fires) -- an honest timeout, never a crash."""
+    from vivijure_backend import verify as _verify
+    from vivijure_backend.harness import keys as _keys
+    from vivijure_backend.harness.r2 import R2, R2Config
+
+    store = R2(R2Config.from_env(env))
+    summary_key = _keys.verify_summary_key(run_id, prefix=prefix)
+
+    def read() -> tuple[list[tuple[str, dict]], str | None]:
+        try:
+            raw = store.get_bytes(summary_key)
+        except Exception:  # noqa: BLE001 -- not written yet / transient: keep polling, never leak or crash
+            return [], None
+        try:
+            status = json.loads(raw).get("status")
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            status = None
+        terminal = status if status in ("complete", "error") else None
+        return _verify.events_from_summary(raw), terminal
+
+    return read
+
+
+def promote_image(image: str, *, endpoint_id: str = PROD_ENDPOINT_ID, api_key: str | None = None,
+                  transport: "Callable[..., Any] | None" = None) -> dict:
+    """Promote a verified image onto the PRODUCTION serverless endpoint by repinning its ``imageName``.
+    This is the ONLY path an image reaches prod (docs/release-gate.md doctrine); the caller gates it
+    behind an explicit ``--promote`` go, so a bare verify run never touches prod. ``transport`` is
+    injected in tests (no network). The RunPod API key is read from RUNPOD_API_KEY and NEVER logged."""
+    key = api_key or os.environ.get("RUNPOD_API_KEY")
+    if not key:
+        raise RuntimeError("promote needs RUNPOD_API_KEY (never hardcode a key)")
+    if transport is None:
+        import requests
+
+        def transport(url, *, headers, payload):  # noqa: ANN001 -- thin default HTTP leg
+            resp = requests.patch(url, headers=headers, json=payload, timeout=30)
+            resp.raise_for_status()
+            return resp.json() if resp.content else {}
+
+    url = "https://rest.runpod.io/v1/endpoints/%s" % endpoint_id
+    body = transport(url,
+                     headers={"Authorization": "Bearer %s" % key, "Content-Type": "application/json"},
+                     payload={"imageName": image})
+    return {"endpoint_id": endpoint_id, "image": image, "response": body}
+
+
+def _github_env_writer(name: str) -> "Callable[[str], None]":
+    """Return a callback that records ``name=<value>`` to ``$GITHUB_ENV`` (so an always-run teardown
+    backstop can STOP the pod even if this process is later killed/cancelled), falling back to a stderr
+    note off CI. Never raises."""
+    def write(value: str) -> None:
+        path = os.environ.get("GITHUB_ENV")
+        try:
+            if path:
+                with open(path, "a", encoding="utf-8") as fh:
+                    fh.write("%s=%s\n" % (name, value))
+            else:
+                print("%s=%s" % (name, value), file=sys.stderr)
+        except Exception:  # noqa: BLE001 -- a bookkeeping write must never fail the run
+            pass
+    return write
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -745,7 +849,35 @@ def main(argv: list[str] | None = None) -> int:
                     help="pin the SECURE pod to a specific RunPod data center (default: RunPod picks)")
     ap.add_argument("--container-disk-gb", type=int, default=500,
                     help="pod container disk in GB (default 500; a ~87GB baked image fits with room)")
+    ap.add_argument("--run-id", default=None,
+                    help="verify run id (live); the harness assigns one if omitted -- it names the R2 "
+                         "summary key the pod writes and the harness polls")
+    ap.add_argument("--bundle-key", default="bundles/Packet_Chase.tar.gz",
+                    help="R2 key of the draft project bundle the pod renders (VJ_VERIFY_BUNDLE_KEY)")
+    ap.add_argument("--project", default="verify", help="verify project slug (VJ_VERIFY_PROJECT)")
+    ap.add_argument("--key-prefix", default="verify",
+                    help="R2 verify key prefix (VJ_VERIFY_KEY_PREFIX)")
+    ap.add_argument("--sharpness-baseline", type=float, default=100.0,
+                    help="sharpness reference the ratio gate compares against (VJ_SHARPNESS_BASELINE)")
+    ap.add_argument("--promote", action="store_true",
+                    help="on a PASS, repin the PROD serverless endpoint to the verified image. OFF by "
+                         "default: a proof run validates up|verify|down without ever touching prod")
+    ap.add_argument("--promote-endpoint", default=PROD_ENDPOINT_ID,
+                    help="the production serverless endpoint id to promote onto")
+    ap.add_argument("--stop-pod", default=None,
+                    help="teardown backstop: STOP this pod id (halt billing, keep disk) and exit; the "
+                         "workflow always-run step calls it so a killed/cancelled run never bleeds GPU")
     args = ap.parse_args(argv)
+
+    if args.stop_pod:
+        try:
+            RunpodSdkPodClient().stop_pod(args.stop_pod)
+            print("runpod_verify: teardown backstop STOPPED pod %s (billing halted, disk kept)"
+                  % args.stop_pod)
+        except Exception as e:  # noqa: BLE001 -- best-effort backstop: already-gone/stopped is fine
+            print("runpod_verify: teardown backstop: pod %s not stoppable (%s); likely already "
+                  "deleted/stopped" % (args.stop_pod, type(e).__name__), file=sys.stderr)
+        return 0
 
     if args.regression:
         cfg: VerifyConfig = RegressionConfig(image=args.image, tier=args.tier,
@@ -754,18 +886,57 @@ def main(argv: list[str] | None = None) -> int:
     else:
         cfg = VerifyConfig(image=args.image, tier=args.tier, registry_auth_id=args.registry_auth_id)
         evaluator = evaluate
+    event_reader = None
+    on_pod_created = None
     if args.live:
+        import uuid
+        run_id = args.run_id or ("s1-" + uuid.uuid4().hex[:12])
+        pod_env = dict(cfg.env)  # VJ_I2V_* + VJ_VERIFY (+ VJ_REGRESSION)
+        for k in ("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET"):
+            v = os.environ.get(k)
+            if v:
+                pod_env[k] = v
+        pod_env.update({
+            "VJ_VERIFY_RUN_ID": run_id,
+            "VJ_VERIFY_KEY_PREFIX": args.key_prefix,
+            "VJ_VERIFY_BUNDLE_KEY": args.bundle_key,
+            "VJ_VERIFY_PROJECT": args.project,
+            "VJ_SHARPNESS_BASELINE": repr(args.sharpness_baseline),
+        })
+        cfg = replace(cfg, env=pod_env)
         client: PodClient = RunpodSdkPodClient(  # type: ignore[assignment]
             data_center_id=args.data_center_id, container_disk_gb=args.container_disk_gb)
+        event_reader = r2_summary_event_reader(pod_env, run_id, prefix=args.key_prefix)
+        on_pod_created = _github_env_writer("VJ_VERIFY_POD_ID")
+        print("runpod_verify: LIVE run_id=%s image=%s bundle=%s promote=%s"
+              % (run_id, cfg.image, args.bundle_key, "on" if args.promote else "OFF"))
     else:
         mode = "REGRESSION " if args.regression else ""
         print(f"runpod_verify: {mode}DRY-RUN (mocked client; no GPU, no spend). Pass --live for the gated run.")
         client = _DryRunClient(cfg)
 
     import time
-    report = run_verify(client, cfg, clock=time.monotonic, evaluator=evaluator)
+    report = run_verify(client, cfg, clock=time.monotonic, evaluator=evaluator,
+                        event_reader=event_reader, on_pod_created=on_pod_created)
+
+    if report.get("passed") and report.get("signal") == "promote":
+        if args.promote:
+            try:
+                report["promote"] = promote_image(cfg.image, endpoint_id=args.promote_endpoint)
+                report["promoted"] = True
+            except Exception as e:  # noqa: BLE001 -- a promote fault is loud; teardown already ran
+                report["promoted"] = False
+                report["promote_error"] = "%s: %s" % (type(e).__name__, e)
+        else:
+            report["promoted"] = False
+            report["promote_note"] = ("PASS is promote-eligible; promote skipped "
+                                      "(no --promote, prod untouched)")
+
     print(json.dumps(report, indent=2, sort_keys=True))
-    return 0 if report.get("passed") else 1
+    ok = bool(report.get("passed"))
+    if args.promote and ok and not report.get("promoted"):
+        ok = False  # promote requested on a passing image but did not land -> fail the gate
+    return 0 if ok else 1
 
 
 class _DryRunClient:
