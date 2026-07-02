@@ -41,7 +41,13 @@ on:
       bundle_key:
         description: "R2 key of the draft project bundle the pod renders for the verify."
         type: string
-        default: "bundles/Packet_Chase.tar.gz"
+        # Default = the gate SMOKE bundle: single shot, use_characters=[] -> ZERO LoRA training
+        # (empty use_characters keyframes via plain SDXL), crisp/high-detail content so the
+        # sharpness gate clears (Laplacian >= 97 vs baseline 100). Exercises keyframe + i2v +
+        # finish, which is the release-gate's scope. NOT Packet_Chase: that bundle carries 2 cast
+        # slots with full ref sets, so the plan trains 2 LoRAs x 8800 steps (~2.3h) BEFORE any
+        # keyframe -- structurally over the pod's 90-min TTL; LoRA training is out of smoke scope.
+        default: "bundles/Verify_Smoke.tar.gz"
       promote:
         description: "On PASS, repin the PROD serverless endpoint to the image (leave OFF for a proof run)."
         type: boolean
@@ -84,7 +90,12 @@ jobs:
     # The real staging gate: ONE SECURE GPU pod on the candidate image, @event verify over R2, teardown.
     if: ${{ inputs.live == true }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # MUST exceed the pod hard TTL (ttl_seconds=5400 = 90 min in deploy/runpod_verify.py) plus a
+    # teardown margin, so the POD's own TTL is the true wall-clock ceiling -- never the runner. A
+    # 60-min cap killed a good :0.4.1 run mid-render (26-min cold pull + i2v > 60 min): the runner
+    # cancelled the job before the pod finished, aborting a passing image. 105 = 90 (TTL) + 15
+    # (cold-pull slack + always() reap). Spend stays bounded by the TTL + the always-run reap.
+    timeout-minutes: 105
     env:
       PYTHONPATH: src                       # src-layout: make vivijure_backend importable (pytest.ini parity)
       RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
