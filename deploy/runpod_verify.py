@@ -68,6 +68,14 @@ GPU_HOURLY_USD: dict[str, float] = {
 }
 
 
+# The pod's container start command for a verify run: RUN the verify entrypoint (armed by
+# VJ_VERIFY), NOT the image default CMD (the serverless worker `-m vivijure_backend.worker`, which
+# emits no @event contract). Wrapped in the image conda env, matching the Dockerfile CMD; passed to
+# RunPod as docker_args. Without it a spun pod idles as a worker and the verify never runs.
+VERIFY_POD_COMMAND = ("conda run --no-capture-output -n vivijure "
+                      "python -u -m vivijure_backend.verify")
+
+
 @dataclass(frozen=True)
 class VerifyConfig:
     """One verify run's bounds + gates. All spend guards live here so a caller cannot fire an
@@ -81,6 +89,7 @@ class VerifyConfig:
     min_sharpness_ratio: float = 0.97            # quality parity vs runtime-quant baseline (#118 gate)
     min_vram_free_gb: float = 8.0                # headroom floor after load
     expect_baked: bool = True                    # a baked image must NOT pull from R2
+    pod_command: str = VERIFY_POD_COMMAND        # pod start command: RUN the verify entrypoint
     env: dict[str, str] = field(default_factory=lambda: {
         # draft tier ONLY: few-step distill on, fp8 on; the cheap path, the spend-bounded one.
         "VJ_I2V_DISTILL": "1", "VJ_I2V_FP8": "1", "VJ_VERIFY": "1",
@@ -129,7 +138,8 @@ class PodClient(Protocol):
 
     def list_gpu_types(self) -> list[dict[str, Any]]: ...
     def create_pod(self, *, image: str, gpu_type_id: str, env: dict[str, str],
-                   registry_auth_id: str | None, ttl_seconds: int) -> dict[str, Any]: ...
+                   registry_auth_id: str | None, ttl_seconds: int,
+                   command: str | None = None) -> dict[str, Any]: ...
     def get_pod(self, pod_id: str) -> dict[str, Any]: ...
     def read_logs(self, pod_id: str) -> list[str]: ...
     def stop_pod(self, pod_id: str) -> dict[str, Any]: ...
@@ -217,20 +227,26 @@ class RunpodSdkPodClient:
             out.append({"id": gid, "displayName": gid, "available": secure})
         return out
 
-    def create_pod(self, *, image, gpu_type_id, env, registry_auth_id, ttl_seconds):
-        """Spin ONE SECURE-cloud GPU pod on `image`. `ttl_seconds` is enforced by the harness poll loop,
-        not the SDK. `registry_auth_id` is rejected loudly (not silently ignored): our images are public
-        GHCR (no auth needed); a private image must be pulled via a pre-created RunPod template carrying
-        containerRegistryAuthId, spun from template_id -- a separate seam, not this call."""
+    def create_pod(self, *, image, gpu_type_id, env, registry_auth_id, ttl_seconds, command=None):
+        """Spin ONE SECURE-cloud GPU pod on `image`. `command` is the container start command (RunPod
+        docker_args) -- for a verify run it RUNS the verify entrypoint; without it the pod boots the
+        image default CMD (the serverless worker) and emits no @event contract. `ttl_seconds` is
+        enforced by the harness poll loop, not the SDK. `registry_auth_id` is rejected loudly (not
+        silently ignored): our images are public GHCR (no auth needed); a private image must be pulled
+        via a pre-created RunPod template carrying containerRegistryAuthId, spun from template_id -- a
+        separate seam, not this call."""
         if registry_auth_id:
             raise ValueError("RunpodSdkPodClient pulls public GHCR images (no registry auth). For a "
                              "private image, provision a RunPod template with containerRegistryAuthId "
                              "and spin from its template_id -- do not pass registry_auth_id here.")
-        pod = self._sdk.create_pod(
+        kwargs = dict(
             name=("%s-%s" % (self._name_prefix, gpu_type_id)).replace(" ", "-")[:60],
             image_name=image, gpu_type_id=gpu_type_id, cloud_type="SECURE",
             container_disk_in_gb=self._container_disk_gb, env=dict(env or {}),
             data_center_id=self._data_center_id, support_public_ip=True, start_ssh=True)
+        if command:
+            kwargs["docker_args"] = command   # RUN the verify entrypoint, not the default worker CMD
+        pod = self._sdk.create_pod(**kwargs)
         pod_id = pod.get("id") if isinstance(pod, dict) else None
         if not pod_id:
             raise RuntimeError("RunPod create_pod returned no id: %r" % (pod,))
@@ -689,7 +705,8 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
 
     started = clock()
     pod = client.create_pod(image=cfg.image, gpu_type_id=gpu_id, env=cfg.env,
-                            registry_auth_id=cfg.registry_auth_id, ttl_seconds=cfg.ttl_seconds)
+                            registry_auth_id=cfg.registry_auth_id, ttl_seconds=cfg.ttl_seconds,
+                            command=cfg.pod_command)
     pod_id = pod["id"]
     report["pod_id"] = pod_id
     if on_pod_created is not None:
@@ -996,7 +1013,8 @@ def main(argv: list[str] | None = None) -> int:
 
     import time
     report = run_verify(client, cfg, clock=time.monotonic, evaluator=evaluator,
-                        event_reader=event_reader, on_pod_created=on_pod_created)
+                        event_reader=event_reader, on_pod_created=on_pod_created,
+                        poll_sleep=(time.sleep if args.live else None))
 
     if report.get("passed") and report.get("signal") == "promote":
         if args.promote:

@@ -595,3 +595,55 @@ def test_key_shape_never_echoes_the_value(capsys, monkeypatch):
     assert "TOPSECRETVALUE42" not in out                    # the VALUE body is never echoed
     assert "cleaned_matches_rpa=yes" in out                 # matched quotes stripped -> valid shape
     assert "starts_with_quote=yes" in out                   # the mangle is diagnosed, not the value
+
+
+def test_verify_config_pod_command_runs_the_verify_entrypoint():
+    cmd = rv.VerifyConfig(image="ghcr.io/x:1").pod_command
+    assert cmd.endswith("-m vivijure_backend.verify")     # RUN verify, not the default worker CMD
+    assert "conda run" in cmd and "vivijure" in cmd        # inside the image conda env
+
+
+def test_run_verify_passes_pod_command_to_create_pod():
+    client = FakePodClient(_pass_log())
+    cfg = rv.VerifyConfig(image="ghcr.io/x:1")
+    rv.run_verify(client, cfg, clock=_clock())
+    create = next(c for c in client.calls if c[0] == "create_pod")[1]
+    assert create["command"] == cfg.pod_command           # the verify entrypoint is wired to the pod
+
+
+def test_sdk_client_create_pod_sets_command_as_docker_args():
+    sdk = FakeSdk()
+    client = rv.RunpodSdkPodClient(sdk=sdk)
+    client.create_pod(image="ghcr.io/x:1", gpu_type_id="NVIDIA H200", env={}, registry_auth_id=None,
+                      ttl_seconds=60, command="conda run -n vivijure python -m vivijure_backend.verify")
+    (_, kw), = [c for c in sdk.calls if c[0] == "create_pod"]
+    assert kw["docker_args"] == "conda run -n vivijure python -m vivijure_backend.verify"
+
+
+def test_sdk_client_create_pod_omits_docker_args_without_command():
+    sdk = FakeSdk()
+    client = rv.RunpodSdkPodClient(sdk=sdk)
+    client.create_pod(image="ghcr.io/x:1", gpu_type_id="NVIDIA H200", env={}, registry_auth_id=None,
+                      ttl_seconds=60)  # no command
+    (_, kw), = [c for c in sdk.calls if c[0] == "create_pod"]
+    assert "docker_args" not in kw                         # unset => the SDK default, no accidental empty
+
+
+def test_run_verify_sleeps_between_polls():
+    # The live path MUST wait between R2 summary polls (a real render needs minutes); a no-op sleep
+    # burns all 600 polls in milliseconds and gives up before the pod boots. Prove the loop calls the
+    # injected poll_sleep between non-terminal polls.
+    passing = rv.parse_events(_pass_log())
+    seq = [([], None), ([], None), (passing, "complete")]
+    calls = {"n": 0}
+
+    def reader():
+        i = min(calls["n"], len(seq) - 1)
+        calls["n"] += 1
+        return seq[i]
+
+    slept = []
+    client = FakePodClient(_pass_log())
+    rv.run_verify(client, rv.VerifyConfig(image="ghcr.io/x:1"), clock=_clock(),
+                  poll_sleep=slept.append, event_reader=reader)
+    assert len(slept) >= 2                                 # slept through the two empty polls
