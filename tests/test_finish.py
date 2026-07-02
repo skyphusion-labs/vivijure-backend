@@ -3,11 +3,12 @@
 The pure frame/fps math is exercised directly. The GPU body (`finish_clip`) and the restorer
 wrappers defer their heavy imports (torch / imageio / GFPGAN / CodeFormer), so they are tested
 with fakes injected for `server`, the restorer/interpolator, and `imageio.v3` (stubbed into
-`sys.modules`), no GPU and no real codec touched. Frames are plain sentinel objects, since the
-fakes never inspect pixels, so the suite needs no numpy/torch (it runs on the CI CPU box with
-only pytest + PyYAML). The bug fixes the audit called out -- the dead `only_faces` paste-back,
-the per-backend fidelity argument name, the silent missing-loader skip, and the factor snapping --
-each get an explicit test.
+`sys.modules`), no GPU and no real codec touched. The encode seam (`_encode_uniform`, an ffmpeg
+rawvideo pipe) is monkeypatched with a recorder so nothing spawns ffmpeg or imports numpy. Frames
+are plain sentinel objects, since the fakes never inspect pixels, so the suite needs no numpy/torch
+(it runs on the CI CPU box with only pytest + PyYAML). The bug fixes the audit called out -- the
+dead `only_faces` paste-back, the per-backend fidelity argument name, the silent missing-loader
+skip, and the factor snapping -- each get an explicit test.
 """
 import sys
 import types
@@ -18,6 +19,7 @@ from vivijure_backend import finish
 from vivijure_backend.config import FaceRestore, FinishConfig, RenderConfig
 from vivijure_backend.finish import (
     FinishParams,
+    _encoder_argv,
     interpolated_fps,
     interpolated_frame_count,
     interpolation_passes,
@@ -268,6 +270,21 @@ class _FakeServer:
         return self._restorer
 
 
+class _EncodeRecorder:
+    """Stands in for finish._encode_uniform: consumes the streamed frame generator (so the finish
+    pipeline actually runs) and records the frame list, the realized fps, and whether it was handed
+    a lazy generator -- all without spawning ffmpeg or importing numpy on the CPU box."""
+    def __init__(self):
+        self.frames = None
+        self.fps = None
+        self.was_generator = None
+
+    def __call__(self, frames, out_path, fps):
+        self.was_generator = isinstance(frames, types.GeneratorType)
+        self.frames = list(frames)
+        self.fps = fps
+
+
 class _patched_modules:
     """Context manager that installs fake modules into sys.modules and restores them after, so a
     deferred `import imageio.v3` (and friends) resolves to a CPU fake during the test."""
@@ -290,21 +307,15 @@ class _patched_modules:
         return False
 
 
-def _fake_imageio(frames_in, encoded):
-    """A fake imageio.v3 module (plus its parent `imageio` package): imiter yields the given frames,
-    immeta reports 16 fps, imwrite records the encode kwargs so the test can assert the uniform
-    (codec, pix_fmt, fps). Returns the {module_name: module} mapping for `_patched_modules` -- both
-    `imageio` and `imageio.v3` are needed because `import imageio.v3` imports the parent first."""
+def _fake_imageio(frames_in):
+    """A fake imageio.v3 module (plus its parent `imageio` package): imiter yields the given frames
+    and immeta reports 16 fps. Returns the {module_name: module} mapping for `_patched_modules` --
+    both `imageio` and `imageio.v3` are needed because `import imageio.v3` imports the parent first.
+    Encoding no longer goes through imageio (it is an ffmpeg pipe now), so imwrite is absent; tests
+    assert the encode via a patched `finish._encode_uniform` recorder instead."""
     v3 = types.ModuleType("imageio.v3")
     v3.immeta = lambda *a, **k: {"fps": 16}
     v3.imiter = lambda *a, **k: iter(frames_in)
-
-    def imwrite(path, frames, **kw):
-        encoded["path"] = path
-        encoded["n"] = len(frames)
-        encoded["kw"] = kw
-    v3.imwrite = imwrite
-
     parent = types.ModuleType("imageio")
     parent.v3 = v3
     return {"imageio": parent, "imageio.v3": v3}
@@ -314,60 +325,76 @@ def _frames(n):
     return [("frame", i) for i in range(n)]
 
 
-def test_finish_clip_restores_then_interpolates_and_encodes_uniformly(tmp_path):
-    encoded = {}
+def test_encoder_argv_uses_nvenc_and_keeps_uniform_output():
+    # NVENC path: GPU encoder selected, but the output stays H.264 / yuv420p at the realized fps and
+    # frame size, so a finished clip is still concat-compatible with its siblings.
+    argv = _encoder_argv("/tmp/out.mp4", 640, 480, 32, "h264_nvenc")
+    assert "h264_nvenc" in argv and "libx264" not in argv
+    assert argv[argv.index("-s") + 1] == "640x480"
+    assert argv[argv.index("-framerate") + 1] == "32"
+    assert argv[-3:] == ["-pix_fmt", "yuv420p", "/tmp/out.mp4"]     # output pixel format is uniform
+
+
+def test_encoder_argv_falls_back_to_libx264():
+    argv = _encoder_argv("/tmp/out.mp4", 320, 240, 16, "libx264")
+    assert "libx264" in argv and "h264_nvenc" not in argv
+    assert argv[-3:] == ["-pix_fmt", "yuv420p", "/tmp/out.mp4"]
+
+
+def test_finish_clip_restores_then_interpolates_and_encodes_uniformly(tmp_path, monkeypatch):
+    rec = _EncodeRecorder()
+    monkeypatch.setattr(finish, "_encode_uniform", rec)
     restorer = _RecordingRestorer()
     server = _FakeServer(interp=_FakeInterp(), restorer=restorer)
     params = FinishParams(interpolate=True, factor=2, face_restore=True,
                           face_restore_backend="gfpgan", only_faces=False)
-    with _patched_modules(_fake_imageio(_frames(3), encoded)):
+    with _patched_modules(_fake_imageio(_frames(3))):
         res = finish.finish_clip("shot_01", tmp_path / "in.mp4", tmp_path / "out.mp4",
                                  server, params=params)
-    # restore ran on every input frame (3), THEN one interpolation pass took 3 -> 5 frames
+    # restore ran on every input frame (3), THEN one interpolation pass streamed 3 -> 5 frames
     assert len(restorer.calls) == 3
     assert res.frames_in == 3 and res.frames_out == 5
     assert res.interpolated is True and res.face_restored is True
     assert res.out_fps == 32                                 # 16 * 2
     assert server.restorer_backend == "gfpgan"              # the chosen backend was requested
-    # the uniform encode: fixed codec + pixel format + the realized fps
-    assert encoded["n"] == 5
-    assert encoded["kw"]["codec"] == "libx264"
-    assert encoded["kw"]["out_pixel_format"] == "yuv420p"
-    assert encoded["kw"]["fps"] == 32
+    # the encoder was fed the full 5-frame sequence lazily (streamed, not a materialized 8x list)
+    assert rec.was_generator is True
+    assert len(rec.frames) == 5
+    assert rec.fps == 32
 
 
-def test_finish_clip_encodes_uniformly_even_with_no_passes_run(tmp_path):
+def test_finish_clip_encodes_uniformly_even_with_no_passes_run(tmp_path, monkeypatch):
     # A single-frame clip cannot interpolate and (here) is not restored, but it is STILL re-encoded
     # to the uniform form so the stream-copy concat survives it next to multi-frame finished clips.
-    encoded = {}
+    rec = _EncodeRecorder()
+    monkeypatch.setattr(finish, "_encode_uniform", rec)
     server = _FakeServer(interp=_FakeInterp())
     params = FinishParams(interpolate=True, factor=4)        # interpolation requested...
-    with _patched_modules(_fake_imageio(_frames(1), encoded)):
+    with _patched_modules(_fake_imageio(_frames(1))):
         res = finish.finish_clip("shot_x", tmp_path / "in.mp4", tmp_path / "out.mp4",
                                  server, params=params)
     assert res.interpolated is False                         # 1 frame: nothing to interpolate
     assert res.out_fps == 16                                 # source fps, untouched
-    assert encoded["kw"]["codec"] == "libx264"               # but still uniformly encoded
-    assert encoded["kw"]["out_pixel_format"] == "yuv420p"
+    assert res.frames_out == 1
+    assert len(rec.frames) == 1                              # but the single frame is still encoded
+    assert rec.fps == 16
 
 
 def test_finish_clip_fails_loud_when_a_configured_interpolator_cannot_load(tmp_path):
     # The audit fix: a CONFIGURED pass whose model cannot load must FAIL the render, not silently
     # downgrade to a no-op. The old `_safe` swallow is gone.
-    encoded = {}
     server = _FakeServer(interp_raises=True)
     params = FinishParams(interpolate=True, factor=2)
-    with _patched_modules(_fake_imageio(_frames(3), encoded)):
+    with _patched_modules(_fake_imageio(_frames(3))):
         with pytest.raises(RuntimeError, match="RIFE weights missing"):
             finish.finish_clip("shot_01", tmp_path / "in.mp4", tmp_path / "out.mp4",
                                server, params=params)
 
 
 def test_finish_clip_fails_loud_when_a_configured_restorer_cannot_load(tmp_path):
-    encoded = {}
     server = _FakeServer(restore_raises=True)
     params = FinishParams(face_restore=True, face_restore_backend="gfpgan")
-    with _patched_modules(_fake_imageio(_frames(3), encoded)):
+    with _patched_modules(_fake_imageio(_frames(3))):
         with pytest.raises(RuntimeError, match="GFPGAN weights missing"):
             finish.finish_clip("shot_01", tmp_path / "in.mp4", tmp_path / "out.mp4",
                                server, params=params)

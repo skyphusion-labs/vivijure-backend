@@ -31,6 +31,9 @@ from pathlib import Path
 VALID_FACTORS = (1, 2, 4, 8)
 MAX_FACTOR = 8
 
+# Tri-state warm-worker cache for the NVENC probe: None = unprobed, True/False = h264_nvenc usable.
+_NVENC = None
+
 
 # --------------------------------------------------------------------------- pure helpers
 
@@ -146,6 +149,10 @@ def finish_clip(
     (where the face detail lives), then let interpolation synthesize the in-between frames from
     already-cleaned anchors, so it never amplifies a restoration artifact across the inserted frames.
 
+    Memory: the source clip is decoded to a list (bounded -- one i2v shot), but the interpolated
+    frames are STREAMED into the encoder as they are produced (see `_finished_stream`), so an 8x pass
+    never holds its full 8N-frame expansion in RAM at once.
+
     Every clip is re-encoded to a uniform (codec, pix_fmt, fps) regardless of which passes ran, so
     the off-GPU `assemble` stream-copy concat stays valid across the whole render: a 1-frame or
     interpolation-skipped clip is encoded the SAME way as a fully interpolated one, so they never
@@ -159,7 +166,7 @@ def finish_clip(
 
     meta = iio.immeta(in_path, plugin="pyav")
     src_fps = int(round(meta.get("fps", 16))) or 16
-    frames = list(iio.imiter(in_path, plugin="pyav"))  # list of HxWx3 uint8 arrays
+    frames = list(iio.imiter(in_path, plugin="pyav"))  # source frames (bounded: one i2v clip)
     frames_in = len(frames)
 
     face_restored = False
@@ -171,35 +178,57 @@ def finish_clip(
         frames = _restore_clip(restorer, frames, cfg, progress_cb)
         face_restored = True
 
+    interp = None
+    passes = 0
     interpolated = False
     if cfg.interpolate and len(frames) > 1:
         interp = server.frame_interpolator()  # configured-but-unloadable -> raises, not a silent skip
         passes = interpolation_passes(cfg.factor)
-        for p in range(passes):
-            frames = _interpolate_once(interp, frames)
-            _tick(progress_cb, "interpolate", p + 1, passes)
         interpolated = passes > 0
 
     out_fps = output_fps(src_fps, cfg) if interpolated else src_fps
-    _encode_uniform(frames, out_path, out_fps)
+    frames_out = interpolated_frame_count(frames_in, cfg.factor) if interpolated else frames_in
+    _encode_uniform(_finished_stream(interp, frames, passes, progress_cb), out_path, out_fps)
     return FinishResult(
         shot_id=shot_id, path=out_path, src_fps=src_fps, out_fps=out_fps,
-        frames_in=frames_in, frames_out=len(frames),
+        frames_in=frames_in, frames_out=frames_out,
         interpolated=interpolated, face_restored=face_restored,
     )
 
 
 # --------------------------------------------------------------------------- GPU helpers (deferred)
 
-def _interpolate_once(interp, frames):
-    """One recursive 2x pass: insert an interpolated frame between every adjacent pair, so N frames
-    become 2N-1 (the last real frame is appended unduplicated)."""
-    out = []
-    for a, b in zip(frames, frames[1:]):
-        out.append(a)
-        out.append(interp.interpolate(a, b))  # the RIFE midpoint frame
-    out.append(frames[-1])
-    return out
+def _between(interp, a, b, depth):
+    """Recursively bisect the gap between two adjacent frames to `depth` levels, yielding the
+    interpolated frames strictly between a and b in playback order. `depth` == interpolation passes:
+    each level inserts the RIFE midpoint then recurses into both halves, so a gap expands to
+    2**depth - 1 frames -- identical to the old whole-list recursive doubling, done pair by pair."""
+    if depth <= 0:
+        return
+    mid = interp.interpolate(a, b)  # the RIFE midpoint frame
+    yield from _between(interp, a, mid, depth - 1)
+    yield mid
+    yield from _between(interp, mid, b, depth - 1)
+
+
+def _finished_stream(interp, frames, passes, progress_cb=None):
+    """Yield the finished frame sequence lazily: each source frame followed by the interpolated
+    frames that bridge it to the next (none when interpolation is off / `passes` == 0). Only a small
+    per-pair recursion window is live at once, so the 8x-expanded sequence is never all in RAM.
+    Interpolation progress is emitted per source pair as it is consumed by the encoder."""
+    total = max(0, len(frames) - 1)
+    prev = None
+    for i, cur in enumerate(frames):
+        if prev is None:
+            prev = cur
+            continue
+        yield prev
+        if interp is not None and passes > 0:
+            yield from _between(interp, prev, cur, passes)
+            _tick(progress_cb, "interpolate", i, total)
+        prev = cur
+    if prev is not None:
+        yield prev
 
 
 def _restore_clip(restorer, frames, cfg: FinishParams, progress_cb=None):
@@ -230,18 +259,89 @@ def _restore_frame(restorer, frame, cfg: FinishParams):
         return frame
 
 
-def _encode_uniform(frames, out_path: Path, fps: int) -> None:
-    """Encode `frames` to `out_path` at a fixed (codec, pix_fmt, fps) so every finished clip in a
-    render shares the same parameters and the downstream stream-copy concat in `assemble` stays
-    valid (no per-clip re-encode fallback). H.264 / yuv420p is the broadly playable baseline the
-    re-encode path in `assemble` also targets, so a finished clip and an assembler re-encode agree.
-    Deferred imports keep this module CPU-importable."""
-    import imageio.v3 as iio  # deferred
+def _probe_nvenc() -> bool:
+    """True only if h264_nvenc is BOTH listed by ffmpeg AND actually encodes a test clip on this
+    worker. An old NVENC API (e.g. an old ffmpeg build) can list the encoder yet fail at runtime on
+    some GPU/driver combos, so a real test encode is the only honest check. Any failure means "not
+    usable" and we fall back to libx264. Ported from the vivijure-upscale satellite."""
+    import subprocess  # deferred: keep this module CPU-importable
+    try:
+        enc = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
+                             capture_output=True, text=True, timeout=30)
+        if "h264_nvenc" not in (enc.stdout or ""):
+            return False
+        test = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-v", "error", "-y", "-f", "lavfi",
+             "-i", "testsrc=size=320x240:rate=10:duration=1",
+             "-c:v", "h264_nvenc", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=60)
+        return test.returncode == 0
+    except Exception:  # noqa: BLE001 -- any probe failure means "not usable", fall back honestly
+        return False
 
-    iio.imwrite(
-        str(out_path), list(frames), plugin="pyav", fps=max(1, int(fps)),
-        codec="libx264", out_pixel_format="yuv420p",
-    )
+
+def _nvenc_available() -> bool:
+    """Whether this worker should encode with h264_nvenc, probed once and cached for the warm worker."""
+    global _NVENC
+    if _NVENC is None:
+        _NVENC = _probe_nvenc()
+    return _NVENC
+
+
+def _encoder_argv(out_path: Path, width: int, height: int, fps: int, encoder: str) -> list[str]:
+    """ffmpeg argv to encode a rawvideo rgb24 stream on stdin to a uniform H.264 / yuv420p mp4.
+    `encoder` picks the GPU (h264_nvenc) or CPU (libx264) path; both target H.264 / yuv420p at the
+    same fps so finished clips stay concat-compatible. Pure (no I/O) so it is unit-testable."""
+    argv = ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
+            "-s", f"{int(width)}x{int(height)}", "-framerate", str(max(1, int(fps))), "-i", "-"]
+    if encoder == "h264_nvenc":
+        argv += ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "19"]
+    else:
+        argv += ["-c:v", "libx264", "-crf", "19", "-preset", "fast"]
+    argv += ["-pix_fmt", "yuv420p", str(out_path)]
+    return argv
+
+
+def _frame_bytes(frame):
+    """One HxWx3 uint8 rgb frame as contiguous raw bytes for the encoder pipe."""
+    import numpy as np  # deferred: keep this module CPU-importable
+    return np.ascontiguousarray(frame, dtype=np.uint8).tobytes()
+
+
+def _encode_uniform(frames, out_path: Path, fps: int) -> None:
+    """Encode an iterable of HxWx3 uint8 rgb frames to `out_path` at a fixed (codec, pix_fmt, fps)
+    through an ffmpeg rawvideo pipe, so every finished clip in a render shares the same parameters
+    and the downstream stream-copy concat in `assemble` stays valid (no per-clip re-encode fallback).
+
+    Uses h264_nvenc when this worker can actually encode with it (honest probe + libx264 fallback,
+    the upscale satellite's pattern), which takes the finish encode off the CPU of the GPU-billed
+    worker. H.264 / yuv420p is the broadly playable baseline `assemble`'s re-encode path also targets.
+
+    Encoder choice is per-worker; within one render every clip is finished on the same worker (or a
+    GPU-homogeneous endpoint), so all clips still share codec/pix_fmt/fps. In the pathological case of
+    a heterogeneous pool splitting encoders, `assemble`'s existing re-encode fallback keeps the result
+    correct -- it only costs the fast path, never correctness.
+
+    Frames are streamed to the pipe as produced, so an 8x-interpolated clip is never fully resident."""
+    import subprocess  # deferred: keep this module CPU-importable
+
+    frames = iter(frames)
+    try:
+        first = next(frames)
+    except StopIteration as e:
+        raise RuntimeError("finish encode: no frames to write") from e
+    height, width = first.shape[0], first.shape[1]
+    encoder = "h264_nvenc" if _nvenc_available() else "libx264"
+    proc = subprocess.Popen(_encoder_argv(out_path, width, height, fps, encoder), stdin=subprocess.PIPE)
+    try:
+        proc.stdin.write(_frame_bytes(first))
+        for fr in frames:
+            proc.stdin.write(_frame_bytes(fr))
+    finally:
+        proc.stdin.close()
+        rc = proc.wait()
+    if rc != 0:
+        raise RuntimeError(f"finish encode failed (encoder={encoder}, rc={rc})")
 
 
 def _tick(progress_cb, stage: str, done: int, total: int) -> None:
