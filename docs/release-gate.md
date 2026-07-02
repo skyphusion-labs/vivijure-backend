@@ -51,6 +51,75 @@ Two workflows, one chain:
 The verify control job itself runs on a stock `ubuntu-latest` runner -- it only drives the RunPod
 API; the GPU is the pod, not the runner.
 
+## The pod verify channel (the `@event` contract)
+
+The pod runs `python -m vivijure_backend.verify` (module `src/vivijure_backend/verify.py`) as its
+verify entrypoint. It is the **writer**; the harness (`deploy/runpod_verify.py`) is the **reader**.
+The module is the single source of the wire contract they share; this section reproduces it so the
+gate is auditable from the docs alone (ICD standard).
+
+**Armed only by `VJ_VERIFY`.** `main()` is a hard no-op (prints one `@event verify_skipped` line,
+exits 0) unless `VJ_VERIFY` is truthy, so the emitter has **zero effect on a normal render**. The
+harness sets the pod env when it spins the staging pod.
+
+**Channel = R2, run-scoped (option B, same as the render progress channel).** The worker already
+holds the R2 token, so this adds no infra and no secret, and the channel is durable/queryable after
+the pod is torn down. Two objects per run, keyed by run id under a dedicated `verify/` prefix so a
+probe never collides with a project render (`renders/...`):
+
+- `verify/<run_id>/summary.json`  (`application/json`) -- **the poll target.** Latest state:
+
+  ```json
+  {"schema": "vivijure-verify/1", "run_id": "<run_id>",
+   "status": "running" | "complete" | "error",
+   "started_ts": 0.0, "updated_ts": 0.0, "last_event": "complete",
+   "error": null,
+   "events": [{"seq": 0, "ts": 0.0, "event": "gpu_probe", "payload": {}}]}
+  ```
+
+- `verify/<run_id>/events.ndjson`  (`application/x-ndjson`) -- the same records, one JSON object per
+  line (a human/tail stream; the summary is the machine poll target).
+
+Both objects are **rewritten in full on every emit** (a verify run is a handful of events, one
+writer, one process -- so the emitter accumulates in memory and re-PUTs the tiny object; no S3
+append, no second writer to race). Last-writer-wins per event name matches `find_event`.
+
+**Redundant transport.** Every event is also printed to stdout as `@event <name> {json-payload}`,
+byte-identical to the wire `parse_events` reads, so the pod logs stay a fallback if R2 is briefly
+unreachable. R2 writes are best-effort (a channel hiccup must never abort the render before it can
+emit `error`); the stdout mirror is unconditional.
+
+**The events** (payloads are exactly the fields `evaluate()` reads -- one contract, no translation):
+
+| event | payload | meaning |
+|---|---|---|
+| `gpu_probe` | `torch_cuda, kernel_ok, vj_baked, weights_on_disk, vram_free_gb, vram_total_gb, device_name` | pod-only insight: torch sees the GPU, the cu128 kernel LOADS on this card, the baked sentinel + weights are on disk, VRAM headroom |
+| `first_frame` | `seconds` | time-to-first-frame (measured from the render's own progress channel) |
+| `sharpness` | `value, baseline` | the #118 method-ii quality gate: variance-of-Laplacian of the rendered first frame vs the runtime-quant baseline (`VJ_SHARPNESS_BASELINE`) |
+| `complete` | `output_key, clip_bytes` | render done, output object written |
+| `error` | `stage, message` | a probe/render failure; also flips `summary.status` to `error` |
+
+**Harness integration (no prose parsing).** The live path polls `summary.json` until `status` is
+terminal, then feeds `verify.events_from_summary(raw)` -> `list[(name, payload)]` straight into the
+existing `evaluate(events, cfg)`. Nothing scrapes English text.
+
+**Pod env the harness sets:**
+
+| var | meaning |
+|---|---|
+| `VJ_VERIFY` | arm the channel (`1`/`true`/`yes`/`on`) |
+| `VJ_VERIFY_RUN_ID` | the run id (the harness assigns it, so it knows the key to poll -- required when armed) |
+| `VJ_VERIFY_KEY_PREFIX` | key prefix, default `verify` |
+| `VJ_VERIFY_BUNDLE_KEY` | the draft project bundle the harness staged in R2 for the verify render |
+| `VJ_VERIFY_PROJECT` | project name for the job/keys, default `verify` |
+| `VJ_SHARPNESS_BASELINE` | the sharpness reference the ratio gate compares against |
+
+The emitter, the pure probe/metric helpers, and the `run_verify` orchestration are unit-tested on CPU
+(`tests/test_verify.py`) with a fake store and a fake render -- including a cross-module test that a
+`run_verify` channel read back through `events_from_summary` passes `runpod_verify.evaluate`. The GPU
+draft render (`_pod_draft_render`) is a deferred, pod-only seam whose live proof is the authorized
+pod run, exactly like the harness's own `RunpodMcpPodClient` seam.
+
 ## Spend gating (how GPU $ is controlled)
 
 - **The trigger IS the spend gate.** `runpod-verify.yml` fires GPU only on a deliberate

@@ -92,6 +92,25 @@ def progress_snapshot_key(project: str, job_id: str) -> str:
     return f"renders/{_slug(project)}/progress/{_slug(job_id)}.json"
 
 
+def _verify_run(run_id: str) -> str:
+    """A verify run id reduced to an R2-safe path segment (same discipline as _slug): a verify
+    run must never smuggle a slash or whitespace into its key and scatter its channel."""
+    return "_".join(str(run_id).strip().split()).replace("/", "_") or "unkeyed"
+
+
+def verify_events_key(run_id: str, *, prefix: str = "verify") -> str:
+    """The run-scoped NDJSON event stream a pod-side verify run writes (one JSON record per line).
+    Run-scoped, not project-scoped: a verify run is a build-gate probe, not a project render, so it
+    keys off its own run id under a dedicated `verify/` prefix and never collides with renders/."""
+    return f"{_verify_run(prefix)}/{_verify_run(run_id)}/events.ndjson"
+
+
+def verify_summary_key(run_id: str, *, prefix: str = "verify") -> str:
+    """The run-scoped latest-state JSON snapshot for a verify run -- the cheap object the release
+    gate polls until status is terminal, then reads the events array from. Same key rationale."""
+    return f"{_verify_run(prefix)}/{_verify_run(run_id)}/summary.json"
+
+
 def join(*parts: str) -> str:
     """POSIX-join key parts (R2 keys are always forward-slash, regardless of worker OS)."""
     return posixpath.join(*parts)
