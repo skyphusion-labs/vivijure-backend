@@ -461,3 +461,50 @@ def test_audio_key_outside_the_key_map_is_rejected(tmp_path):
         run_job(_job(audio_key="projects/neon/state.tar.gz",
                      render_overrides={"finish_offloaded": True}),
                 pipeline=FakePipeline(), store=store, workdir=tmp_path / "w")
+
+
+# ------------------------------------------------------- F17: terminal snapshots never hit RunPod
+
+def test_runpod_hook_never_mirrors_terminal_snapshots(monkeypatch):
+    """F17: the SDK's progress_update posts {"status": "IN_PROGRESS", "output": snapshot} from a
+    fresh daemon thread, racing the SDK's own terminal result POST on the same endpoint -- a
+    mirrored error/complete snapshot can flip a FAILED/COMPLETED job back to IN_PROGRESS forever,
+    holding the billed worker (observed: 344s on a 155ms config-error run). Terminal snapshots
+    must never go through the hook; mid-flight ones still do."""
+    import sys
+    import types
+
+    from vivijure_backend.harness.handler import _runpod_progress_hook
+
+    sent = []
+    fake = types.ModuleType("runpod")
+    fake.serverless = types.SimpleNamespace(progress_update=lambda job, snap: sent.append(snap))
+    monkeypatch.setitem(sys.modules, "runpod", fake)
+
+    hook = _runpod_progress_hook({"id": "job-1"})
+    hook({"status": "running", "counts": {"train_done": 1}})                       # mirrored
+    hook({"status": "error", "error": {"stage": "config", "message": "boom"}})     # dropped
+    hook({"status": "complete", "counts": {}})                                     # dropped
+    assert [s["status"] for s in sent] == ["running"]
+
+
+def test_emitter_error_path_sends_nothing_through_the_runpod_hook(monkeypatch):
+    """The exact F17 shape end to end: ProgressEmitter.error() fans out the terminal snapshot to
+    R2 + stdout but the RunPod hook drops it, so the handler's re-raise is what sets the job's
+    terminal status (unclobbered)."""
+    import sys
+    import types
+
+    from vivijure_backend.harness.handler import _runpod_progress_hook
+    from vivijure_backend.harness.progress import ProgressEmitter
+
+    sent = []
+    fake = types.ModuleType("runpod")
+    fake.serverless = types.SimpleNamespace(progress_update=lambda job, snap: sent.append(snap))
+    monkeypatch.setitem(sys.modules, "runpod", fake)
+
+    emitter = ProgressEmitter(None, "untitled", "job-1",
+                              on_progress=_runpod_progress_hook({"id": "job-1"}), log=lambda _s: None)
+    emitter.emit("started")
+    emitter.error("config", "R2 config incomplete; missing env: R2_ACCESS_KEY_ID")
+    assert [s["status"] for s in sent] == ["running"]

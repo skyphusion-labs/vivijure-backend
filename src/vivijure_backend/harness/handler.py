@@ -583,8 +583,19 @@ def handler(job: dict) -> dict:
 def _runpod_progress_hook(job: dict):
     """Option A: mirror each snapshot into RunPod's status `progress` field, best-effort. The
     `runpod` import is deferred so the harness stays CPU-importable; a missing SDK or a failed
-    update is swallowed (the R2 channel is the source of truth)."""
+    update is swallowed (the R2 channel is the source of truth).
+
+    A TERMINAL snapshot (status error/complete) is NEVER mirrored: the SDK's progress_update
+    posts {"status": "IN_PROGRESS", "output": snapshot} from a fresh daemon thread (new event
+    loop + new TLS session), which races the SDK's own terminal result POST on the same endpoint
+    and can OVERWRITE a FAILED/COMPLETED verdict back to IN_PROGRESS. Observed live (F17): a
+    155ms config-error job read IN_PROGRESS forever with the error snapshot in `output`, holding
+    the billed worker 344s until manual cancel, while the studio's poll translated it to "job
+    not found". The terminal record still reaches R2 + stdout; RunPod's terminal status comes
+    from the handler's own return/raise, which must stand unclobbered."""
     def hook(snapshot: dict) -> None:
+        if snapshot.get("status") in ("error", "complete"):
+            return
         try:
             import runpod
             runpod.serverless.progress_update(job, snapshot)
