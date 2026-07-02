@@ -34,7 +34,14 @@ FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 # build ARG (cu128) so the exact patch can be bumped without editing the file body.
 ARG VJ_PYTHON_VERSION=3.11
 ARG VJ_TORCH_INDEX=https://download.pytorch.org/whl/cu128
-ARG VJ_TORCH_SPEC="torch==2.7.* torchvision==0.22.* torchaudio==2.7.*"
+# EXACT-PINNED (was the wildcard `torch==2.7.* torchvision==0.22.* torchaudio==2.7.*`): the
+# wildcard let a fresh bake pull a newer 2.7.x off the cu128 index, so two bakes 2h apart
+# baked different torch wheels -- and a torch-import ABI/CUDA break crashes the worker before
+# it can emit anything (cost us the :0.4.1 verify gate: empty channel + restart loop). This is
+# the validated set (torch 2.7.1+cu128, the version requirements.txt records as pod-validated);
+# the tested-with-pin doctrine from the local doors' ML deps, now applied to the last unpinned
+# ML dep in the constellation. Bump deliberately + re-validate on the pod, never by drift.
+ARG VJ_TORCH_SPEC="torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/opt/conda/bin:$PATH \
