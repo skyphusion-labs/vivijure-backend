@@ -647,3 +647,39 @@ def test_run_verify_sleeps_between_polls():
     rv.run_verify(client, rv.VerifyConfig(image="ghcr.io/x:1"), clock=_clock(),
                   poll_sleep=slept.append, event_reader=reader)
     assert len(slept) >= 2                                 # slept through the two empty polls
+
+
+def test_run_verify_records_pod_state_log_for_pull_visibility():
+    # A client whose pod reports PROVISIONING then RUNNING (with runtime) -> the report captures the
+    # transition so image-pull/boot time is measurable, and pod_ever_running is True.
+    class _StatefulClient(FakePodClient):
+        def __init__(self, log_lines):
+            super().__init__(log_lines)
+            self._n = 0
+
+        def get_pod(self, pod_id):
+            self._n += 1
+            if self._n <= 1:
+                return {"id": pod_id, "desiredStatus": "PROVISIONING"}
+            return {"id": pod_id, "desiredStatus": "RUNNING", "runtime": {"uptimeInSeconds": 3}}
+
+    # Reader stays empty for 2 polls (pod still booting), then completes.
+    passing = rv.parse_events(_pass_log())
+    seq = [([], None), ([], None), (passing, "complete")]
+    calls = {"n": 0}
+
+    def reader():
+        i = min(calls["n"], len(seq) - 1)
+        calls["n"] += 1
+        return seq[i]
+
+    client = _StatefulClient(_pass_log())
+    report = rv.run_verify(client, rv.VerifyConfig(image="ghcr.io/x:1"), clock=_clock(),
+                           event_reader=reader)
+    assert report["pod_ever_running"] is True
+    statuses = [s["status"] for s in report["pod_state_log"]]
+    assert "PROVISIONING" in statuses and "RUNNING" in statuses   # the pull->run transition is recorded
+
+
+def test_ttl_default_has_cold_pull_headroom():
+    assert rv.VerifyConfig(image="ghcr.io/x:1").ttl_seconds >= 3000   # room for an ~87GB cold bake pull

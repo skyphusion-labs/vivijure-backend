@@ -83,7 +83,8 @@ class VerifyConfig:
     image: str                                  # the freshly built image ref (ghcr.io/...:tag)
     tier: str = "i2v"                            # GPU_TIERS key; i2v => the 3-arch pool (sm_90/100/120)
     registry_auth_id: str | None = None          # containerRegistryAuthId (MCP-managed, no dashboard)
-    ttl_seconds: int = 1800                      # HARD wall-clock auto-stop, regardless of progress
+    ttl_seconds: int = 3000                      # HARD wall-clock auto-stop (headroom for a cold
+    #                                              ~87GB bake pull + first draft render); regardless of progress
     max_first_frame_seconds: float = 300.0       # time-to-first-frame bound
     max_baked_staging_seconds: float = 30.0      # baked-sentinel HIT: staging must be ~0
     min_sharpness_ratio: float = 0.97            # quality parity vs runtime-quant baseline (#118 gate)
@@ -721,6 +722,26 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
 
     reader = event_reader or _log_reader
 
+    # Pod-state sampling: get_pod on each poll, record only state CHANGES with elapsed time. This makes
+    # the image-pull / boot cost measurable in EVERY report (an all-empty verify channel with the pod
+    # never RUNNING == the cold pull ate the TTL; RUNNING but empty == the entrypoint/emitter itself).
+    pod_state_log: list[dict[str, Any]] = []
+    _last_state = [None]
+
+    def _sample_state() -> None:
+        getter = getattr(client, "get_pod", None)
+        if not callable(getter):
+            return
+        try:
+            p = getter(pod_id) or {}
+        except Exception:  # noqa: BLE001 -- a state probe must never fault the run
+            return
+        st = (p.get("desiredStatus") or p.get("status") or "?", bool(p.get("runtime")))
+        if st != _last_state[0] and len(pod_state_log) < 60:
+            pod_state_log.append({"elapsed_s": round(clock() - started, 1),
+                                  "status": st[0], "running": st[1]})
+            _last_state[0] = st
+
     result: VerifyResult | None = None
     timed_out = False
     try:
@@ -728,6 +749,7 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
             if clock() - started >= cfg.ttl_seconds:
                 timed_out = True
                 break
+            _sample_state()
             events, terminal = reader()
             if terminal is not None:                 # "complete" OR "error" -- a terminal channel state
                 result = evaluator(events, cfg)
@@ -748,6 +770,8 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
         elapsed = clock() - started
         report["elapsed_seconds"] = round(elapsed, 1)
         report["cost_estimate_usd"] = cost_estimate_usd(gpu_id, elapsed)
+        report["pod_state_log"] = pod_state_log
+        report["pod_ever_running"] = any(x.get("running") for x in pod_state_log)
 
     report["checks"] = result.checks
     report["metrics"] = result.metrics
