@@ -136,13 +136,24 @@ class PodClient(Protocol):
     def delete_pod(self, pod_id: str) -> dict[str, Any]: ...
 
 
+def _clean_key(raw):
+    """Normalise a RunPod API key read from an env/secret: strip surrounding whitespace, then a SINGLE
+    matched pair of surrounding quotes. A ``KEY="rpa_..."`` .env line landed through cut/tr keeps the
+    quotes, and a file->secret store can keep a trailing newline; both make RunPod reject an otherwise
+    valid key. Idempotent; never logs the value."""
+    key = (raw or "").strip()
+    if len(key) >= 2 and key[0] == key[-1] and key[0] in ("'", '"'):
+        key = key[1:-1].strip()
+    return key
+
+
 def _import_runpod(api_key):
     """Import the `runpod` SDK lazily and set the API key. Lazy so importing this module (and every unit
     test) never needs the SDK installed or a key present -- only a real `--live` run does. The key is
     read from RUNPOD_API_KEY (never hardcoded, never logged)."""
     import os
     import runpod  # type: ignore  # noqa: I001 -- optional dep, only for the live path
-    key = api_key or os.environ.get("RUNPOD_API_KEY")
+    key = _clean_key(api_key or os.environ.get("RUNPOD_API_KEY"))
     if not key:
         raise RuntimeError("RUNPOD_API_KEY is not set; the live RunPod client needs it. Pass it via env "
                            "or a CI secret -- never hardcode a key.")
@@ -806,7 +817,7 @@ def promote_image(image: str, *, endpoint_id: str = PROD_ENDPOINT_ID, api_key: s
     This is the ONLY path an image reaches prod (docs/release-gate.md doctrine); the caller gates it
     behind an explicit ``--promote`` go, so a bare verify run never touches prod. ``transport`` is
     injected in tests (no network). The RunPod API key is read from RUNPOD_API_KEY and NEVER logged."""
-    key = api_key or os.environ.get("RUNPOD_API_KEY")
+    key = _clean_key(api_key or os.environ.get("RUNPOD_API_KEY"))
     if not key:
         raise RuntimeError("promote needs RUNPOD_API_KEY (never hardcode a key)")
     if transport is None:
@@ -909,7 +920,31 @@ def main(argv: list[str] | None = None) -> int:
                          "ends at ZERO pods, never a stopped pad still billing disk")
     ap.add_argument("--report-file", default=None,
                     help="also write the JSON run report to this path (for a workflow evidence artifact)")
+    ap.add_argument("--key-shape", action="store_true",
+                    help="print a NO-LEAK shape diagnostic of RUNPOD_API_KEY (regex match, length, "
+                         "quote/whitespace edges) and exit; never echoes the value")
     args = ap.parse_args(argv)
+
+    if args.key_shape:
+        import re as _re
+        raw = os.environ.get("RUNPOD_API_KEY", "")
+        cleaned = _clean_key(raw)
+        rpa = _re.compile(r"^rpa_[A-Za-z0-9]+$")
+
+        def yn(b):
+            return "yes" if b else "no"
+
+        print("RUNPOD_API_KEY shape (NO value echoed):")
+        print("  raw_len=%d cleaned_len=%d" % (len(raw), len(cleaned)))
+        print("  raw_matches_rpa=%s cleaned_matches_rpa=%s"
+              % (yn(bool(rpa.match(raw))), yn(bool(rpa.match(cleaned)))))
+        print("  starts_with_quote=%s ends_with_quote=%s"
+              % (yn(raw[:1] in ("'", '"')), yn(raw[-1:] in ("'", '"'))))
+        print("  has_leading_ws=%s has_trailing_ws=%s"
+              % (yn(raw[:1].isspace()), yn(raw[-1:].isspace())))
+        print("  read: cleaned_matches_rpa=no -> mangled store (re-land the secret); "
+              "cleaned_matches_rpa=yes but RunPod still 401s -> well-formed but wrong/revoked (re-mint)")
+        return 0
 
     if args.reap_pod:
         def _summary(msg: str) -> None:
