@@ -252,6 +252,9 @@ class RenderRequest:
     # need) then SHORT-CIRCUITS before any i2v/finish GPU-seconds -- identical motion-skip to the
     # `preview` action, but keeping the `render` action intent. Honored in orchestrator.plan().
     # A caller asking for a cheap draft keyframe pass must never silently pay for a full render.
+    # DEPRECATED, kept for compat: the control plane stopped sending this flag in studio v0.160.0
+    # and sends action:"preview" for the cheap keyframe pass instead (vivijure runpod-submit.ts).
+    # Direct/legacy callers still work; do not build new callers on it. See docs/contract.md.
     keyframes_only: bool = False
     # Optional audio bed: an R2 key the control plane staged (e.g. audio/<uuid>.m4a). The harness
     # fetches it and muxes it under the final video; None leaves the render silent.
