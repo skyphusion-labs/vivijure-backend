@@ -68,6 +68,11 @@ SCHEMA = "vivijure-verify/1"
 # The base events a verify run emits, in causal order. The harness polls for `complete` (or `error`).
 BASE_EVENTS: tuple[str, ...] = ("gpu_probe", "first_frame", "sharpness", "complete")
 
+# The R2 store env names the emitter needs (mirrors harness.r2.R2Config.from_env). Named here so
+# a fatal-precondition `verify_fatal` can report the MISSING ones as a structured list, not a
+# prose message the harness would have to parse.
+R2_ENV_NAMES: tuple[str, ...] = ("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET")
+
 # The gpu_probe payload keys, in one place so the emitter and the harness never drift.
 GPU_PROBE_KEYS: tuple[str, ...] = (
     "torch_cuda", "kernel_ok", "vj_baked", "weights_on_disk",
@@ -274,6 +279,17 @@ class VerifyEmitter:
         self._summary["error"] = {"stage": str(stage), "message": str(message)[:500]}
         return self.emit("error", stage=str(stage), message=str(message)[:500])
 
+    def fatal(self, stage: str, missing: list[str], message: object) -> dict:
+        """A FATAL PRECONDITION -- the verify entrypoint could not even start (missing run id, an
+        incomplete/misnamed R2 config). Distinct from `error` (a stage that started and failed): it
+        carries `missing`, the structured list of absent env names, so the harness/log diagnoses the
+        cause without prose-parsing. Sets terminal status like `error`; on a store-less emitter it
+        still mirrors to stdout, which is the whole point (the failure can never be silent)."""
+        self._summary["status"] = "error"
+        self._summary["error"] = {"stage": str(stage), "message": str(message)[:500]}
+        return self.emit("verify_fatal", stage=str(stage), missing=list(missing),
+                         message=str(message)[:500])
+
     # --- transports (best-effort) ---
 
     def _human(self, rec: dict) -> None:
@@ -448,7 +464,7 @@ def main(argv: list[str] | None = None, env: dict | None = None,
     the real R2 store and `_pod_draft_render`.
 
     NO SILENT FAILURE: every fatal precondition (missing VJ_VERIFY_RUN_ID, an incomplete/misnamed R2
-    config) emits a structured terminal `error` event to stdout BEFORE returning non-zero, so a
+    config) emits a structured terminal `verify_fatal {stage, missing}` event to stdout BEFORE returning non-zero, so a
     launch-side env mistake can never present as a 30-minute empty prefix with nothing to read."""
     e = env if env is not None else os.environ
     if not is_enabled(e):
@@ -463,8 +479,8 @@ def main(argv: list[str] | None = None, env: dict | None = None,
         # empty prefix (the exact 30-min-of-nothing failure a stubbed read_logs turns invisible). Emit
         # a structured terminal `error` through a store-less emitter so stdout -- the redundant
         # transport -- always carries the reason, then exit.
-        VerifyEmitter(None, "unkeyed", prefix=prefix).error(
-            "config", "VJ_VERIFY_RUN_ID is required when VJ_VERIFY is set")
+        VerifyEmitter(None, "unkeyed", prefix=prefix).fatal(
+            "config", ["VJ_VERIFY_RUN_ID"], "VJ_VERIFY_RUN_ID is required when VJ_VERIFY is set")
         return 2
 
     baseline = baseline_from(e)
@@ -475,9 +491,11 @@ def main(argv: list[str] | None = None, env: dict | None = None,
             store = R2(R2Config.from_env(e))
         except Exception as exc:  # noqa: BLE001 -- a bad/misnamed R2 config must fail LOUD, not silent
             # R2 itself is the failure, so we cannot record it TO R2 (the same bind the handler has);
-            # emit the structured `error` to stdout through a store-less emitter so a cred-NAME mismatch
-            # (the F17 class: creds passed as R2_S3_*/AWS_* instead of R2_*) is never an invisible hang.
-            VerifyEmitter(None, run_id, prefix=prefix).error("r2_config", exc)
+            # emit `verify_fatal` with the MISSING env names to stdout through a store-less emitter so a
+            # cred-NAME mismatch (the F17 class: creds passed as R2_S3_*/AWS_* instead of R2_*) is never
+            # an invisible hang -- the harness reads the missing list, no prose-parsing.
+            missing = [k for k in R2_ENV_NAMES if not e.get(k)]
+            VerifyEmitter(None, run_id, prefix=prefix).fatal("r2_config", missing, exc)
             return 1
     if render is None:
         render = lambda em: _pod_draft_render(em, e)  # noqa: E731 -- bind the env into the seam
