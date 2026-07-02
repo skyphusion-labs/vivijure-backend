@@ -704,6 +704,7 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
         # (A fixed cap like 600 x 5s = 3000s would cut a longer-TTL run short before the wall-clock.)
         max_polls = int(cfg.ttl_seconds / poll_step) + 5 if poll_step > 0 else 600
     report: dict[str, Any] = {"image": cfg.image, "tier": cfg.tier}
+    report["pod_env_keys"] = sorted(cfg.env.keys())  # NAMES only (never values): what the pod was sent
 
     gpu_id = pick_gpu_type(client.list_gpu_types(), cfg.tier)
     if gpu_id is None:
@@ -993,6 +994,13 @@ def main(argv: list[str] | None = None) -> int:
               % (yn(raw[:1].isspace()), yn(raw[-1:].isspace())))
         print("  read: cleaned_matches_rpa=no -> mangled store (re-land the secret); "
               "cleaned_matches_rpa=yes but RunPod still 401s -> well-formed but wrong/revoked (re-mint)")
+        for rk in ("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET"):
+            rvv = os.environ.get(rk, "")
+            rcc = _clean_key(rvv)
+            print("  %s: present=%s nonempty_after_clean=%s starts_quote=%s ends_quote=%s ws_edge=%s"
+                  % (rk, yn(rk in os.environ), yn(bool(rcc)),
+                     yn(rvv[:1] in ("'", '"')), yn(rvv[-1:] in ("'", '"')),
+                     yn(bool(rvv) and (rvv[:1].isspace() or rvv[-1:].isspace()))))
         return 0
 
     if args.reap_pod:
@@ -1031,6 +1039,10 @@ def main(argv: list[str] | None = None) -> int:
             "VJ_VERIFY_PROJECT": args.project,
             "VJ_SHARPNESS_BASELINE": repr(args.sharpness_baseline),
         })
+        # Normalise EVERY injected value: strip whitespace + a matched surrounding quote pair.
+        # A quote-wrapped secret (the RUNPOD_API_KEY / R2_* landing class) passes presence checks
+        # but auth-fails on use; cleaning here kills that class for all current + future vars.
+        pod_env = {k: _clean_key(val) for k, val in pod_env.items()}
         cfg = replace(cfg, env=pod_env)
         client: PodClient = RunpodSdkPodClient(  # type: ignore[assignment]
             data_center_id=args.data_center_id, container_disk_gb=args.container_disk_gb)
