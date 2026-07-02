@@ -179,9 +179,10 @@ Events (discrete stages):
 | `i2v_step` | `shot`, `step`, `total` | Per-step i2v progress (~30s/step on final; the live "slow vs hung" signal). |
 | `finish_step` | `shot`, `stage`, `done`, `total` | Per-pass finishing progress. |
 
-A few situational markers also appear (e.g. `audio_missing` when an `audio_key` cannot be
-fetched and the video ships silent, `tier_mismatch` when the running card does not match the
-planned i2v tier). The snapshot carries `status` (`running` / `complete` / `error`), per-event
+A few situational markers also appear (e.g. `audio_missing` when a requested `audio_key`
+cannot be fetched and the job explicitly opted into `render_overrides.audio_optional` -- without
+that opt-in the render FAILS instead -- and `tier_mismatch` when the running card does not match
+the planned i2v tier). The snapshot carries `status` (`running` / `complete` / `error`), per-event
 `counts`, the `last_event`, and any `error`; `progress.read_snapshot(store, project, job_id)`
 reads it back for a status route or a poll script.
 
@@ -210,7 +211,9 @@ failure is genuinely non-fatal.
 
 **Best-effort (the render continues):**
 - Any progress write, stdout line, or RunPod hook call.
-- A missing or unfetchable `audio_key` (emits `audio_missing`; the video ships silent).
+- An unfetchable `audio_key` ONLY when the job set `render_overrides.audio_optional: true`
+  (emits `audio_missing`, surfaces `audio_missing: true` in the result, ships silent). Without
+  the opt-in this is a HARD failure, not best-effort.
 - Prior-state restore failure (falls back to a fresh render; safer to redundantly re-render
   than to silently skip work).
 

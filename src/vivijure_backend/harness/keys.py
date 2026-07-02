@@ -44,6 +44,42 @@ def clip_key(project: str, shot_id: str) -> str:
     return f"renders/{_slug(project)}/clips/{_slug(shot_id)}.mp4"
 
 
+def i2v_clip_key(project: str, shot_id: str) -> str:
+    """The standalone i2v_clip job's output clip (run_i2v_clip_job). Same _slug as every other
+    key so one project never scatters across two slug spellings of its own name."""
+    return f"renders/{_slug(project)}/clips/{_slug(shot_id)}_i2v.mp4"
+
+
+def finished_clip_key(project: str, shot_id: str) -> str:
+    """The standalone finish_clip job's output clip (run_finish_job). Same _slug rationale."""
+    return f"renders/{_slug(project)}/clips/{_slug(shot_id)}_finished.mp4"
+
+
+def check_job_key(key: str, *, prefixes: tuple[str, ...], what: str) -> str:
+    """Validate a JOB-SUPPLIED R2 key before any store I/O.
+
+    The job names WHERE the worker reads (bundle_key, audio_key, pretrained_loras, the standalone
+    jobs' clip_key/keyframe_key); this pins that choice to the render key map, so a malformed or
+    mis-scoped key fails loud BEFORE any transfer instead of pointing store I/O at an arbitrary
+    bucket path. Pure string checks, raises ValueError naming the purpose (the caller wraps it in
+    its own error type). Requirements: non-empty, no surrounding whitespace, relative (no leading
+    /), forward slashes only, no `..` segment, and under one of the allowed prefixes."""
+    k = str(key or "")
+    ok = (
+        bool(k)
+        and k == k.strip()
+        and not k.startswith("/")
+        and "\\" not in k
+        and ".." not in k.split("/")
+        and k.startswith(prefixes)
+    )
+    if not ok:
+        raise ValueError(
+            f"{what}: R2 key {k!r} must be a plain relative key under "
+            f"{' or '.join(prefixes)} (see the render key map)")
+    return k
+
+
 def progress_log_key(project: str, job_id: str) -> str:
     """The append-only NDJSON event stream for one render, keyed by project AND job id so
     concurrent or cancelled runs of the same project never clobber each other."""

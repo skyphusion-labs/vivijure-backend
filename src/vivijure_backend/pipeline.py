@@ -241,8 +241,8 @@ class GpuPipeline:
                     pass  # hash write is best-effort; a missing file = old-state reuse behavior
                 self.progress.emit("keyframe_done", shot=sp.shot_id)
             else:
-                kf_path = self._resolve_keyframe(sp, scene, bundle, workdir)
-            if sp.needs_i2v and kf_path is not None:
+                kf_path = self._resolve_keyframe(sp, scene, bundle, workdir, required=sp.needs_i2v)
+            if sp.needs_i2v:
                 clip = self._animate(
                     scene, kf_path, build_prompt(scene, cast, storyboard),
                     workdir / "clips" / f"{sp.shot_id}.mp4")
@@ -263,18 +263,35 @@ class GpuPipeline:
             out.clips = finished
         return out
 
-    def _resolve_keyframe(self, sp, scene, bundle: Bundle, workdir: Path) -> Path | None:
+    def _resolve_keyframe(self, sp, scene, bundle: Bundle, workdir: Path,
+                          *, required: bool = True) -> Path | None:
         """The keyframe to animate when the plan did not (re)generate it: the authored
         `start_image` for an INJECT shot, or a keyframe a prior pass already left on disk for a
-        REUSE shot. Returns None if nothing is staged, so the shot is skipped rather than crashing
-        the whole render."""
+        REUSE shot.
+
+        HONEST FAILURE (#245/#249 applies to this backend too): when the shot NEEDS its keyframe
+        (`required`, i.e. the plan animates it) and nothing can be staged, that is a HARD per-shot
+        error naming the shot and the reason -- silently skipping it used to ship a film MISSING a
+        shot under a success status, the exact dishonest-degrade class the studio refuses. A shot
+        the plan does not animate (required=False) may resolve to None harmlessly."""
         if sp.keyframe_mode is KeyframeMode.INJECT and scene.start_image:
             cand = bundle.root / scene.start_image
-            return cand if cand.is_file() else None
+            if cand.is_file():
+                return cand
+            if required:
+                raise HarnessError(
+                    f"shot {sp.shot_id}: authored start_image {scene.start_image!r} is not in "
+                    "the bundle; refusing to render the film without this shot")
+            return None
         for cand in (
             workdir / "keyframes" / f"{sp.shot_id}.png",
             bundle.root / "keyframes" / f"{sp.shot_id}.png",
         ):
             if cand.is_file():
                 return cand
+        if required:
+            raise HarnessError(
+                f"shot {sp.shot_id}: no keyframe staged for {sp.keyframe_mode.value} mode "
+                "(not in the workdir or the bundle keyframes/); refusing to render the film "
+                "without this shot")
         return None

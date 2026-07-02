@@ -144,3 +144,23 @@ def test_keyframe_fetch_failure_raises_harness_error(tmp_path, fake_engine):
             {"action": "i2v_clip", "project": "p", "shot_id": "s", "prompt": "x",
              "config": {"quality": "draft"}},
             store=BrokenStore(), workdir=tmp_path)
+
+
+def test_job_supplied_keyframe_key_outside_renders_is_rejected(tmp_path, fake_engine):
+    # A job-supplied keyframe_key is pinned to the render key map before any store I/O.
+    store = KFStore()
+    job = {"action": "i2v_clip", "project": "p", "shot_id": "s", "prompt": "push in",
+           "keyframe_key": "loras/p/A/adapter.safetensors", "config": {"quality": "draft"}}
+    with pytest.raises(HarnessError, match="keyframe_key"):
+        h.run_i2v_clip_job(job, store=store, workdir=tmp_path)
+    assert store.gets == []                            # rejected BEFORE any fetch
+
+
+def test_finish_clip_key_outside_renders_is_rejected(tmp_path):
+    # Same pin on the standalone finish job's input clip key.
+    store = KFStore()
+    job = {"action": "finish_clip", "project": "p", "shot_id": "s",
+           "clip_key": "bundles/p/b.tar.gz", "config": {}}
+    with pytest.raises(HarnessError, match="clip_key"):
+        h.run_finish_job(job, store=store, workdir=tmp_path)
+    assert store.gets == []                            # rejected BEFORE any fetch

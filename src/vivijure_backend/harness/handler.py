@@ -89,6 +89,7 @@ def run_job(
         # instead of a botocore ParamValidationError ("Invalid length for parameter Key") deep in R2.
         if not req.bundle_key:
             raise HarnessError(f"{req.action}: bundle_key is required (no project bundle to fetch)")
+        _job_key(req.bundle_key, prefixes=("bundles/",), what=f"{req.action}: bundle_key")
         tar = store.get_file(req.bundle_key, workdir / "bundle.tar.gz")
         bundle = Bundle.extract(Path(tar), workdir / "project")
 
@@ -144,6 +145,15 @@ def _inject_progress(pipeline, progress) -> None:
             pass
 
 
+def _job_key(key: str, *, prefixes: tuple[str, ...], what: str) -> str:
+    """keys.check_job_key surfaced as a HarnessError: a mis-scoped job key is the same malformed-
+    input class as a missing bundle_key, and it must fail before any store I/O."""
+    try:
+        return keys.check_job_key(key, prefixes=prefixes, what=what)
+    except ValueError as e:
+        raise HarnessError(str(e)) from None
+
+
 def _stage_pretrained_loras(req: RenderRequest, store, workdir: Path, progress) -> dict[str, str]:
     """Download each reused-LoRA R2 key to a local file so the GPU pipeline can load it without
     touching R2. Returns slot -> local path.
@@ -158,6 +168,7 @@ def _stage_pretrained_loras(req: RenderRequest, store, workdir: Path, progress) 
         if Path(ref).is_file():
             staged[slot] = str(ref)
             continue
+        _job_key(ref, prefixes=("loras/",), what=f"pretrained LoRA for slot {slot}")
         dest = workdir / "pretrained" / slot / (Path(ref).name or "pytorch_lora_weights.safetensors")
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -235,17 +246,29 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
     ordered = order_for_storyboard(
         [ClipInput(shot_id=s, path=Path(p)) for s, p in outputs.clips], bundle.storyboard)
 
-    # Audio bed: the pipeline's own track if it made one, else the job's audio_key fetched from the
-    # store. Best-effort -- a missing/failed audio fetch records a marker and ships the video silent
-    # rather than failing the whole render.
+    # Audio bed: the pipeline's own track if it made one, else the job's audio_key fetched from
+    # the store. A REQUESTED bed that cannot be fetched FAILS the render: shipping a silent film
+    # under a success status is the dishonest-degrade class (#245/#249) this backend refuses.
+    # render_overrides.audio_optional=true is the EXPLICIT opt-in to soft-degrade instead; that
+    # path ships the video silent and surfaces audio_missing in BOTH the event stream and the
+    # top-level result (a degrade is never silent).
     audio_path = outputs.audio
     if audio_path is None and req.audio_key:
+        # staged beds live under audio/ (the studio's upload route); pipeline-produced beds
+        # (music/dialogue/master chains) live under renders/ -- both are inside the key map.
+        _job_key(req.audio_key, prefixes=("audio/", "renders/"), what="audio_key")
         try:
             audio_dest = workdir / ("audio" + (Path(req.audio_key).suffix or ".m4a"))
             store.get_file(req.audio_key, audio_dest)
             audio_path = audio_dest
-        except Exception as e:  # noqa: BLE001 -- audio is optional; never fail the render on it
+        except Exception as e:  # noqa: BLE001 -- classified below: hard error or explicit opt-in degrade
+            if not bool(req.overrides.get("audio_optional")):
+                raise HarnessError(
+                    f"could not fetch the requested audio bed {req.audio_key!r}: {e} "
+                    "(a requested bed failing is a render failure; set "
+                    "render_overrides.audio_optional=true to ship silent instead)") from e
             progress.emit("audio_missing", key=req.audio_key, error=str(e)[:200])
+            result.audio_missing = True
 
     offloaded = bool(req.overrides.get("finish_offloaded"))
     if offloaded:
@@ -361,6 +384,7 @@ def run_finish_job(
 
     if not clip_key_in:
         raise HarnessError("finish_clip: clip_key is required")
+    _job_key(clip_key_in, prefixes=("renders/",), what="finish_clip: clip_key")
 
     params = FinishParams(
         interpolate=bool(cfg.get("interpolate", True)),
@@ -383,8 +407,9 @@ def run_finish_job(
     server = ModelServer()
     result = finish_clip(shot_id, local_in, local_out, server, params=params)
 
-    safe = lambda s: (s or "x").replace("/", "_").replace(" ", "_")
-    clip_key_out = f"renders/{safe(project)}/clips/{safe(shot_id)}_finished.mp4"
+    # keys._slug via the shared helper: the SAME slug as the full-render path, so one project
+    # never scatters its clips across two slug spellings ("My  Film" -> My_Film everywhere).
+    clip_key_out = keys.finished_clip_key(project, shot_id)
     store.put_file(local_out, clip_key_out)
 
     applied: list[str] = []
@@ -440,7 +465,11 @@ def run_i2v_clip_job(
     if not prompt:
         raise HarnessError("i2v_clip: prompt is required (the motion description)")
 
-    keyframe_key = str(job.get("keyframe_key") or "") or keys.keyframe_key(project, shot_id)
+    keyframe_key = str(job.get("keyframe_key") or "")
+    if keyframe_key:  # a job-supplied key is pinned to the key map; the derived default is trusted
+        _job_key(keyframe_key, prefixes=("renders/",), what="i2v_clip: keyframe_key")
+    else:
+        keyframe_key = keys.keyframe_key(project, shot_id)
     local_kf = workdir / "keyframe.png"
     try:
         store.get_file(keyframe_key, local_kf)
@@ -477,8 +506,8 @@ def run_i2v_clip_job(
         params=params, progress_cb=progress.i2v_step_cb(shot_id),
     )
 
-    safe = lambda s: (s or "x").replace("/", "_").replace(" ", "_")
-    clip_key_out = f"renders/{safe(project)}/clips/{safe(shot_id)}_i2v.mp4"
+    # Same shared slug as run_finish_job (see the comment there).
+    clip_key_out = keys.i2v_clip_key(project, shot_id)
     store.put_file(result.path, clip_key_out, content_type="video/mp4")
 
     progress.complete(output_key=clip_key_out)

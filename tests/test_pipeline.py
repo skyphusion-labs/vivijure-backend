@@ -12,7 +12,7 @@ import yaml
 
 from vivijure_backend.config import RenderConfig
 from vivijure_backend.contract import Bundle, RenderRequest, Scene
-from vivijure_backend.harness.handler import Outputs, run_job
+from vivijure_backend.harness.handler import HarnessError, Outputs, run_job
 from vivijure_backend.orchestrator import plan as make_plan
 from vivijure_backend.pipeline import GpuPipeline, i2v_params_from, keyframe_params_from
 from vivijure_backend.routing import QualityTier
@@ -239,16 +239,29 @@ def test_execute_honors_reuse_and_pretrained(tmp_path):
     assert "A" in pipe.keyframe_loras["shot_02"]
 
 
-def test_execute_skips_i2v_when_reused_keyframe_is_missing(tmp_path):
-    # A REUSE shot whose keyframe was never staged is skipped, not crashed.
+def test_execute_fails_loud_when_reused_keyframe_is_missing(tmp_path):
+    # A REUSE shot whose keyframe was never staged is a HARD per-shot error naming the shot --
+    # never a silently shorter film under a success status (#245/#249: a degrade is never silent).
     bundle = _extract_bundle(tmp_path)
     req = RenderRequest.from_dict({"action": "render", "project": "neon",
                                    "bundle_key": "x", "quality_tier": "final"})
     plan = make_plan(req, bundle.storyboard, existing_keyframes={"shot_01": None})
     pipe = StubPipeline(req.config)
-    out = pipe.execute(plan, bundle, tmp_path / "work")   # shot_01 keyframe not staged
-    assert "shot_01" not in pipe.animated
-    assert "shot_01" not in [s for s, _ in out.clips]
+    with pytest.raises(HarnessError, match="shot_01"):
+        pipe.execute(plan, bundle, tmp_path / "work")     # shot_01 keyframe not staged
+
+
+def test_execute_fails_loud_when_injected_start_image_is_missing(tmp_path):
+    # An INJECT shot whose authored start_image is absent from the bundle is a HARD per-shot
+    # error naming the shot and the file, not a missing shot in a "successful" film.
+    bundle = _extract_bundle(tmp_path)
+    (bundle.root / "injected" / "shot_03.png").unlink()   # the authored keyframe vanishes
+    req = RenderRequest.from_dict({"action": "render", "project": "neon",
+                                   "bundle_key": "x", "quality_tier": "final"})
+    plan = make_plan(req, bundle.storyboard)
+    pipe = StubPipeline(req.config)
+    with pytest.raises(HarnessError, match="start_image"):
+        pipe.execute(plan, bundle, tmp_path / "work")
 
 
 def test_execute_finishes_clips_only_when_finish_is_enabled(tmp_path):

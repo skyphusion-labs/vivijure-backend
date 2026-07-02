@@ -57,19 +57,27 @@ def build_pipeline(req: RenderRequest) -> GpuPipeline:
     over the shared model server. The server is initialized from `req.config` model fields on
     the first (cold-start) job; subsequent jobs reuse the already-loaded model set."""
     server = _server(req)
-    _warn_model_divergence(req, server)
+    _check_model_divergence(req, server)
     return GpuPipeline(config=req.config, pretrained_loras=req.pretrained_loras, server=server)
 
 
-def _warn_model_divergence(req: RenderRequest, server) -> None:
-    """Emit a structured warning when a warm-worker job requests different models than those loaded.
+class ModelDivergenceError(RuntimeError):
+    """A warm worker was asked for models it does not have loaded. The job is REFUSED: rendering
+    on the previously-loaded set would produce a valid-LOOKING result from the WRONG model, the
+    worst silent degrade. The client resubmits; scale-to-zero makes a cold, correctly-loaded
+    worker cheap."""
 
-    Specs freeze from the cold-start job. A warm worker cannot swap models without a restart; if it
-    silently renders on the wrong set the result looks valid but is produced by the wrong model.
-    The warning is best-effort (no import of torch/GPU deps) and printed to stdout so it appears in
-    RunPod logs and can be scraped; it does not fail the job (that requires a pod-restart policy)."""
+
+def _check_model_divergence(req: RenderRequest, server) -> None:
+    """REFUSE a warm-worker job whose requested models differ from the loaded set.
+
+    Specs freeze from the cold-start job; a warm worker cannot swap models without a restart.
+    This used to be a log-only warning that let the job render anyway (a valid-looking result
+    from the wrong model). Now: emit the structured divergence event for the observability
+    channel, then fail the job with a real error. DETECTION stays best-effort (an import/shape
+    problem must never invent a mismatch); only a POSITIVE mismatch refuses."""
     try:
-        from .models import ModelRole, DEFAULT_SPECS
+        from .models import ModelRole
         kc, ic = req.config.keyframe, req.config.i2v
         checks = {
             ModelRole.KEYFRAME_BASE: kc.base_model,
@@ -82,16 +90,23 @@ def _warn_model_divergence(req: RenderRequest, server) -> None:
             for role, requested in checks.items()
             if (loaded := server.specs.get(role)) and loaded.repo_id != requested
         }
-        if mismatches:
-            import json, time
-            payload = {
-                "ts": time.time(),
-                "mismatches": {r.name: {"loaded": l, "requested": req}
-                               for r, (l, req) in mismatches.items()},
-            }
-            print("@event model_spec_divergence " + json.dumps(payload), flush=True)
     except Exception:
-        pass  # never let a warning abort a job
+        return  # detection is best-effort; never invent a mismatch
+    if not mismatches:
+        return
+    import json, time
+    payload = {
+        "ts": time.time(),
+        "mismatches": {r.name: {"loaded": loaded, "requested": wanted}
+                       for r, (loaded, wanted) in mismatches.items()},
+    }
+    print("@event model_spec_divergence " + json.dumps(payload), flush=True)
+    detail = "; ".join(f"{r.name}: loaded {loaded!r}, requested {wanted!r}"
+                       for r, (loaded, wanted) in mismatches.items())
+    raise ModelDivergenceError(
+        "warm worker refuses this job: it requests models the worker does not have loaded, and a "
+        "warm worker cannot swap models without a restart. Resubmit; a fresh worker loads the "
+        f"requested set. Divergence: {detail}")
 
 
 def handler(job: dict) -> dict:
