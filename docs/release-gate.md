@@ -1,12 +1,16 @@
 # Release gate: pod = staging, serverless = production
 
-> **STATUS (2026-07-02, truth-pass S6): live client landed; live gate still gated.** The live RunPod
-> client now exists -- `deploy/runpod_verify.py` ships `RunpodSdkPodClient` (SECURE cloud only; the
-> up/down/list lifecycle via the `runpod` SDK, unit-tested end to end through `run_verify`). The gate
-> is NOT yet enforced live because it needs (a) a `RUNPOD_API_KEY` CI secret and (b) the pod-side
-> verify entrypoint that emits the @event contract (the image CMD is the serverless worker, which
-> emits none). Until both land, `.github/workflows/runpod-verify.yml` runs only the harness DRY-RUN
-> and an image reaches prod by a manual `:version` pin. This banner comes down when the live job lands.
+> **STATUS (2026-07-02, truth-pass S7): the LIVE gate is WIRED (dispatch-gated).** Both prerequisites
+> landed -- RUNPOD_API_KEY + R2_* are CI secrets, and the pod-side @event emitter exists
+> (`vivijure_backend.verify`, #175). `.github/workflows/runpod-verify.yml` now carries a `live-gate` job
+> that (on an explicit `live=true` workflow_dispatch) spins ONE SECURE GPU pod on the candidate image,
+> drives the @event verify over the run-scoped R2 `summary.json` channel, and tears the pod down
+> (DELETE on every path -- PASS and FAIL both end at delete + list-confirm zero; a FAIL captures its
+> evidence to the R2 channel + a workflow artifact first) with an always-run reap backstop. PROMOTE
+> (repin prod `t9wcvlxh8rc5la`) is OFF by default -- a proof run validates up|verify|down without
+> touching prod; a real release turns it on. Per verify-before-require the job goes REQUIRED in branch
+> protection only AFTER a real dispatch passes green end to end; until then an image may still reach
+> prod by a deliberate manual `:version` pin.
 
 The doctrine that governs how a built image becomes a running production worker, and the CI pipeline
 intended to enforce it. ICD-grade: the contract is reproducible from this doc alone.
@@ -29,7 +33,7 @@ flowchart LR
     B --> C[runpod-verify.yml<br/>spin GPU POD on the image]
     C --> D{verify on pod<br/>structured @event<br/>+ pod-only insight}
     D -- PASS --> E[promote image onto<br/>PROD serverless endpoint] --> F[terminate pod]
-    D -- FAIL --> G[STOP pod<br/>state preserved for SSH debug] --> H[FAIL the build<br/>surface debug handle<br/>NO promote]
+    D -- FAIL --> G[capture evidence<br/>DELETE pod<br/>list-confirm zero] --> H[FAIL the build<br/>surface R2 + artifact evidence<br/>NO promote]
 ```
 
 ## The CI pipeline
@@ -45,8 +49,11 @@ Two workflows, one chain:
    the pushed image, runs the verify harness (`deploy/runpod_verify.py`: structured `@event`
    assertions + pod-only insight checks), then:
    - **PASS:** promote the image onto the production serverless endpoint, then **terminate** the pod.
-   - **FAIL:** **stop** the pod (state preserved for SSH debug), surface the pod/debug handle, **fail
-     the build, do not promote.**
+   - **FAIL:** capture evidence FIRST (the R2 `summary.json` + `events.ndjson` outlive the pod; the
+     pod-log tail is pulled into a workflow artifact), then **DELETE** the pod and **list-confirm
+     zero**, **fail the build, do not promote.** A stopped pod still bills disk and leaves a pad
+     standing, so it is never a CI exit state -- stop is only a mid-debug state while a human is
+     actively attached in-session.
 
 The verify control job itself runs on a stock `ubuntu-latest` runner -- it only drives the RunPod
 API; the GPU is the pod, not the runner.
@@ -127,8 +134,9 @@ pod run, exactly like the harness's own `RunpodMcpPodClient` seam.
   a `backend-v*` tag / dispatching the workflow is the explicit "go." There is no path where a fork
   PR or a routine commit spins a GPU.
 - **Defence in depth on the pod.** The harness creates the pod with a **hard TTL (auto-stop)** and a
-  **cost ceiling**, and the workflow tears it down on both the PASS (terminate) and FAIL (stop) paths
-  plus an always-run backstop. A forgotten debug pod cannot bleed GPU: its TTL stops it regardless.
+  **cost ceiling**, and the workflow tears it down on BOTH the PASS and FAIL paths (delete + list-confirm zero on
+  each; a FAIL captures its evidence first) plus an always-run reap backstop. A forgotten pod cannot
+  bleed GPU: its TTL stops it and the backstop deletes it regardless.
 - **Tier-aware GPU.** H200/B200 for the datacenter bf16 image (the only image that runs full Wan); a
   cheap consumer GPU for the homelab-lite images.
 
