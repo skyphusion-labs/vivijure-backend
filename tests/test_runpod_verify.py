@@ -575,3 +575,23 @@ def test_reap_pod_flags_still_live_loudly():
             return ["pod-9"]  # delete did not take -> still live
 
     assert rv.reap_pod("pod-9", client=_StuckClient()) is False   # caller fails the backstop step
+
+
+def test_clean_key_strips_whitespace_and_matched_quotes():
+    assert rv._clean_key("  rpa_abc  ") == "rpa_abc"
+    assert rv._clean_key('"rpa_abc"') == "rpa_abc"
+    assert rv._clean_key("'rpa_abc'") == "rpa_abc"
+    assert rv._clean_key('"rpa_abc"\n') == "rpa_abc"        # quoted .env line + trailing newline
+    assert rv._clean_key("rpa_abc") == "rpa_abc"            # already clean: unchanged
+    assert rv._clean_key('"rpa_abc') == '"rpa_abc'          # unmatched quote: left alone
+    assert rv._clean_key(None) == ""
+
+
+def test_key_shape_never_echoes_the_value(capsys, monkeypatch):
+    monkeypatch.setenv("RUNPOD_API_KEY", '"rpa_TOPSECRETVALUE42"')
+    rc = rv.main(["--key-shape"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "TOPSECRETVALUE42" not in out                    # the VALUE body is never echoed
+    assert "cleaned_matches_rpa=yes" in out                 # matched quotes stripped -> valid shape
+    assert "starts_with_quote=yes" in out                   # the mangle is diagnosed, not the value

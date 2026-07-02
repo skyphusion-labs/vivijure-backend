@@ -114,6 +114,8 @@ jobs:
           test -n "${R2_ACCESS_KEY_ID:-}" || { echo "R2_ACCESS_KEY_ID secret missing"; exit 1; }
           test -n "${R2_SECRET_ACCESS_KEY:-}" || { echo "R2_SECRET_ACCESS_KEY secret missing"; exit 1; }
           echo "all required verify secrets present"
+          # NO-LEAK key-shape diagnostic (regex match, length, quote/whitespace edges; value never echoed)
+          python deploy/runpod_verify.py --key-shape
 
       - name: Live verify gate (SECURE pod -> @event verify -> delete+confirm-zero; promote gated)
         run: |
