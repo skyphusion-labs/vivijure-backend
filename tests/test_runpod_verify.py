@@ -683,3 +683,27 @@ def test_run_verify_records_pod_state_log_for_pull_visibility():
 
 def test_ttl_default_has_cold_pull_headroom():
     assert rv.VerifyConfig(image="ghcr.io/x:1").ttl_seconds >= 3000   # room for an ~87GB cold bake pull
+
+
+def test_max_polls_follows_ttl_not_a_fixed_600_cap():
+    # With a large TTL and a channel that never reaches terminal, the poll loop must be able to poll
+    # well past the old fixed 600 cap (600 x 5s = 3000s would cut a 5400s-TTL run short). Prove the
+    # loop polls > 600 times before giving up, i.e. max_polls now scales with ttl_seconds.
+    calls = {"n": 0}
+
+    def reader():
+        calls["n"] += 1
+        return [], None  # never terminal
+
+    def clock():
+        clock.t += 1.0
+        return clock.t
+    clock.t = 0.0
+
+    client = FakePodClient(_pass_log())
+    cfg = rv.VerifyConfig(image="ghcr.io/x:1", ttl_seconds=5400)
+    report = rv.run_verify(client, cfg, clock=clock, poll_sleep=lambda _s: None, event_reader=reader)
+    assert report["passed"] is False
+    assert report["timed_out"] is True
+    assert calls["n"] > 600            # polled past the old fixed cap; TTL is the real ceiling now
+    assert report["teardown"] == "deleted"
