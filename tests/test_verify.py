@@ -44,6 +44,18 @@ class RecordingStore:
         return self.objects[key]
 
 
+class FailStore:
+    """A store whose put_bytes always raises (a specific exception), to exercise the authoritative
+    first-write path -- the bad-R2-cred class that used to silently empty the channel."""
+    def __init__(self, exc):
+        self.exc = exc
+        self.calls = 0
+
+    def put_bytes(self, data, key, *, content_type=None, metadata=None):
+        self.calls += 1
+        raise self.exc
+
+
 def _clock():
     ticks = iter(range(1, 100_000))
     return lambda: float(next(ticks))
@@ -353,6 +365,64 @@ def test_main_runs_injected_render_and_reports_status():
     def bad(em):
         raise RuntimeError("boom")
     assert verify.main(env=env, store=store2, render=bad) == 1
+
+
+# --------------------------------------------------------------------------- authoritative first write
+
+def test_classify_write_error():
+    assert verify._classify_write_error(Exception("(SignatureDoesNotMatch) when calling PutObject")) == "r2_auth"
+    assert verify._classify_write_error(Exception("InvalidAccessKeyId")) == "r2_auth"
+    assert verify._classify_write_error(Exception("403 Forbidden")) == "r2_auth"
+    assert verify._classify_write_error(Exception("connection reset by peer")) == "r2_write"
+
+
+def test_preflight_seeds_running_summary():
+    store = RecordingStore()
+    verify.VerifyEmitter(store, "run-x", clock=_clock()).preflight()
+    s = json.loads(store.objects[keys.verify_summary_key("run-x")])
+    assert s["status"] == "running" and s["events"] == []
+
+
+def test_preflight_none_store_is_noop():
+    verify.VerifyEmitter(None, "r", clock=_clock()).preflight()   # must not raise
+
+
+def test_preflight_raises_channel_unwritable_classified():
+    with pytest.raises(verify.ChannelUnwritable) as ei:
+        verify.VerifyEmitter(FailStore(RuntimeError("AccessDenied")), "r", clock=_clock()).preflight()
+    assert ei.value.stage == "r2_auth"
+
+
+def test_run_verify_bad_creds_fails_loud_before_probe_and_render():
+    # The regression this closes: a present-but-BAD R2 cred passes R2Config.from_env (presence-only)
+    # then fails auth on write; the old best-effort _write SWALLOWED it -> silent empty channel. Now
+    # the authoritative preflight makes it a LOUD verify_fatal{r2_auth}, and neither the probe nor the
+    # render runs (the channel is unusable, so the run is pointless).
+    logs = []
+    probe_calls = {"n": 0}
+    render_calls = {"n": 0}
+    def probe():
+        probe_calls["n"] += 1
+        return _pass_facts()
+    def render(em):
+        render_calls["n"] += 1
+        return verify.RenderOutcome("k", 1, sharpness_value=100.0)
+    exc = RuntimeError("An error occurred (SignatureDoesNotMatch) when calling the PutObject operation")
+    em = verify.run_verify(FailStore(exc), run_id="run-x", render=render, probe=probe,
+                           log=logs.append, clock=_clock())
+    assert em._summary["status"] == "error"
+    assert em._summary["error"]["stage"] == "r2_auth"
+    assert probe_calls["n"] == 0 and render_calls["n"] == 0        # nothing ran past the dead channel
+    assert any(ln.startswith("@event verify_fatal ") and '"stage": "r2_auth"' in ln for ln in logs)
+
+
+def test_run_verify_generic_write_failure_is_r2_write():
+    logs = []
+    exc = RuntimeError("connection timed out talking to R2")
+    em = verify.run_verify(FailStore(exc), run_id="run-x", render=_good_render(), probe=_pass_facts,
+                           log=logs.append, clock=_clock())
+    assert em._summary["error"]["stage"] == "r2_write"
+    assert any(ln.startswith("@event verify_fatal ") and '"stage": "r2_write"' in ln for ln in logs)
 
 
 # --------------------------------------------------------------------------- cross-module contract
