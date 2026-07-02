@@ -222,6 +222,32 @@ def events_from_ndjson(raw: bytes | str) -> list[tuple[str, dict]]:
 
 # --------------------------------------------------------------------------- the emitter
 
+class ChannelUnwritable(RuntimeError):
+    """The verify R2 channel could not be written on the FIRST (authoritative) attempt. Unlike a
+    mid-run best-effort hiccup, this means nothing the harness reads will EVER appear -- so the run
+    is pointless and must fail LOUD, not silently-empty. Carries `stage` (r2_auth | r2_write) so the
+    caller emits a precise verify_fatal."""
+
+    def __init__(self, stage: str, message: str):
+        super().__init__(message)
+        self.stage = stage
+        self.message = message
+
+
+# boto3 surfaces a bad/quote-wrapped R2 credential as one of these on the write call (the values are
+# present, so R2Config.from_env's presence check passes -- the failure only shows up at auth time).
+_R2_AUTH_MARKERS = ("SignatureDoesNotMatch", "InvalidAccessKeyId", "AccessDenied", "Forbidden",
+                    "403", "InvalidAccessKey", "CredentialsError", "NoCredentials", "Unauthorized")
+
+
+def _classify_write_error(exc: Exception) -> str:
+    """r2_auth for a credential/permission failure (the bad/quote-wrapped-R2-cred class that silently
+    empties the channel), else r2_write for any other first-write failure. String inspection only, so
+    no boto3 import is needed here; the marker set never contains a secret VALUE, only error codes."""
+    blob = f"{type(exc).__name__}: {exc}"
+    return "r2_auth" if any(m in blob for m in _R2_AUTH_MARKERS) else "r2_write"
+
+
 class VerifyEmitter:
     """Writes a verify run's events to R2 (summary.json + events.ndjson) and mirrors each to stdout.
 
@@ -243,6 +269,28 @@ class VerifyEmitter:
             "started_ts": None, "updated_ts": None, "last_event": None,
             "error": None, "events": self._records,
         }
+
+    def preflight(self) -> None:
+        """AUTHORITATIVE first write: prove the channel is writable BEFORE any probe/render. The
+        per-event `_write` is best-effort by design (a mid-run R2 hiccup must never abort the render),
+        but that same swallow turns a bad credential into a SILENT empty channel: a quote-wrapped /
+        malformed R2 secret passes `R2Config.from_env` (presence-only) yet fails auth on the first
+        put_bytes, so every event vanishes and the harness sees nothing (the #249/#77 silent-degrade
+        class -- it cost a multi-pod hunt). So this ONE write is authoritative: it seeds the running
+        summary and, on failure, raises `ChannelUnwritable` so the caller emits a LOUD verify_fatal
+        instead of a 30-minute empty prefix. A None store (the CPU tests / no-sink path) is a no-op."""
+        if self.store is None:
+            return
+        try:
+            self.store.put_bytes(
+                json.dumps(self._summary, separators=(",", ":")).encode("utf-8"),
+                keys.verify_summary_key(self.run_id, prefix=self.prefix),
+                content_type="application/json")
+        except Exception as exc:  # noqa: BLE001 -- classify + re-raise as a loud fatal, never swallow
+            raise ChannelUnwritable(
+                _classify_write_error(exc),
+                f"verify channel first write failed ({type(exc).__name__}: {str(exc)[:200]}); "
+                "R2 creds present but unusable (bad/quote-wrapped value?)") from exc
 
     # --- public emit API ---
 
@@ -346,6 +394,11 @@ def run_verify(store, *, run_id: str, render: RenderFn,
     turned into an `error` event (status -> error), so a crash still leaves a terminal, machine-
     readable channel for the harness to read rather than a hung `running` state."""
     emitter = VerifyEmitter(store, run_id, prefix=prefix, log=log, clock=clock)
+    try:
+        emitter.preflight()   # authoritative: a bad-cred channel must fail LOUD, not silently-empty
+    except ChannelUnwritable as e:
+        emitter.fatal(e.stage, [], e.message)   # verify_fatal to stdout; status -> error
+        return emitter
     try:
         emitter.gpu_probe(probe())
     except Exception as e:  # noqa: BLE001 -- a probe crash is a check failure, recorded not raised
