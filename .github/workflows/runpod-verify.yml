@@ -6,13 +6,15 @@ name: RunPod verify harness
 # (a) RUNPOD_API_KEY + R2_* are CI secrets, and (b) the pod-side @event emitter exists
 # (vivijure_backend.verify, #175). So this workflow now grows a real live-gate job that spins ONE
 # SECURE GPU pod on the candidate image, drives the structured @event verify over the run-scoped R2
-# summary.json channel, and tears the pod down with a list-confirm-zero + an always-run STOP backstop.
+# summary.json channel, and tears the pod down (delete + list-confirm zero on EVERY path) with an
+# always-run reap backstop.
 #
 # SPEND is gated three ways: (1) the workflow is workflow_dispatch ONLY (never a PR/push -- a fork PR
 # can never spin a GPU); (2) the live pod runs ONLY when the `live` input is explicitly true, else the
-# no-spend DRY-RUN job runs instead; (3) a hard TTL auto-stops the pod, teardown fires on PASS
-# (terminate) and FAIL (stop, keep disk for debug), and an always() backstop STOPs any pod the run
-# created even if the job is cancelled/killed.
+# no-spend DRY-RUN job runs instead; (3) a hard TTL auto-stops the pod, teardown DELETEs the pod on
+# EVERY path (PASS and FAIL both end at delete + list-confirm zero; a FAIL captures its evidence to
+# the R2 channel + a workflow artifact FIRST), and an always() backstop reaps (stop then DELETE) any
+# pod the run created even if the job is cancelled/killed -- a stopped pad is never an exit state.
 #
 # PROMOTE (repin the PROD serverless endpoint t9wcvlxh8rc5la) is OFF by default: a proof run validates
 # up|verify|down without ever touching prod. A real release turns `promote` on. Verify-before-require:
@@ -113,20 +115,29 @@ jobs:
           test -n "${R2_SECRET_ACCESS_KEY:-}" || { echo "R2_SECRET_ACCESS_KEY secret missing"; exit 1; }
           echo "all required verify secrets present"
 
-      - name: Live verify gate (SECURE pod -> @event verify -> teardown; promote gated)
+      - name: Live verify gate (SECURE pod -> @event verify -> delete+confirm-zero; promote gated)
         run: |
           python deploy/runpod_verify.py --live \
+            --report-file verify-report.json \
             --image "${{ inputs.image }}" \
             --tier "${{ inputs.tier }}" \
             --bundle-key "${{ inputs.bundle_key }}" \
             ${{ inputs.promote && '--promote' || '' }}
 
-      - name: Teardown backstop -- STOP any pod this run created (always)
+      - name: Upload verify evidence (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-report
+          path: verify-report.json
+          if-no-files-found: warn
+
+      - name: Teardown backstop -- REAP (delete + confirm zero) any pod this run created (always)
         if: always()
         run: |
           if [ -n "${VJ_VERIFY_POD_ID:-}" ]; then
-            echo "stopping pod ${VJ_VERIFY_POD_ID} (halt billing, keep disk)"
-            python deploy/runpod_verify.py --stop-pod "$VJ_VERIFY_POD_ID" || true
+            echo "reaping pod ${VJ_VERIFY_POD_ID} (stop -> delete -> list-confirm zero)"
+            python deploy/runpod_verify.py --reap-pod "$VJ_VERIFY_POD_ID"
           else
-            echo "no pod id recorded (never spun, or aborted pre-create); nothing to stop"
+            echo "no pod id recorded (never spun, or aborted pre-create); nothing to reap"
           fi

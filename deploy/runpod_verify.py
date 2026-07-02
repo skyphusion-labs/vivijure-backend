@@ -731,28 +731,36 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
     report["passed"] = result.passed
     report["timed_out"] = timed_out
 
-    if result.passed:
-        report["signal"] = "promote"
-        client.delete_pod(pod_id)              # PASS: full teardown, no leak
-        report["teardown"] = "deleted"
-    else:
-        client.stop_pod(pod_id)                # FAIL: stop (keep disk) for SSH debug; billing halted
-        report["signal"] = "hold"
-        report["teardown"] = "stopped"
-        report["debug_handle"] = {
-            "pod_id": pod_id,
-            "resume": f"runpod start-pod {pod_id}  # restarts on the preserved disk",
-            "shell": f"runpodctl exec {pod_id} -- bash  # or SSH per the pod's connection info",
-            "note": "pod STOPPED not deleted: disk/state preserved, GPU billing halted.",
-        }
+    # Teardown doctrine (docs/release-gate.md): capture evidence, then DELETE + list-confirm ZERO on
+    # EVERY path. A stopped pod still bills disk and leaves a pad standing, so it is NEVER a CI exit
+    # state (stop is only a mid-debug state while a human is actively attached in-session). The failure
+    # evidence is durable regardless: the R2 channel (summary.json + events.ndjson) outlives the pod;
+    # the pod-log tail is captured into the report BEFORE delete for the workflow evidence artifact.
+    report["signal"] = "promote" if result.passed else "hold"
+    if not result.passed:
+        try:
+            tail = client.read_logs(pod_id)
+            if tail:
+                report["pod_logs_tail"] = list(tail)[-200:]
+        except Exception:  # noqa: BLE001 -- evidence capture is best-effort; it never blocks teardown
+            pass
+        run_id = (cfg.env or {}).get("VJ_VERIFY_RUN_ID")
+        if run_id:
+            prefix = (cfg.env or {}).get("VJ_VERIFY_KEY_PREFIX", "verify")
+            report["evidence"] = {
+                "summary_key": "%s/%s/summary.json" % (prefix, run_id),
+                "events_key": "%s/%s/events.ndjson" % (prefix, run_id),
+                "note": "durable R2 verify channel; outlives the deleted pod",
+            }
+    client.delete_pod(pod_id)                  # DELETE on EVERY path -- no stopped pad left billing
+    report["teardown"] = "deleted"
 
     lister = getattr(client, "list_live_pod_ids", None)
     if callable(lister):
         try:
             live_ids = list(lister())
             report["live_pods_after"] = len(live_ids)
-            # PASS => the pod must be GONE (deleted); FAIL => intentionally KEPT (stopped) for debug.
-            report["teardown_confirmed"] = (pod_id not in live_ids) if result.passed else True
+            report["teardown_confirmed"] = pod_id not in live_ids   # ZERO on every path, PASS or FAIL
         except Exception:  # noqa: BLE001 -- a confirm-list fault must not mask the verify result
             report["teardown_confirmed"] = None
     return report
@@ -833,6 +841,37 @@ def _github_env_writer(name: str) -> "Callable[[str], None]":
     return write
 
 
+def reap_pod(pod_id: str, *, client=None, summary_sink: "Callable[[str], None] | None" = None):
+    """Teardown backstop: STOP (fast billing halt) then DELETE (terminate = zero) a pod, then
+    list-confirm it is gone. The workflow always-run step calls this so a killed/cancelled run ends at
+    ZERO pods -- a stopped pad still bills disk and is never an allowed exit state. Best-effort per verb
+    (an already-gone pod is fine; delete is the one that matters). Returns True if confirmed gone, False
+    if confirmed STILL LIVE (loud -- the caller fails the step), None if the live set was unreadable."""
+    client = client or RunpodSdkPodClient()
+    for verb in ("stop_pod", "delete_pod"):
+        try:
+            getattr(client, verb)(pod_id)
+        except Exception:  # noqa: BLE001 -- already stopped/deleted is fine
+            pass
+    gone = None
+    lister = getattr(client, "list_live_pod_ids", None)
+    if callable(lister):
+        try:
+            gone = pod_id not in list(lister())
+        except Exception:  # noqa: BLE001
+            gone = None
+    if gone is False:
+        msg = "teardown backstop ALERT: pod %s is STILL LIVE after delete -- check RunPod NOW" % pod_id
+    elif gone is True:
+        msg = "teardown backstop: pod %s deleted, list-confirmed zero" % pod_id
+    else:
+        msg = "teardown backstop: pod %s delete issued; live set unreadable, could not confirm zero" % pod_id
+    print(msg)
+    if summary_sink is not None:
+        summary_sink(msg)
+    return gone
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI. Defaults to a MOCKED dry-run (no GPU, no spend). `--live` requires a wired RunPod client
     and is the gated validation path; this module ships the live client as an unimplemented seam, so a
@@ -864,20 +903,25 @@ def main(argv: list[str] | None = None) -> int:
                          "default: a proof run validates up|verify|down without ever touching prod")
     ap.add_argument("--promote-endpoint", default=PROD_ENDPOINT_ID,
                     help="the production serverless endpoint id to promote onto")
-    ap.add_argument("--stop-pod", default=None,
-                    help="teardown backstop: STOP this pod id (halt billing, keep disk) and exit; the "
-                         "workflow always-run step calls it so a killed/cancelled run never bleeds GPU")
+    ap.add_argument("--reap-pod", default=None,
+                    help="teardown backstop: STOP then DELETE this pod id and list-confirm it is gone, "
+                         "then exit. The workflow always-run step calls it so a killed/cancelled run "
+                         "ends at ZERO pods, never a stopped pad still billing disk")
+    ap.add_argument("--report-file", default=None,
+                    help="also write the JSON run report to this path (for a workflow evidence artifact)")
     args = ap.parse_args(argv)
 
-    if args.stop_pod:
-        try:
-            RunpodSdkPodClient().stop_pod(args.stop_pod)
-            print("runpod_verify: teardown backstop STOPPED pod %s (billing halted, disk kept)"
-                  % args.stop_pod)
-        except Exception as e:  # noqa: BLE001 -- best-effort backstop: already-gone/stopped is fine
-            print("runpod_verify: teardown backstop: pod %s not stoppable (%s); likely already "
-                  "deleted/stopped" % (args.stop_pod, type(e).__name__), file=sys.stderr)
-        return 0
+    if args.reap_pod:
+        def _summary(msg: str) -> None:
+            path = os.environ.get("GITHUB_STEP_SUMMARY")
+            try:
+                if path:
+                    with open(path, "a", encoding="utf-8") as fh:
+                        fh.write(msg + "\n")
+            except Exception:  # noqa: BLE001 -- a summary write must never fail the backstop
+                pass
+        gone = reap_pod(args.reap_pod, summary_sink=_summary)
+        return 0 if gone is not False else 1  # confirmed-still-live => fail the step, loud
 
     if args.regression:
         cfg: VerifyConfig = RegressionConfig(image=args.image, tier=args.tier,
@@ -933,6 +977,12 @@ def main(argv: list[str] | None = None) -> int:
                                       "(no --promote, prod untouched)")
 
     print(json.dumps(report, indent=2, sort_keys=True))
+    if args.report_file:
+        try:
+            with open(args.report_file, "w", encoding="utf-8") as fh:
+                json.dump(report, fh, indent=2, sort_keys=True)
+        except Exception:  # noqa: BLE001 -- the evidence artifact is a convenience; never fail on it
+            pass
     ok = bool(report.get("passed"))
     if args.promote and ok and not report.get("promoted"):
         ok = False  # promote requested on a passing image but did not land -> fail the gate
