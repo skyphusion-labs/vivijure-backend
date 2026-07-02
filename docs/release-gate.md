@@ -1,12 +1,12 @@
 # Release gate: pod = staging, serverless = production
 
-> **STATUS (2026-07-02): design doc, not yet enforced.** The pod-staging verify below is the
-> intended DESIGN. The live gate (spin pod -> verify -> promote -> teardown) is NOT built:
-> `deploy/runpod_verify.py` ships the mock-first harness with the live RunPod client as a
-> deliberately unimplemented seam, and `.github/workflows/runpod-verify.yml` runs only the
-> harness DRY-RUN (no pod, no spend). Today an image reaches the prod serverless endpoint by a
-> manual, deliberate endpoint pin to a `:version` tag. Building the real gate is scheduled
-> follow-up work (truth-pass S6); this banner comes down when it lands.
+> **STATUS (2026-07-02, truth-pass S6): live client landed; live gate still gated.** The live RunPod
+> client now exists -- `deploy/runpod_verify.py` ships `RunpodSdkPodClient` (SECURE cloud only; the
+> up/down/list lifecycle via the `runpod` SDK, unit-tested end to end through `run_verify`). The gate
+> is NOT yet enforced live because it needs (a) a `RUNPOD_API_KEY` CI secret and (b) the pod-side
+> verify entrypoint that emits the @event contract (the image CMD is the serverless worker, which
+> emits none). Until both land, `.github/workflows/runpod-verify.yml` runs only the harness DRY-RUN
+> and an image reaches prod by a manual `:version` pin. This banner comes down when the live job lands.
 
 The doctrine that governs how a built image becomes a running production worker, and the CI pipeline
 intended to enforce it. ICD-grade: the contract is reproducible from this doc alone.

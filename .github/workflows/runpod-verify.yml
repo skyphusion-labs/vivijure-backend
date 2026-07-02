@@ -1,24 +1,19 @@
 name: RunPod verify harness (dry-run)
 
-# HONEST STATUS (2026-07-02, constellation truth pass): the live pod-staging gate this workflow
-# used to ADVERTISE (up | verify | promote | down against a real GPU pod) is NOT BUILT.
-# deploy/runpod_verify.py has no such subcommands (its CLI takes --image/--tier/--live/
-# --regression), and its live RunPod client (RunpodMcpPodClient) is a deliberately unimplemented
-# seam that raises NotImplementedError. The old workflow called those phantom subcommands and
-# would have crashed at step one (argparse SystemExit) on every dispatch -- a phantom gate that
-# could never verify or promote anything.
-#
-# What IS real, and what this workflow now runs: the harness's MOCKED DRY-RUN -- parse_events +
-# evaluate (and the full-regression evaluator) against the built-in PASS-shaped client. The same
-# logic is unit-tested in CI (tests.yml); this dispatch exists so a human can exercise the whole
-# harness and see the report shape on a stock runner. No GPU, no pod, no secrets, no spend.
-#
-# Promotion to the prod serverless endpoint therefore remains what it actually is today: a
-# manual, deliberate endpoint pin to a :version tag. docs/release-gate.md records the intended
-# DESIGN (pod = staging, serverless = production, promote only on a green pod verify); building
-# the real live gate (spin pod -> verify @events -> promote -> teardown) is scheduled follow-up
-# work (truth-pass S6), and this workflow grows back into it WHEN that harness exists -- not
-# before.
+# STATUS (2026-07-02, truth-pass S6): the LIVE RunPod client now EXISTS -- deploy/runpod_verify.py
+# ships RunpodSdkPodClient, a SECURE-cloud-only client (up/down/list via the `runpod` SDK) that
+# run_verify drives end to end (unit-tested against a fake SDK). What is STILL not wired here, on
+# purpose, is a live JOB, because it needs two things this change does not add:
+#   1. a RUNPOD_API_KEY Actions secret (a deliberate spend + credential decision), and
+#   2. the pod-side verify ENTRYPOINT that emits the @event contract (gpu_probe / first_frame /
+#      sharpness / complete). The image CMD today is the serverless worker, which emits no verify
+#      contract, so a live pod could never reach `@event complete`. read_logs is the seam that pairs
+#      with that emitter (RunpodSdkPodClient.read_logs).
+# Until BOTH land, this workflow runs only the MOCKED DRY-RUN (parse_events + evaluate against the
+# built-in PASS-shaped client) -- no GPU, no pod, no secret, no spend -- and promotion to the prod
+# serverless endpoint stays a manual, deliberate :version pin. When both land, this workflow grows
+# the live job (spin SECURE pod -> verify @events -> promote -> teardown + list-confirm-zero); NOT
+# before, so it can never be a phantom gate.
 
 on:
   workflow_dispatch:
