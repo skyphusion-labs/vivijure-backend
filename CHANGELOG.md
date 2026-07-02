@@ -5,6 +5,16 @@ pre-1.0: PATCH for fixes and backend-only tweaks, MINOR for new features). Entri
 newest-first. History before this file was introduced lives in the git tags; the recent
 releases are summarized below from that history.
 
+## [0.4.1] -- 2026-07-02
+
+**fix(verify): the pod-staging gate renders end to end (pipeline registration + loud fatal + cold-pull TTL)**
+
+Fixes for the gaps the first live gate runs on `:0.4.0` surfaced. The verify emitter and R2 channel were proven healthy on an H200 pod (`gpu_probe` with `torch_cuda`/`kernel_ok`/`vj_baked` true, `summary.json` + `events.ndjson` written in ~3s); these close what was left so the gate renders a draft clip end to end and promotes.
+
+- **Register the GPU pipeline for the verify render (#183):** `python -m vivijure_backend.verify` is a DIFFERENT entrypoint than the serverless worker and never triggered the per-job pipeline registration the worker does, so `_pod_draft_render`'s handler call died in ~3s with "no GPU Pipeline registered". The verify render now routes through `worker.handler` (the same production serverless entrypoint), which registers the pipeline before delegating, so the verify path is byte-identical to a real render and cannot drift from it.
+- **No silent pre-emitter death; loud `verify_fatal {stage, missing}` (#180, #182):** a missing/misnamed R2 config or an absent `VJ_VERIFY_RUN_ID` used to kill `main()` before the emitter existed -- a silent empty prefix. `main()` now emits a structured terminal `verify_fatal` naming the missing env vars to stdout before exiting non-zero, so a launch-side env mistake is a one-line diagnosis, never a 30-minute blind hang.
+- **Cold-pull TTL headroom + pod-state timing (#181):** the ~87GB baked image's cold pull could eat the pod TTL before verify started; the TTL is raised to 3000s and pull/boot time is measured on the structured state channel, so a slow cold start is visible instead of a mystery empty prefix.
+
 ## [0.4.0] -- 2026-07-02
 
 **feat(release-gate): the automated pod-staging verify gate goes LIVE end to end (verify @event channel + live SECURE RunPod pod client + promote)**
