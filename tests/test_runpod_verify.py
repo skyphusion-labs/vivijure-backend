@@ -387,3 +387,18 @@ def test_sdk_client_missing_log_channel_fails_closed_and_tears_down():
 
 def test_mcp_alias_points_at_sdk_client():
     assert rv.RunpodMcpPodClient is rv.RunpodSdkPodClient
+
+
+def test_gpu_tier_ids_all_have_a_real_price():
+    # The tier ids and the price table must never drift apart: every GPU_TIERS id resolves a REAL price
+    # in GPU_HOURLY_USD (not the conservative 4.0/hr default), so a spend estimate never quotes a wrong
+    # rate for a listed card. Regression guard: the "NVIDIA RTX 4090" -> "NVIDIA GeForce RTX 4090"
+    # rename once left the price row behind.
+    for tier, ids in rv.GPU_TIERS.items():
+        for gid in ids:
+            assert gid in rv.GPU_HOURLY_USD, f"{gid} ({tier} tier) has no GPU_HOURLY_USD price row"
+
+
+def test_cost_estimate_uses_real_rate_for_geforce_4090():
+    # The corrected canonical id resolves its real 0.69/hr rate, not the 4.0/hr fallback.
+    assert rv.cost_estimate_usd("NVIDIA GeForce RTX 4090", 3600.0) == 0.69

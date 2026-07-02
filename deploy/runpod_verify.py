@@ -60,7 +60,7 @@ GPU_TIERS: dict[str, tuple[str, ...]] = {
 # list_gpu_types pricing). Kept conservative-high so the printed estimate never UNDERstates spend.
 GPU_HOURLY_USD: dict[str, float] = {
     "NVIDIA H200": 4.39, "NVIDIA H100 NVL": 2.79, "NVIDIA H100 80GB HBM3": 2.69,
-    "NVIDIA B200": 5.99, "NVIDIA RTX 4090": 0.69, "NVIDIA RTX A5000": 0.36,
+    "NVIDIA B200": 5.99, "NVIDIA GeForce RTX 4090": 0.69, "NVIDIA RTX A5000": 0.36,
     "NVIDIA A10": 0.45, "NVIDIA L4": 0.43,
     "NVIDIA RTX PRO 6000 Blackwell Server Edition": 2.49,
 }
