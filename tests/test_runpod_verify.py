@@ -707,3 +707,32 @@ def test_max_polls_follows_ttl_not_a_fixed_600_cap():
     assert report["timed_out"] is True
     assert calls["n"] > 600            # polled past the old fixed cap; TTL is the real ceiling now
     assert report["teardown"] == "deleted"
+
+
+def test_report_records_pod_env_key_names():
+    client = FakePodClient(_pass_log())
+    cfg = rv.VerifyConfig(image="ghcr.io/x:1")
+    report = rv.run_verify(client, cfg, clock=_clock())
+    assert report["pod_env_keys"] == sorted(cfg.env.keys())   # NAMES only, artifact-diagnosable
+    assert "VJ_VERIFY" in report["pod_env_keys"]
+
+
+def test_clean_key_generalizes_to_any_env_value():
+    # The generalized cleaner strips a matched quote pair off ANY value (not just the API key), which
+    # is what protects every injected pod-env secret from the quote-wrap landing class.
+    assert rv._clean_key('"' + "some-r2-secret" + '"') == "some-r2-secret"
+    assert rv._clean_key("  some-r2-secret\n") == "some-r2-secret"
+    assert rv._clean_key("already-clean") == "already-clean"
+
+
+def test_key_shape_reports_r2_edges_without_values(capsys, monkeypatch):
+    quoted = chr(34) + "R2SECRETBODY" + chr(34)          # a quote-wrapped R2 secret value
+    monkeypatch.setenv("RUNPOD_API_KEY", "rpa_clean123")
+    monkeypatch.setenv("R2_SECRET_ACCESS_KEY", quoted)
+    monkeypatch.setenv("R2_ENDPOINT", "https://x.r2.cloudflarestorage.com")
+    rc = rv.main(["--key-shape"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "R2SECRETBODY" not in out                          # value never echoed
+    assert "R2_SECRET_ACCESS_KEY: present=yes" in out
+    assert "R2_SECRET_ACCESS_KEY:" in out and "starts_quote=yes ends_quote=yes" in out
