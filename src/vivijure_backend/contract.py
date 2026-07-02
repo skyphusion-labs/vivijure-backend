@@ -243,7 +243,10 @@ class RenderRequest:
     # (the standalone "finish_clip"/"i2v_clip" actions are handled by the harness, not RenderRequest)
     project: str
     bundle_key: str
-    quality_tier: str = "final"
+    # Default tier is DRAFT, the wallet-safe floor: an omitted tier must never silently buy the
+    # most expensive render. The studio always sends the tier explicitly (runpod-submit.ts), so
+    # this default only governs direct callers that omit the field.
+    quality_tier: str = "draft"
     config: RenderConfig = field(default_factory=RenderConfig)
     overrides: dict[str, Any] = field(default_factory=dict)  # raw render_overrides; routing flags only
     pretrained_loras: dict[str, str] = field(default_factory=dict)
@@ -269,7 +272,7 @@ class RenderRequest:
     def from_dict(cls, d: dict[str, Any]) -> "RenderRequest":
         from .config import RenderConfig
         overrides = d.get("render_overrides") if isinstance(d.get("render_overrides"), dict) else {}
-        quality_tier = _str(d.get("quality_tier"), "final")
+        quality_tier = _str(d.get("quality_tier"), "draft")  # wallet-safe default; see the field note
         return cls(
             action=_str(d.get("action"), "render"),
             project=_str(d.get("project"), "untitled"),
@@ -308,6 +311,10 @@ class RenderResult:
     output_key: str | None = None
     seconds: float | None = None
     has_audio: bool = False
+    # True ONLY on the explicit audio_optional soft-degrade: a requested bed could not be fetched
+    # and the job opted in, so the film shipped silent. Surfaced top-level (not just as an event)
+    # so a poller never has to read the event stream to learn its film lost its audio.
+    audio_missing: bool = False
     keyframes: list[Keyframe] = field(default_factory=list)
     clips: list[Clip] = field(default_factory=list)
     lora: dict[str, Any] = field(default_factory=dict)  # slot -> {lora_id}
@@ -319,6 +326,7 @@ class RenderResult:
             "output_key": self.output_key,
             "seconds": self.seconds,
             "has_audio": self.has_audio,
+            "audio_missing": self.audio_missing,
             "keyframes": [{"shot_id": k.shot_id, "key": k.key} for k in self.keyframes],
             "lora": self.lora,
             "state_key": self.state_key,

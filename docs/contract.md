@@ -109,12 +109,12 @@ routing flags it still reads off it (e.g. `finish_offloaded`).
 | `action` | str | `"render"` | `render` \| `preview` \| `regen_shot` \| `finalize` \| `train_lora`. Selects the pipeline path. |
 | `project` | str | `"untitled"` | Project name; keys every artifact (see [the key map](operations.md#r2-object-key-map)). |
 | `bundle_key` | str | `""` | R2 key of the bundle tar. |
-| `quality_tier` | str | `"final"` | `draft` \| `standard` \| `final`. Sets every config baseline. |
+| `quality_tier` | str | `"draft"` | `draft` \| `standard` \| `final`. Sets every config baseline. The studio always sends it explicitly; the draft default is the wallet-safe floor for a direct caller that omits it (an omitted tier must never silently buy the most expensive render). |
 | `config` | RenderConfig | tier baseline | Typed generation config; built from `quality_tier` + `render_overrides`. |
 | `overrides` | dict | `{}` | The raw `render_overrides`; routing flags only. |
 | `pretrained_loras` | dict[slot, str] | `{}` | Slot -> already-trained LoRA (R2 key or local path); skips that slot's training. |
 | `process_shot_ids` | list[str] \| null | null | Restrict `finalize` / `regen_shot` to a subset of shots. |
-| `audio_key` | str \| null | null | R2 key of an audio bed to mux under the final video. |
+| `audio_key` | str \| null | null | R2 key of an audio bed to mux under the final video. A REQUESTED bed that cannot be fetched FAILS the render. Set `render_overrides.audio_optional: true` to opt into soft-degrade instead: the film ships silent, `audio_missing: true` appears in the result, and an `audio_missing` event is emitted. |
 | `keyframes_only` | bool | `false` | DEPRECATED, kept for compat: on a `render`, draw keyframes (training the LoRAs they need) then short-circuit before any i2v/finish GPU-seconds. The studio stopped sending it in v0.160.0 and sends `action:"preview"` instead; do not build new callers on it. |
 
 ### Actions
@@ -128,6 +128,12 @@ routing flags it still reads off it (e.g. `finish_offloaded`).
 | `train_lora` | yes | no | no | Train character adapters only. |
 | `i2v_clip` | no | no | yes | Standalone image-to-video on one keyframe. Separate job shape (no bundle); see [the `i2v_clip` job](#the-i2v_clip-job). |
 | `finish_clip` | no | no | no | Standalone finishing pass on one existing clip. Separate job shape (no bundle); see [the `finish_clip` job](#the-finish_clip-job). |
+
+Job-supplied R2 keys are validated against the render key map before any store I/O:
+`bundle_key` must sit under `bundles/`, `pretrained_loras` values under `loras/`, `audio_key`
+under `audio/` (a staged bed) or `renders/` (a pipeline-produced bed), and the standalone jobs'
+`clip_key` / `keyframe_key` under `renders/`. A key outside its prefix, an absolute key, or one
+carrying `..` fails the job before any transfer.
 
 The first five actions ride the `RenderRequest` shape above and the render pipeline. `i2v_clip` and
 `finish_clip` are sibling job types: the harness routes each directly to a standalone pass that needs
@@ -145,6 +151,7 @@ restores on the next render of this project.
 | `output_key` | str \| null | R2 key of the final muxed MP4 (`null` for preview / train-only). |
 | `seconds` | float \| null | Total duration of the final video. |
 | `has_audio` | bool | Whether an audio bed was muxed. |
+| `audio_missing` | bool | `true` ONLY on the explicit `audio_optional` soft-degrade: the requested bed could not be fetched and the job opted in, so the film shipped silent. Without the opt-in an unfetchable requested bed fails the render. |
 | `keyframes` | list[{shot_id, key}] | Per-shot keyframe PNG keys (generated, reused, and injected). Naming seam: the studio's `motion.backend` hook calls this field `keyframe_key`; this backend returns `key`, and the studio's own-gpu module translates `key` -> `keyframe_key` when mapping the result into the hook output. |
 | `clips` | list[{shot_id, key, target_seconds?}] | Per-shot clip keys (present when shots were animated). |
 | `lora` | dict[slot, {lora_id}] | Trained and passed-through adapters by slot. |

@@ -91,7 +91,7 @@ def test_render_request_maps_overrides_key():
 def test_render_request_defaults_and_type_guards():
     req = RenderRequest.from_dict({"bundle_key": "x"})
     assert req.action == "render"
-    assert req.quality_tier == "final"
+    assert req.quality_tier == "draft"          # wallet-safe default; the studio always sends it
     assert req.overrides == {}          # missing -> {}
     assert req.process_shot_ids is None  # absent -> None, not []
     # wrong types are coerced to safe empties, never crash
@@ -116,11 +116,12 @@ def test_render_request_builds_typed_config_from_tier_and_overrides():
     assert req.overrides.get("finish_offloaded") is True   # routing flag preserved on raw dict
 
 
-def test_render_request_default_config_is_a_final_render_config():
-    req = RenderRequest.from_dict({"bundle_key": "x"})  # quality_tier defaults to "final"
-    assert req.config.quality.value == "final"
-    assert req.config.keyframe.distill is False        # final = full-step
-    assert req.config.i2v.steps == 40
+def test_render_request_default_config_is_a_draft_render_config():
+    # An omitted quality_tier must never silently buy the most expensive render: the default is
+    # DRAFT (the wallet-safe floor). The studio always sends the tier explicitly.
+    req = RenderRequest.from_dict({"bundle_key": "x"})  # quality_tier defaults to "draft"
+    assert req.config.quality.value == "draft"
+    assert req.config.keyframe.distill is True         # draft = few-step distilled
 
 
 def test_cast_from_registry_filters_bad_slots():

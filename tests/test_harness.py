@@ -375,3 +375,89 @@ def test_restore_prior_state_returns_empty_on_missing_state(tmp_path):
     workdir.mkdir()
     trained, existing = _restore_prior_state(FailingStore(), "fresh-project", workdir)
     assert trained == set() and existing == {}
+
+
+# --------------------------------------------------------- job-key guard + slug unification (S3)
+
+def test_standalone_clip_keys_use_the_shared_slug():
+    # One project = ONE slug spelling across the full-render and the standalone-job paths
+    # ("My  Film" must never scatter clips across My_Film/ and My__Film/ phantom prefixes).
+    assert keys.i2v_clip_key("My  Film/x", "sh ot") == "renders/My_Film_x/clips/sh_ot_i2v.mp4"
+    assert keys.finished_clip_key("My  Film/x", "sh ot") == "renders/My_Film_x/clips/sh_ot_finished.mp4"
+    full = keys.clip_key("My  Film/x", "s").rsplit("/", 1)[0]
+    assert keys.i2v_clip_key("My  Film/x", "s").rsplit("/", 1)[0] == full
+
+
+def test_check_job_key_accepts_a_key_under_its_prefix():
+    k = "bundles/neon/b.tar.gz"
+    assert keys.check_job_key(k, prefixes=("bundles/",), what="t") == k
+
+
+def test_check_job_key_rejects_out_of_prefix_traversal_and_absolute():
+    for bad in ("projects/neon/state.tar.gz",  # wrong prefix
+                "/bundles/x",                   # absolute
+                "bundles/../projects/x",        # traversal
+                "bundles\\x",                   # backslash
+                "",                             # empty
+                " bundles/x"):                  # surrounding whitespace
+        with pytest.raises(ValueError):
+            keys.check_job_key(bad, prefixes=("bundles/",), what="t")
+
+
+def test_run_job_rejects_a_bundle_key_outside_the_bundle_prefix(tmp_path):
+    with pytest.raises(HarnessError, match="bundle_key"):
+        run_job(_job(bundle_key="renders/neon/full.mp4"), pipeline=FakePipeline(),
+                store=FakeStore(tmp_path / "x.tar.gz"), workdir=tmp_path / "w")
+
+
+def test_run_job_rejects_a_pretrained_lora_ref_outside_loras(tmp_path):
+    store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    with pytest.raises(HarnessError, match="LoRA"):
+        run_job(_job(pretrained_loras={"A": "bundles/evil.safetensors"},
+                     render_overrides={"finish_offloaded": True}),
+                pipeline=FakePipeline(), store=store, workdir=tmp_path / "w")
+
+
+# --------------------------------------------------------- audio honesty (S3)
+
+class NoAudioStore(FakeStore):
+    """Serves the bundle for everything except audio keys, which fail like a missing object."""
+    def get_file(self, key, dest):
+        if key.startswith("audio/"):
+            raise RuntimeError("NoSuchKey")
+        return super().get_file(key, dest)
+
+
+def test_requested_audio_that_cannot_be_fetched_fails_the_render(tmp_path):
+    # A silent film under a success status is the dishonest degrade; the DEFAULT is a real failure.
+    store = NoAudioStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    with pytest.raises(HarnessError, match="audio bed"):
+        run_job(_job(audio_key="audio/bed.m4a", render_overrides={"finish_offloaded": True}),
+                pipeline=FakePipeline(), store=store, workdir=tmp_path / "w")
+
+
+def test_audio_optional_opt_in_degrades_loud_not_silent(tmp_path):
+    # The EXPLICIT opt-in ships the film silent and says so in the TOP-LEVEL result, not just
+    # the event stream (a degrade is never silent).
+    store = NoAudioStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    res = run_job(_job(audio_key="audio/bed.m4a",
+                       render_overrides={"finish_offloaded": True, "audio_optional": True}),
+                  pipeline=FakePipeline(), store=store, workdir=tmp_path / "w")
+    assert res["audio_missing"] is True
+    assert res["has_audio"] is False
+    assert [c["shot_id"] for c in res["clips"]]       # the film itself still shipped
+
+
+def test_result_reports_audio_missing_false_by_default(tmp_path):
+    store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    res = run_job(_job(render_overrides={"finish_offloaded": True}),
+                  pipeline=FakePipeline(), store=store, workdir=tmp_path / "w")
+    assert res["audio_missing"] is False
+
+
+def test_audio_key_outside_the_key_map_is_rejected(tmp_path):
+    store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    with pytest.raises(HarnessError, match="audio_key"):
+        run_job(_job(audio_key="projects/neon/state.tar.gz",
+                     render_overrides={"finish_offloaded": True}),
+                pipeline=FakePipeline(), store=store, workdir=tmp_path / "w")

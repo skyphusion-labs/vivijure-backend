@@ -123,10 +123,16 @@ def test_model_server_uses_job_config_specs(monkeypatch):
     # construction dropped weight_name and broke the keyframe distill LoRA load)
     assert (worker._SERVER.specs[ModelRole.KEYFRAME_FEWSTEP].weight_name
             == DEFAULT_SPECS[ModelRole.KEYFRAME_FEWSTEP].weight_name)
-    # warm-worker path: second job gets the SAME server (model already loaded)
-    req2 = _req(render_overrides={"keyframe": {"base_model": "other/sdxl"}})
-    pipe2 = worker.build_pipeline(req2)
+    # warm-worker path: a second job with the SAME models reuses the loaded server
+    req_same = _req(render_overrides={"keyframe": {"base_model": "custom/sdxl-base"}})
+    pipe2 = worker.build_pipeline(req_same)
     assert pipe2.server is pipe.server  # reused
+    # ...but a second job with DIFFERENT models is REFUSED, never silently rendered on the
+    # previously-loaded (wrong) set -- the client resubmits and a fresh worker loads correctly.
+    import pytest
+    req_diverged = _req(render_overrides={"keyframe": {"base_model": "other/sdxl"}})
+    with pytest.raises(worker.ModelDivergenceError, match="other/sdxl"):
+        worker.build_pipeline(req_diverged)
     assert worker._SERVER.specs[ModelRole.KEYFRAME_BASE].repo_id == "custom/sdxl-base"  # unchanged
 
 
