@@ -252,25 +252,41 @@ def test_main_is_noop_without_flag(capsys):
     assert "verify_skipped" in out
 
 
+def _fatal_payload(out):
+    return json.loads(out.split("@event verify_fatal ", 1)[1].splitlines()[0])
+
+
 def test_main_requires_run_id_when_armed_and_fails_loud(capsys):
-    # armed but no run id: exit 2 AND a structured `error` on stdout (never a silent empty prefix)
+    # armed but no run id: exit 2 AND a structured verify_fatal on stdout (never a silent empty prefix)
     assert verify.main(env={"VJ_VERIFY": "1"}) == 2
     out = capsys.readouterr().out
-    assert "@event error " in out
-    payload = json.loads(out.split("@event error ", 1)[1].splitlines()[0])
-    assert payload["stage"] == "config" and "VJ_VERIFY_RUN_ID" in payload["message"]
+    assert "@event verify_fatal " in out
+    payload = _fatal_payload(out)
+    assert payload["stage"] == "config"
+    assert payload["missing"] == ["VJ_VERIFY_RUN_ID"]
 
 
-def test_main_bad_r2_config_fails_loud(capsys):
+def test_main_bad_r2_config_fails_loud_with_missing_names(capsys):
     # armed, run id present, but the R2_* env names are missing/misnamed (the F17 class): the store
-    # build raises BEFORE run_verify -- main must still emit a structured `error` to stdout, exit 1,
-    # and NOT hang silently. store=None forces the real R2Config.from_env path against the given env.
+    # build raises BEFORE run_verify -- main must emit verify_fatal naming the MISSING env vars to
+    # stdout, exit 1, and NOT hang silently. store=None forces the real R2Config.from_env path.
     code = verify.main(env={"VJ_VERIFY": "1", "VJ_VERIFY_RUN_ID": "run-abc"})  # no R2_* keys
     assert code == 1
     out = capsys.readouterr().out
-    assert "@event error " in out
-    payload = json.loads(out.split("@event error ", 1)[1].splitlines()[0])
-    assert payload["stage"] == "r2_config" and "missing env" in payload["message"]
+    assert "@event verify_fatal " in out
+    payload = _fatal_payload(out)
+    assert payload["stage"] == "r2_config"
+    # every R2_* name is absent here, so all four are reported, machine-readable (not a prose message)
+    assert set(payload["missing"]) == set(verify.R2_ENV_NAMES)
+
+
+def test_main_bad_r2_config_reports_only_the_missing_name(capsys):
+    # exactly one name missing -> the missing list is precisely that one (structured, actionable)
+    env = {"VJ_VERIFY": "1", "VJ_VERIFY_RUN_ID": "run-abc",
+           "R2_ENDPOINT": "x", "R2_ACCESS_KEY_ID": "x", "R2_SECRET_ACCESS_KEY": "x"}  # R2_BUCKET absent
+    assert verify.main(env=env) == 1
+    payload = _fatal_payload(capsys.readouterr().out)
+    assert payload["missing"] == ["R2_BUCKET"]
 
 
 def test_main_runs_injected_render_and_reports_status():
