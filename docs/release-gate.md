@@ -74,6 +74,8 @@ gate is auditable from the docs alone (ICD standard).
 exits 0) unless `VJ_VERIFY` is truthy, so the emitter has **zero effect on a normal render**. The
 harness sets the pod env when it spins the staging pod.
 
+**No silent failure.** Every fatal precondition (missing `VJ_VERIFY_RUN_ID`, or an incomplete/misnamed R2 config -- the F17 class, creds passed as `R2_S3_*`/`AWS_*` instead of the `R2_*` names the store reads) emits a structured terminal `@event error {stage, message}` to stdout BEFORE exiting non-zero. A launch-side env mistake can never present as a 30-minute empty prefix with nothing to read.
+
 **Channel = R2, run-scoped (option B, same as the render progress channel).** The worker already
 holds the R2 token, so this adds no infra and no secret, and the channel is durable/queryable after
 the pod is torn down. Two objects per run, keyed by run id under a dedicated `verify/` prefix so a

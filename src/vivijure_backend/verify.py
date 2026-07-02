@@ -57,7 +57,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -446,23 +445,40 @@ def main(argv: list[str] | None = None, env: dict | None = None,
     """`python -m vivijure_backend.verify`. Hard no-op unless VJ_VERIFY is armed (so a normal render
     is untouched). Armed: build the R2 store, run the draft verify, and return 0 iff the channel
     reached a `complete` status (not `error`). Tests inject `env`/`store`/`render`; the pod path uses
-    the real R2 store and `_pod_draft_render`."""
+    the real R2 store and `_pod_draft_render`.
+
+    NO SILENT FAILURE: every fatal precondition (missing VJ_VERIFY_RUN_ID, an incomplete/misnamed R2
+    config) emits a structured terminal `error` event to stdout BEFORE returning non-zero, so a
+    launch-side env mistake can never present as a 30-minute empty prefix with nothing to read."""
     e = env if env is not None else os.environ
     if not is_enabled(e):
         print("@event verify_skipped " + json.dumps({"reason": "VJ_VERIFY not set"}, sort_keys=True))
         return 0
 
+    prefix = key_prefix_from(e)
+
     run_id = run_id_from(e)
     if not run_id:
-        print("verify: VJ_VERIFY_RUN_ID is required when VJ_VERIFY is set", file=sys.stderr)
+        # No run id => no R2 key is even possible, but the failure must still be LOUD, never a silent
+        # empty prefix (the exact 30-min-of-nothing failure a stubbed read_logs turns invisible). Emit
+        # a structured terminal `error` through a store-less emitter so stdout -- the redundant
+        # transport -- always carries the reason, then exit.
+        VerifyEmitter(None, "unkeyed", prefix=prefix).error(
+            "config", "VJ_VERIFY_RUN_ID is required when VJ_VERIFY is set")
         return 2
 
-    prefix = key_prefix_from(e)
     baseline = baseline_from(e)
 
     if store is None:
         from .harness.r2 import R2, R2Config
-        store = R2(R2Config.from_env(e))
+        try:
+            store = R2(R2Config.from_env(e))
+        except Exception as exc:  # noqa: BLE001 -- a bad/misnamed R2 config must fail LOUD, not silent
+            # R2 itself is the failure, so we cannot record it TO R2 (the same bind the handler has);
+            # emit the structured `error` to stdout through a store-less emitter so a cred-NAME mismatch
+            # (the F17 class: creds passed as R2_S3_*/AWS_* instead of R2_*) is never an invisible hang.
+            VerifyEmitter(None, run_id, prefix=prefix).error("r2_config", exc)
+            return 1
     if render is None:
         render = lambda em: _pod_draft_render(em, e)  # noqa: E731 -- bind the env into the seam
 
