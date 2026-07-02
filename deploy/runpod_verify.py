@@ -27,9 +27,12 @@ and asserts on them (machine-readable state channel, GMCP-style `@event <name> {
       runtime-quant baseline (parity metric, asserted above threshold).
   @event complete {"output_key": str, "clip_bytes": int}   Render done; output object written.
 
-NO LIVE SPIN FROM THIS MODULE BY DEFAULT. `main()` runs a MOCKED dry-run unless `--live` is passed
-AND the RunPod client is wired; the live binding (RunpodMcpPodClient) is a documented seam the gated
-validation fills. Unit tests drive the whole flow against FakePodClient -- no GPU, no network.
+NO LIVE SPIN FROM THIS MODULE BY DEFAULT. `main()` runs a MOCKED dry-run unless `--live` is passed;
+`--live` binds RunpodSdkPodClient, the SECURE-cloud-only live RunPod client (up/down/list via the
+`runpod` SDK; RUNPOD_API_KEY from env). The pod-side verify EMITTER that produces the @event contract,
+and the channel read_logs reads it back over, is the remaining seam (RunpodSdkPodClient.read_logs);
+until it lands, `--live` proves pod lifecycle, not a full verify PASS. Unit tests drive the whole flow
+against FakePodClient -- no GPU, no network.
 """
 from __future__ import annotations
 
@@ -131,15 +134,112 @@ class PodClient(Protocol):
     def delete_pod(self, pod_id: str) -> dict[str, Any]: ...
 
 
-class RunpodMcpPodClient:
-    """Live RunPod client -- the seam the GATED validation fills. Deliberately NOT implemented here so
-    importing/unit-testing this module can NEVER fire a real pod. The first real spin wires this to the
-    RunPod MCP tools and routes through the integration checkpoint (image-readiness judged first)."""
+def _import_runpod(api_key):
+    """Import the `runpod` SDK lazily and set the API key. Lazy so importing this module (and every unit
+    test) never needs the SDK installed or a key present -- only a real `--live` run does. The key is
+    read from RUNPOD_API_KEY (never hardcoded, never logged)."""
+    import os
+    import runpod  # type: ignore  # noqa: I001 -- optional dep, only for the live path
+    key = api_key or os.environ.get("RUNPOD_API_KEY")
+    if not key:
+        raise RuntimeError("RUNPOD_API_KEY is not set; the live RunPod client needs it. Pass it via env "
+                           "or a CI secret -- never hardcode a key.")
+    runpod.api_key = key
+    return runpod
 
-    def __getattr__(self, _name: str) -> Any:
-        raise NotImplementedError(
-            "RunpodMcpPodClient is a gated seam: wire it to the RunPod MCP for the authorized "
-            "validation run. No live pod spin from the harness module itself.")
+
+def _null_log_fetcher(_pod_id):
+    """Default @event log source for the live client: NONE wired. Returns [] and NEVER raises, so a
+    `--live` run degrades HONESTLY -- the verify poll loop simply never sees `@event complete`, fails on
+    the hard TTL with a clear reason, and the always-run teardown still fires (no leaked pod). The
+    pod-side verify entrypoint that EMITS the @event contract, plus the channel it writes to (the
+    read_logs pairing), is the seam this hook fills; until it lands, `--live` proves pod lifecycle
+    (up/down/list), not a full verify PASS."""
+    return []
+
+
+class RunpodSdkPodClient:
+    """Live RunPod pod-lifecycle client, SECURE cloud ONLY, backed by the `runpod` SDK (>=1.7).
+
+    Implements the up/down/list verbs run_verify drives: list_gpu_types (SECURE GPUs only), create_pod
+    (forces cloud_type=SECURE -- NEVER COMMUNITY: community caps pod disk ~20GB, the RunPod-secure-only
+    rule), get_pod, stop_pod (halts billing, keeps disk for SSH debug), delete_pod (terminate,
+    irreversible teardown). The hard TTL is enforced HARNESS-SIDE by run_verify (the SDK create_pod has
+    no native auto-stop), so a hung render is stopped by the poll loop plus the always-run teardown.
+
+    read_logs is the ONE seam that pairs with the pod-side verify EMITTER (backend lane): the pod writes
+    the @event contract, and the channel it is read back over is injected as `log_fetcher`. The default
+    (`_null_log_fetcher`) returns [] so a `--live` run can NEVER silently pass without a real @event
+    stream and never leaks a pod on a missing/broken channel.
+
+    The `runpod` SDK is imported lazily; unit tests inject a fake `sdk` and never import it."""
+
+    def __init__(self, *, api_key=None, container_disk_gb=500, data_center_id=None,
+                 log_fetcher=None, name_prefix="vj-verify", sdk=None):
+        self._sdk = sdk if sdk is not None else _import_runpod(api_key)
+        self._container_disk_gb = container_disk_gb
+        self._data_center_id = data_center_id
+        self._log_fetcher = log_fetcher or _null_log_fetcher
+        self._name_prefix = name_prefix
+
+    def list_gpu_types(self):
+        """SECURE-cloud GPU types in the harness shape ({id, displayName, available}). `available` is
+        True iff RunPod offers the card on SECURE cloud, so pick_gpu_type can never select a
+        COMMUNITY-only SKU."""
+        out = []
+        for g in (self._sdk.get_gpus() or []):
+            out.append({"id": g.get("id"), "displayName": g.get("displayName") or g.get("id"),
+                        "available": bool(g.get("secureCloud"))})
+        return out
+
+    def create_pod(self, *, image, gpu_type_id, env, registry_auth_id, ttl_seconds):
+        """Spin ONE SECURE-cloud GPU pod on `image`. `ttl_seconds` is enforced by the harness poll loop,
+        not the SDK. `registry_auth_id` is rejected loudly (not silently ignored): our images are public
+        GHCR (no auth needed); a private image must be pulled via a pre-created RunPod template carrying
+        containerRegistryAuthId, spun from template_id -- a separate seam, not this call."""
+        if registry_auth_id:
+            raise ValueError("RunpodSdkPodClient pulls public GHCR images (no registry auth). For a "
+                             "private image, provision a RunPod template with containerRegistryAuthId "
+                             "and spin from its template_id -- do not pass registry_auth_id here.")
+        pod = self._sdk.create_pod(
+            name=("%s-%s" % (self._name_prefix, gpu_type_id)).replace(" ", "-")[:60],
+            image_name=image, gpu_type_id=gpu_type_id, cloud_type="SECURE",
+            container_disk_in_gb=self._container_disk_gb, env=dict(env or {}),
+            data_center_id=self._data_center_id, support_public_ip=True, start_ssh=True)
+        pod_id = pod.get("id") if isinstance(pod, dict) else None
+        if not pod_id:
+            raise RuntimeError("RunPod create_pod returned no id: %r" % (pod,))
+        return {"id": pod_id}
+
+    def get_pod(self, pod_id):
+        return self._sdk.get_pod(pod_id) or {"id": pod_id}
+
+    def read_logs(self, pod_id):
+        try:
+            lines = self._log_fetcher(pod_id)
+            return list(lines) if lines else []
+        except Exception:  # noqa: BLE001 -- a log-fetch fault must never leak the pod; degrade to []
+            return []
+
+    def stop_pod(self, pod_id):
+        self._sdk.stop_pod(pod_id)
+        return {"id": pod_id, "desiredStatus": "EXITED"}
+
+    def delete_pod(self, pod_id):
+        self._sdk.terminate_pod(pod_id)
+        return {"id": pod_id, "deleted": True}
+
+    def list_live_pod_ids(self):
+        """Every pod id currently on the account -- for the post-run teardown-confirm (assert our pod id
+        is gone => list-confirmed zero). Shape-tolerant across SDK versions."""
+        pods = self._sdk.get_pods() or []
+        if isinstance(pods, dict):
+            pods = pods.get("pods") or (pods.get("myself") or {}).get("pods") or []
+        return [p.get("id") for p in pods if isinstance(p, dict) and p.get("id")]
+
+
+# Back-compat alias: this client used to be a NotImplementedError seam named RunpodMcpPodClient.
+RunpodMcpPodClient = RunpodSdkPodClient
 
 
 # --------------------------------------------------------------------------- @event parsing + facts
@@ -629,6 +729,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--live", action="store_true", help="use the (gated) live RunPod client")
     ap.add_argument("--regression", action="store_true",
                     help="run the FULL capability regression (CAP-1..6 + BAK-3/4), not just the smoke")
+    ap.add_argument("--data-center-id", default=None,
+                    help="pin the SECURE pod to a specific RunPod data center (default: RunPod picks)")
+    ap.add_argument("--container-disk-gb", type=int, default=500,
+                    help="pod container disk in GB (default 500; a ~87GB baked image fits with room)")
     args = ap.parse_args(argv)
 
     if args.regression:
@@ -639,7 +743,8 @@ def main(argv: list[str] | None = None) -> int:
         cfg = VerifyConfig(image=args.image, tier=args.tier, registry_auth_id=args.registry_auth_id)
         evaluator = evaluate
     if args.live:
-        client: PodClient = RunpodMcpPodClient()  # type: ignore[assignment]
+        client: PodClient = RunpodSdkPodClient(  # type: ignore[assignment]
+            data_center_id=args.data_center_id, container_disk_gb=args.container_disk_gb)
     else:
         mode = "REGRESSION " if args.regression else ""
         print(f"runpod_verify: {mode}DRY-RUN (mocked client; no GPU, no spend). Pass --live for the gated run.")

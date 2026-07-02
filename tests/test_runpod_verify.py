@@ -233,13 +233,139 @@ def test_run_verify_hard_ttl_stops_a_hung_render():
     assert any("hard TTL" in r for r in report["reasons"])
 
 
-def test_live_client_is_a_gated_unimplemented_seam():
-    # Importing/using the module must never be able to fire a real pod: the live client raises.
-    with pytest.raises(NotImplementedError):
-        rv.RunpodMcpPodClient().create_pod(image="x", gpu_type_id="y", env={},
-                                           registry_auth_id=None, ttl_seconds=1)
+def test_live_client_never_fires_without_creds(monkeypatch):
+    # Importing the module never touches the SDK (lazy import -- proven by every other test running with
+    # no `runpod` installed). Constructing the live client with no injected sdk AND no key fails CLOSED
+    # (ModuleNotFoundError if the SDK is absent, RuntimeError for the missing key if present), so it can
+    # never silently spin a real pod by accident.
+    monkeypatch.delenv("RUNPOD_API_KEY", raising=False)
+    with pytest.raises(Exception):
+        rv.RunpodSdkPodClient()
 
 
 def test_main_dry_run_passes_offline():
     # The CLI default path is a mocked dry-run: exit 0, no GPU, no network.
     assert rv.main(["--image", "img:dry"]) == 0
+
+
+# ----------------------------------------------------------------- live SDK client (RunpodSdkPodClient)
+# These drive the live client against a FAKE `runpod` SDK object injected via `sdk=` -- no runpod import,
+# no network, no pod. They prove the SECURE-only + up/down/list plumbing and the honest read_logs seam.
+
+class FakeSdk:
+    """Records every SDK call; returns canned shapes. Injected into RunpodSdkPodClient(sdk=...)."""
+
+    def __init__(self, gpus=None, pods=None):
+        self._gpus = gpus if gpus is not None else [
+            {"id": "NVIDIA H200", "displayName": "NVIDIA H200", "secureCloud": True},
+            {"id": "NVIDIA RTX 4090", "displayName": "NVIDIA RTX 4090", "secureCloud": False}]
+        self._pods = pods if pods is not None else []
+        self.calls = []
+
+    def get_gpus(self):
+        self.calls.append(("get_gpus",))
+        return self._gpus
+
+    def create_pod(self, **kw):
+        self.calls.append(("create_pod", kw))
+        return {"id": "pod-live-1"}
+
+    def get_pod(self, pod_id):
+        self.calls.append(("get_pod", pod_id))
+        return {"id": pod_id, "desiredStatus": "RUNNING"}
+
+    def stop_pod(self, pod_id):
+        self.calls.append(("stop_pod", pod_id))
+        return {"id": pod_id}
+
+    def terminate_pod(self, pod_id):
+        self.calls.append(("terminate_pod", pod_id))
+        return {"id": pod_id}
+
+    def get_pods(self):
+        self.calls.append(("get_pods",))
+        return self._pods
+
+
+def test_sdk_client_list_gpu_types_marks_only_secure_available():
+    sdk = FakeSdk()
+    client = rv.RunpodSdkPodClient(sdk=sdk)
+    gpus = client.list_gpu_types()
+    by = {g["displayName"]: g["available"] for g in gpus}
+    assert by["NVIDIA H200"] is True
+    assert by["NVIDIA RTX 4090"] is False  # community-only SKU is never "available"
+    # and pick_gpu_type refuses the non-secure card for the i2v tier
+    assert rv.pick_gpu_type(gpus, "i2v") == "NVIDIA H200"
+
+
+def test_sdk_client_create_pod_forces_secure_cloud():
+    sdk = FakeSdk()
+    client = rv.RunpodSdkPodClient(sdk=sdk, container_disk_gb=500)
+    out = client.create_pod(image="ghcr.io/x:1", gpu_type_id="NVIDIA H200",
+                            env={"VJ_VERIFY": "1"}, registry_auth_id=None, ttl_seconds=1800)
+    assert out == {"id": "pod-live-1"}
+    (_, kw), = [c for c in sdk.calls if c[0] == "create_pod"]
+    assert kw["cloud_type"] == "SECURE"          # NEVER COMMUNITY
+    assert kw["image_name"] == "ghcr.io/x:1"
+    assert kw["container_disk_in_gb"] == 500
+    assert kw["env"] == {"VJ_VERIFY": "1"}
+
+
+def test_sdk_client_create_pod_rejects_registry_auth_id():
+    client = rv.RunpodSdkPodClient(sdk=FakeSdk())
+    with pytest.raises(ValueError):
+        client.create_pod(image="ghcr.io/x:1", gpu_type_id="NVIDIA H200", env={},
+                          registry_auth_id="ra-123", ttl_seconds=1800)
+
+
+def test_sdk_client_read_logs_never_raises_and_defaults_empty():
+    client = rv.RunpodSdkPodClient(sdk=FakeSdk())
+    assert client.read_logs("pod-live-1") == []           # null fetcher: honest degrade
+    def boom(_pid):
+        raise RuntimeError("log channel down")
+    client2 = rv.RunpodSdkPodClient(sdk=FakeSdk(), log_fetcher=boom)
+    assert client2.read_logs("pod-live-1") == []          # a fetch fault must never leak the pod
+
+
+def test_sdk_client_stop_and_delete_map_to_sdk_verbs():
+    sdk = FakeSdk()
+    client = rv.RunpodSdkPodClient(sdk=sdk)
+    client.stop_pod("p1")
+    client.delete_pod("p1")
+    names = [c[0] for c in sdk.calls]
+    assert "stop_pod" in names and "terminate_pod" in names  # delete => terminate (irreversible)
+
+
+def test_sdk_client_list_live_pod_ids_tolerates_shapes():
+    assert rv.RunpodSdkPodClient(sdk=FakeSdk(pods=[{"id": "a"}, {"id": "b"}])).list_live_pod_ids() == ["a", "b"]
+    assert rv.RunpodSdkPodClient(sdk=FakeSdk(pods={"pods": [{"id": "c"}]})).list_live_pod_ids() == ["c"]
+    assert rv.RunpodSdkPodClient(sdk=FakeSdk(pods=[])).list_live_pod_ids() == []
+
+
+def test_sdk_client_drives_run_verify_end_to_end_pass():
+    # Inject a log_fetcher that replays a PASS @event stream: the whole harness runs against the live
+    # client shape with no network, and PASS => the pod is TERMINATED (full teardown, no leak).
+    sdk = FakeSdk()
+    client = rv.RunpodSdkPodClient(sdk=sdk, log_fetcher=lambda _pid: _pass_log())
+    cfg = rv.VerifyConfig(image="ghcr.io/x:1")
+    report = rv.run_verify(client, cfg, clock=_clock(), evaluator=rv.evaluate)
+    assert report["passed"] is True
+    assert report["signal"] == "promote"
+    assert report["teardown"] == "deleted"
+    assert any(c[0] == "terminate_pod" for c in sdk.calls)  # PASS path deletes (terminates) the pod
+
+
+def test_sdk_client_missing_log_channel_fails_closed_and_tears_down():
+    # No @event stream (null fetcher) => never reaches @event complete => TTL FAIL, and the pod is
+    # STOPPED (kept for debug), never left running.
+    sdk = FakeSdk()
+    client = rv.RunpodSdkPodClient(sdk=sdk)  # default null fetcher
+    cfg = rv.VerifyConfig(image="ghcr.io/x:1", ttl_seconds=3)
+    report = rv.run_verify(client, cfg, clock=_clock(), evaluator=rv.evaluate)
+    assert report["passed"] is False
+    assert report["teardown"] == "stopped"
+    assert any(c[0] == "stop_pod" for c in sdk.calls)
+
+
+def test_mcp_alias_points_at_sdk_client():
+    assert rv.RunpodMcpPodClient is rv.RunpodSdkPodClient
