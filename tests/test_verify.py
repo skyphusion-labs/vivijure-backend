@@ -252,8 +252,25 @@ def test_main_is_noop_without_flag(capsys):
     assert "verify_skipped" in out
 
 
-def test_main_requires_run_id_when_armed():
+def test_main_requires_run_id_when_armed_and_fails_loud(capsys):
+    # armed but no run id: exit 2 AND a structured `error` on stdout (never a silent empty prefix)
     assert verify.main(env={"VJ_VERIFY": "1"}) == 2
+    out = capsys.readouterr().out
+    assert "@event error " in out
+    payload = json.loads(out.split("@event error ", 1)[1].splitlines()[0])
+    assert payload["stage"] == "config" and "VJ_VERIFY_RUN_ID" in payload["message"]
+
+
+def test_main_bad_r2_config_fails_loud(capsys):
+    # armed, run id present, but the R2_* env names are missing/misnamed (the F17 class): the store
+    # build raises BEFORE run_verify -- main must still emit a structured `error` to stdout, exit 1,
+    # and NOT hang silently. store=None forces the real R2Config.from_env path against the given env.
+    code = verify.main(env={"VJ_VERIFY": "1", "VJ_VERIFY_RUN_ID": "run-abc"})  # no R2_* keys
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "@event error " in out
+    payload = json.loads(out.split("@event error ", 1)[1].splitlines()[0])
+    assert payload["stage"] == "r2_config" and "missing env" in payload["message"]
 
 
 def test_main_runs_injected_render_and_reports_status():
