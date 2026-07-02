@@ -367,13 +367,18 @@ def run_verify(store, *, run_id: str, render: RenderFn,
 
 def _pod_draft_render(emitter: "VerifyEmitter", env: dict) -> RenderOutcome:
     """RUN ON THE POD ONLY. Drive one draft-tier render through the REAL serverless entrypoint
-    (`harness.handler.handler`) and hand back the terminal facts. Deferred imports (the handler pulls
-    in torch/boto3/the registered GPU pipeline) so this module stays CPU-importable and the unit tests
-    never reach this path. Live proof is the authorized S1 pod run (docs/release-gate.md), exactly
-    like the harness's own RunpodMcpPodClient seam.
+    (`worker.handler`) and hand back the terminal facts. Deferred imports (the worker pulls in
+    torch/boto3/the GPU pipeline) so this module stays CPU-importable and the unit tests never reach
+    this path. Live proof is the authorized S1 pod run (docs/release-gate.md), exactly like the
+    harness's own RunpodMcpPodClient seam.
 
-    We delegate the render to `handler()` rather than re-wiring `run_job` + the model mirror + the
-    pipeline registry, so this seam can never drift from the real production render path. `first_frame`
+    We delegate to `worker.handler`, NOT the inner `harness.handler.handler`: the worker entrypoint
+    REGISTERS the per-job GPU pipeline (register_pipeline(build_pipeline(req))) before handing off,
+    which the harness handler assumes was already done. `python -m vivijure_backend.verify` is a
+    different entrypoint than the worker, so calling the harness handler directly left the pipeline
+    registry empty and the render failed with "no GPU Pipeline registered" (found on the S1 watched
+    pod). Routing through worker.handler means the verify render is byte-identical to a real
+    serverless render, registration included, and can never drift from it. `first_frame`
     is then MEASURED from the render's own structured progress channel (the ProgressEmitter ndjson the
     render already wrote to R2): the first `i2v_step`/`keyframe_done` timestamp minus the `started`
     timestamp is the true time-to-first-frame -- no progress hook to race, no second source of truth.
@@ -384,7 +389,7 @@ def _pod_draft_render(emitter: "VerifyEmitter", env: dict) -> RenderOutcome:
     from pathlib import Path
     import tempfile
 
-    from .harness import handler as _handler
+    from . import worker as _worker
     from .harness.r2 import R2, R2Config
 
     bundle_key = str(env.get("VJ_VERIFY_BUNDLE_KEY", "")).strip()
@@ -398,7 +403,7 @@ def _pod_draft_render(emitter: "VerifyEmitter", env: dict) -> RenderOutcome:
         "action": "render", "project": project,
         "bundle_key": bundle_key, "quality_tier": "draft",
     }}
-    result = _handler.handler(job)
+    result = _worker.handler(job)
 
     output_key = result.get("output_key") or ""
     if not output_key:
