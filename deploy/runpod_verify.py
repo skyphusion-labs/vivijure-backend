@@ -863,26 +863,44 @@ def r2_summary_event_reader(env: dict, run_id: str, *, prefix: str = "verify"):
 
 def promote_image(image: str, *, endpoint_id: str = PROD_ENDPOINT_ID, api_key: str | None = None,
                   transport: "Callable[..., Any] | None" = None) -> dict:
-    """Promote a verified image onto the PRODUCTION serverless endpoint by repinning its ``imageName``.
-    This is the ONLY path an image reaches prod (docs/release-gate.md doctrine); the caller gates it
-    behind an explicit ``--promote`` go, so a bare verify run never touches prod. ``transport`` is
-    injected in tests (no network). The RunPod API key is read from RUNPOD_API_KEY and NEVER logged."""
+    """Promote a verified image onto the PRODUCTION serverless endpoint by repinning the ``imageName``
+    on the endpoint's TEMPLATE. A serverless endpoint's image lives on its template, NOT the endpoint:
+    ``PATCH /v1/endpoints/{id}`` with an ``imageName`` is rejected by RunPod REST v1 with a 400 (see the
+    banked lesson runpod-rest-v1-honors-volume-env). This is the ONLY path an image reaches prod
+    (docs/release-gate.md doctrine); the caller gates it behind an explicit ``--promote`` go, so a bare
+    verify run never touches prod. ``transport`` is injected in tests (no network). The RunPod API key is
+    read from RUNPOD_API_KEY and NEVER logged."""
     key = _clean_key(api_key or os.environ.get("RUNPOD_API_KEY"))
     if not key:
         raise RuntimeError("promote needs RUNPOD_API_KEY (never hardcode a key)")
     if transport is None:
         import requests
 
-        def transport(url, *, headers, payload):  # noqa: ANN001 -- thin default HTTP leg
-            resp = requests.patch(url, headers=headers, json=payload, timeout=30)
+        def transport(url, *, method="PATCH", headers, payload=None):  # noqa: ANN001 -- thin HTTP leg
+            resp = requests.request(method, url, headers=headers, json=payload, timeout=30)
             resp.raise_for_status()
             return resp.json() if resp.content else {}
 
-    url = "https://rest.runpod.io/v1/endpoints/%s" % endpoint_id
-    body = transport(url,
-                     headers={"Authorization": "Bearer %s" % key, "Content-Type": "application/json"},
-                     payload={"imageName": image})
-    return {"endpoint_id": endpoint_id, "image": image, "response": body}
+    headers = {"Authorization": "Bearer %s" % key, "Content-Type": "application/json"}
+    base = "https://rest.runpod.io/v1"
+    # Resolve the endpoint's templateId at runtime (no hardcode), then repin the TEMPLATE's imageName.
+    # A :version-tag change forces the endpoint to re-provision workers onto the new image (:latest
+    # would cache); repinning the template is what actually moves prod.
+    endpoint = transport("%s/endpoints/%s" % (base, endpoint_id), method="GET", headers=headers)
+    template_id = endpoint.get("templateId")
+    if not template_id:
+        raise RuntimeError("promote: endpoint %s has no templateId; cannot repin image" % endpoint_id)
+    transport("%s/templates/%s" % (base, template_id), method="PATCH", headers=headers,
+              payload={"imageName": image})
+    # Read-back: the promote self-verifies -- the template must now report the promoted image, so a
+    # silent no-op (200 that did not take) fails the promote instead of falsely reporting success.
+    after = transport("%s/templates/%s" % (base, template_id), method="GET", headers=headers)
+    landed = after.get("imageName")
+    if landed != image:
+        raise RuntimeError("promote read-back mismatch: template %s imageName=%r, expected %r"
+                           % (template_id, landed, image))
+    return {"endpoint_id": endpoint_id, "template_id": template_id, "image": image,
+            "imageName": landed, "response": after}
 
 
 def _github_env_writer(name: str) -> "Callable[[str], None]":

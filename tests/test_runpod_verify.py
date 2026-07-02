@@ -468,19 +468,43 @@ def test_run_verify_calls_on_pod_created_with_id():
     assert seen == ["pod-xyz"]                            # id captured for the always-run stop backstop
 
 
-def test_promote_image_repins_prod_endpoint_with_image():
-    seen = {}
+def test_promote_image_repins_the_endpoints_template_not_the_endpoint():
+    calls = []
 
-    def transport(url, *, headers, payload):
-        seen.update(url=url, headers=headers, payload=payload)
-        return {"id": "t9wcvlxh8rc5la"}
+    def transport(url, *, method="PATCH", headers, payload=None):
+        calls.append((method, url, payload))
+        if method == "GET" and "/endpoints/" in url:
+            return {"id": "t9wcvlxh8rc5la", "templateId": "tpl-1"}
+        if method == "PATCH" and "/templates/" in url:
+            return {}
+        if method == "GET" and "/templates/" in url:
+            return {"imageName": "ghcr.io/x:2"}  # read-back: repin took
+        raise AssertionError("unexpected promote call: %s %s" % (method, url))
 
     out = rv.promote_image("ghcr.io/x:2", endpoint_id="t9wcvlxh8rc5la", api_key="k-1",
                            transport=transport)
-    assert "t9wcvlxh8rc5la" in seen["url"]
-    assert seen["payload"] == {"imageName": "ghcr.io/x:2"}
-    assert seen["headers"]["Authorization"].startswith("Bearer ")
-    assert out["image"] == "ghcr.io/x:2" and out["endpoint_id"] == "t9wcvlxh8rc5la"
+    # resolved the endpoint's template, then PATCHed the TEMPLATE image -- never the endpoint (that 400s)
+    assert ("GET", "https://rest.runpod.io/v1/endpoints/t9wcvlxh8rc5la", None) in calls
+    patch = [c for c in calls if c[0] == "PATCH"][0]
+    assert "/templates/tpl-1" in patch[1]
+    assert patch[2] == {"imageName": "ghcr.io/x:2"}
+    assert not any(m == "PATCH" and "/endpoints/" in u for m, u, _ in calls)
+    assert out["image"] == "ghcr.io/x:2" and out["template_id"] == "tpl-1"
+    assert out["imageName"] == "ghcr.io/x:2"
+
+
+def test_promote_image_raises_on_readback_mismatch():
+    def transport(url, *, method="PATCH", headers, payload=None):
+        if method == "GET" and "/endpoints/" in url:
+            return {"templateId": "tpl-1"}
+        if method == "PATCH":
+            return {}
+        if method == "GET" and "/templates/" in url:
+            return {"imageName": "ghcr.io/x:OLD"}  # repin silently did not take
+        raise AssertionError("unexpected call")
+
+    with pytest.raises(RuntimeError):
+        rv.promote_image("ghcr.io/x:2", endpoint_id="e", api_key="k-1", transport=transport)
 
 
 def test_promote_image_requires_key(monkeypatch):
