@@ -83,8 +83,11 @@ class VerifyConfig:
     image: str                                  # the freshly built image ref (ghcr.io/...:tag)
     tier: str = "i2v"                            # GPU_TIERS key; i2v => the 3-arch pool (sm_90/100/120)
     registry_auth_id: str | None = None          # containerRegistryAuthId (MCP-managed, no dashboard)
-    ttl_seconds: int = 3000                      # HARD wall-clock auto-stop (headroom for a cold
-    #                                              ~87GB bake pull + first draft render); regardless of progress
+    ttl_seconds: int = 5400                      # HARD wall-clock CAP (not a spend floor -- billing is
+    #                                              actual runtime). A cold ~87GB bake pull measured ~37min
+    #                                              (run 28609487838 pod_state_log); 90min leaves room for
+    #                                              pull + first draft render + margin. Cut this once the
+    #                                              pull is warmed (see backend issue: DC-pin/slim/pre-pull).
     max_first_frame_seconds: float = 300.0       # time-to-first-frame bound
     max_baked_staging_seconds: float = 30.0      # baked-sentinel HIT: staging must be ~0
     min_sharpness_ratio: float = 0.97            # quality parity vs runtime-quant baseline (#118 gate)
