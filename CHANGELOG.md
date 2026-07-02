@@ -5,6 +5,35 @@ pre-1.0: PATCH for fixes and backend-only tweaks, MINOR for new features). Entri
 newest-first. History before this file was introduced lives in the git tags; the recent
 releases are summarized below from that history.
 
+## [0.4.0] -- 2026-07-02
+
+**feat(release-gate): the automated pod-staging verify gate goes LIVE end to end (verify @event channel + live SECURE RunPod pod client + promote)**
+
+The release doctrine (pod = staging, serverless = production; `docs/release-gate.md`) is now ENFORCED, replacing the dry-run-only harness. A pushed `backend-v*` tag builds the baked image; the verify gate then spins a SECURE GPU pod on it, runs a draft render that emits a machine-readable structured `@event` channel, asserts on it, and promotes the image onto the production serverless endpoint ONLY on a green verify before tearing the pod down (spend proven to zero). This is the FIRST image to carry the verify emitter.
+
+- **Pod-side verify `@event` emitter (#175):** `python -m vivijure_backend.verify`, armed only by `VJ_VERIFY` (a hard no-op otherwise, zero effect on a normal render). Emits `gpu_probe` / `first_frame` / `sharpness` / `complete` (+ `error`) to a run-scoped R2 channel (`verify/<run_id>/summary.json` + `events.ndjson`), mirrored byte-identically to stdout as a fallback transport. The emitted payloads are exactly what the harness reader asserts on, so `events_from_summary()` feeds straight into `runpod_verify.evaluate` with no prose parsing. 31 CPU tests including a cross-module contract test.
+- **Live SECURE RunPod pod client (#173, #174):** the previously-stubbed pod-lifecycle seam is implemented, SECURE cloud only (never COMMUNITY), with SECURE resolved from the `get_gpu(id)` detail and the real GeForce GPU id (both found by live smoke). up / down / list, hard TTL auto-stop, teardown-confirmed-zero.
+- **Live gate + promote wiring (#176):** `runpod_verify` grows the real up|verify|promote|down path (the old workflow advertised a phantom gate it could never run); promote pins the verified image onto the prod endpoint under maintainer authorization. The gate launches the verify entrypoint on the pod and paces its polls (#178).
+- **RunPod key hygiene (#177):** the API key is normalised (strip whitespace + matched quotes) with a no-leak shape diagnostic, so a mis-shaped secret fails with a safe message, never an echoed value.
+
+**perf(finish): NVENC-encode the finish stage + stream interpolation (#172)**
+
+The finish pass hardware-encodes via NVENC and streams RIFE interpolation frame-by-frame instead of buffering the whole clip, bounding host RAM on long shots.
+
+**fix(harness): never mirror a terminal snapshot through RunPod progress_update (F17, #171)**
+
+F17 root cause: the SDK's `progress_update` posts `IN_PROGRESS` from a daemon thread, racing and clobbering the handler's terminal FAILED/COMPLETED result. The progress hook now drops terminal snapshots, so RunPod's terminal status comes only from the handler's own return/raise.
+
+**fix(pipeline): silent degrades become real errors; draft default; one slug; job-key pinning (#170)**
+
+A finish/polish failure now fails the render with the real per-shot error instead of silently shipping a raw clip with `applied=[]`; the default quality tier is `draft`; one canonical project slug; job-supplied R2 keys are pinned to the render key map before any store I/O.
+
+**feat(derisk): userspace full-block egress guard for the offline-correctness proof (#17, #161)**
+
+A userspace egress guard that fully blocks network egress, so the baked-image offline-correctness proof (weights come from the image, never R2/HF) is enforced, not merely asserted.
+
+Plus docs/legal hardening: outsider-runnable deploy + mirrored constellation map (#166), `SUPPORT.md` + security@ routing (#168), canonical verbatim AGPL-3.0 `LICENSE` (#165), `NOTICE` copyright holder + uniform README license footer (#167), and the 0.3.x baked-image line documented (#164).
+
 ## [0.3.3] -- 2026-06-30
 
 **feat(bake): facexlib baked offline + FIRST BAKED IMAGE CONFIRMED IN PRODUCTION (#158)**
