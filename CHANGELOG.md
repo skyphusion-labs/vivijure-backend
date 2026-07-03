@@ -5,7 +5,7 @@ pre-1.0: PATCH for fixes and backend-only tweaks, MINOR for new features). Entri
 newest-first. History before this file was introduced lives in the git tags; the recent
 releases are summarized below from that history.
 
-## [Unreleased]
+## [0.4.3] -- 2026-07-03
 
 **feat(observability): mirror a job-done callback rejection into the run-scoped R2 channel (#90)**
 
