@@ -24,11 +24,6 @@ def output_key(project: str) -> str:
     return f"renders/{_slug(project)}/full.mp4"
 
 
-def state_key(project: str) -> str:
-    """The project tree tarball for incremental re-render (contents-at-root; see r2.upload_state)."""
-    return f"projects/{_slug(project)}/state.tar.gz"
-
-
 def lora_key(project: str, slot: str) -> str:
     """A trained character adapter, by slot."""
     return f"loras/{_slug(project)}/{_slug(slot)}/pytorch_lora_weights.safetensors"
@@ -37,6 +32,14 @@ def lora_key(project: str, slot: str) -> str:
 def keyframe_key(project: str, shot_id: str) -> str:
     """A rendered SDXL keyframe, by shot."""
     return f"renders/{_slug(project)}/keyframes/{_slug(shot_id)}.png"
+
+
+def keyframe_hash_key(project: str, shot_id: str) -> str:
+    """The param-hash sidecar for a keyframe (#112): written next to the PNG so the next
+    incremental render can decide reuse-vs-regenerate per shot straight from R2. Per-artifact
+    keys are what replaced the shared projects/<slug>/state.tar.gz -- concurrent shards write
+    disjoint objects, so there is no shared mutable state left to race on."""
+    return f"renders/{_slug(project)}/keyframes/{_slug(shot_id)}.hash"
 
 
 def clip_key(project: str, shot_id: str) -> str:

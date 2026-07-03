@@ -142,8 +142,7 @@ no bundle or planner, so each carries its own input/output shape, documented bel
 ## Render result (response)
 
 `RenderResult` (`contract.py`), returned as a dict. The control plane polls for `output_key`
-(the final MP4) plus the per-shot `keyframes` and `clips`; `state_key` is the project tree it
-restores on the next render of this project.
+(the final MP4) plus the per-shot `keyframes` and `clips`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -155,7 +154,7 @@ restores on the next render of this project.
 | `keyframes` | list[{shot_id, key}] | Per-shot keyframe PNG keys (generated, reused, and injected). Naming seam: the studio's `motion.backend` hook calls this field `keyframe_key`; this backend returns `key`, and the studio's own-gpu module translates `key` -> `keyframe_key` when mapping the result into the hook output. |
 | `clips` | list[{shot_id, key, target_seconds?}] | Per-shot clip keys (present when shots were animated). |
 | `lora` | dict[slot, {lora_id}] | Trained and passed-through adapters by slot. |
-| `state_key` | str \| null | R2 key of the project state tarball for incremental re-render. |
+| `state_key` | str \| null | Always `null` since #112 (kept for wire-compat): incremental state is per-artifact R2 objects, not a tarball. |
 
 ## The `i2v_clip` job
 
@@ -352,13 +351,14 @@ scenes:
     "A": { "lora_id": "loras/the-long-walk-home/A/pytorch_lora_weights.safetensors" },
     "B": { "lora_id": "loras/the-long-walk-home/B/pytorch_lora_weights.safetensors" }
   },
-  "state_key": "projects/the-long-walk-home/state.tar.gz"
+  "state_key": null
 }
 ```
 
 `shot_01` is single-character (the plain SDXL + IP-Adapter path); `shot_02` has two slots and
 renders on the regional no-bleed path. On a second render of the same project, the planner
-restores the state tarball and reuses both LoRAs and any keyframe whose params have not changed.
+derives reuse from the per-artifact R2 objects (adapter keys, keyframe PNGs + `.hash`
+sidecars) and reuses both LoRAs and any keyframe whose params have not changed.
 
 ## See also
 

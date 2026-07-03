@@ -116,9 +116,9 @@ sequenceDiagram
     GPU->>GPU: i2v animate (per shot needing motion)
     GPU->>GPU: finish (interpolate + face restore, if enabled)
     W->>W: assemble clips (ffmpeg, off-GPU)
-    W->>R2: upload loras, keyframes, final.mp4, state
+    W->>R2: upload loras, keyframes (+ .hash sidecars), final.mp4
     W->>R2: progress events throughout (NDJSON + snapshot)
-    W-->>CP: RenderResult {output_key, keyframes, clips, lora, state_key}
+    W-->>CP: RenderResult {output_key, keyframes, clips, lora}
 ```
 
 The entrypoint is `harness/handler.py:run_job()`. It is the only client of the planner and
@@ -287,11 +287,15 @@ Two reuse mechanisms keep repeated work cheap:
 - **Warm worker, warm models.** `ModelServer` caches every loaded model for the process
   lifetime, so a worker that handles a second job pays no model-load cost. The cold-start model
   mirror (and the lazy i2v pull) likewise run once per worker; see [operations.md](operations.md).
-- **Incremental project state.** After each render the worker tars the project working tree
-  (trained LoRAs with their `.trained` markers, keyframes with their `.hash` files) to
-  `projects/<project>/state.tar.gz`. The next render of that project restores it, and the
-  planner reuses every LoRA and keyframe that has not changed. A re-render of one tweaked shot
-  retrains nothing and redraws only that shot.
+- **Incremental project state.** Per-artifact R2 objects, no shared state object (#112).
+  Each render uploads exactly what it authored at per-identity keys: the keyframe PNG plus a
+  `.hash` param sidecar per shot, the adapter per trained slot. The next render derives what
+  to reuse straight from those keys (the storyboard names every candidate; adapter existence
+  == trained, PNG existence + matching hash == reusable keyframe), so a re-render of one
+  tweaked shot retrains nothing and redraws only that shot. Because concurrent shards of a
+  scattered render write disjoint keys, there is no shared mutable state to race on -- the old
+  `projects/<project>/state.tar.gz` (last-writer-wins across shards) is no longer written or
+  read.
 
 ## Where to read next
 
