@@ -507,6 +507,33 @@ def test_promote_image_raises_on_readback_mismatch():
         rv.promote_image("ghcr.io/x:2", endpoint_id="e", api_key="k-1", transport=transport)
 
 
+def test_build_verify_pod_env_sends_secret_references_not_raw_r2_values():
+    source = {
+        "R2_ENDPOINT": "https://acct.r2.cloudflarestorage.com",
+        "R2_ACCESS_KEY_ID": "AKIA-REAL-VALUE",
+        "R2_SECRET_ACCESS_KEY": "super-secret-real-value",
+        "R2_BUCKET": "vivijure",
+    }
+    pod_env, r2_read_env = rv.build_verify_pod_env(
+        {"VJ_VERIFY": "1"}, source, run_id="s1-abc", key_prefix="verify",
+        bundle_key="bundles/x.tar.gz", project="p", sharpness_baseline=75.0)
+    # the POD receives RunPod secret REFERENCES for the creds, matching the prod template form
+    assert pod_env["R2_ACCESS_KEY_ID"] == "{{ RUNPOD_SECRET_R2_ACCESS_KEY_ID }}"
+    assert pod_env["R2_SECRET_ACCESS_KEY"] == "{{ RUNPOD_SECRET_R2_SECRET_ACCESS_KEY }}"
+    # non-secret R2 config rides as literals
+    assert pod_env["R2_ENDPOINT"] == "https://acct.r2.cloudflarestorage.com"
+    assert pod_env["R2_BUCKET"] == "vivijure"
+    # the raw secret VALUES never appear anywhere in the pod env (the get-pod exposure #184 closes)
+    blob = "|".join("%s=%s" % (k, v) for k, v in pod_env.items())
+    assert "AKIA-REAL-VALUE" not in blob
+    assert "super-secret-real-value" not in blob
+    # the HARNESS keeps the real values for its own R2 summary poll (references resolve only in a pod)
+    assert r2_read_env["R2_ACCESS_KEY_ID"] == "AKIA-REAL-VALUE"
+    assert r2_read_env["R2_SECRET_ACCESS_KEY"] == "super-secret-real-value"
+    # run metadata + base env pass through
+    assert pod_env["VJ_VERIFY_RUN_ID"] == "s1-abc" and pod_env["VJ_VERIFY"] == "1"
+
+
 def test_promote_image_requires_key(monkeypatch):
     monkeypatch.delenv("RUNPOD_API_KEY", raising=False)
     with pytest.raises(RuntimeError):
