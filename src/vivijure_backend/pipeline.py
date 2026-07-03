@@ -193,16 +193,18 @@ class GpuPipeline:
         cast, storyboard = bundle.cast, bundle.storyboard
         scenes_by_id = {s.id: s for s in storyboard.scenes}
 
-        # Warn once if the running card doesn't match the tier the planner targeted for i2v.
-        # A mismatch means the job landed on the wrong pool (cheaper card for a final-tier job,
-        # or an expensive card burning money on a draft). Does not block the render.
+        # Record the planner's targeted i2v tier(s) next to the card that actually ran, as an
+        # INFORMATIONAL trace event -- NOT a warning. The datacenter serverless pool bounces a job
+        # across all three arches (sm_90 / sm_100 / sm_120) by design, so a single planned-tier
+        # label necessarily differs from two of three cards; framing that difference as a
+        # "mismatch" was a false alarm that encodes no actionable condition (#163). The render
+        # always proceeds on the JOB's quality_tier, never the device, so there is no degrade and
+        # nothing to gate here -- the trace just exposes planned-vs-actual for card correlation.
         planned_i2v_tiers = {sp.i2v_tier for sp in plan.scenes if sp.i2v_tier is not None}
         if planned_i2v_tiers:
-            actual_tier = _current_device().tier
-            if actual_tier not in planned_i2v_tiers:
-                self.progress.emit("tier_mismatch",
-                                   actual=actual_tier.value,
-                                   planned=[t.value for t in planned_i2v_tiers])
+            self.progress.emit("plan_tier",
+                               actual=_current_device().tier.value,
+                               planned=sorted(t.value for t in planned_i2v_tiers))
 
         # 1) Train the LoRAs the plan kept; collect adapter paths for keyframing.
         lora_paths: dict[str, Path] = {}

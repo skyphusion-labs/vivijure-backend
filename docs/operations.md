@@ -181,8 +181,11 @@ Events (discrete stages):
 
 A few situational markers also appear (e.g. `audio_missing` when a requested `audio_key`
 cannot be fetched and the job explicitly opted into `render_overrides.audio_optional` -- without
-that opt-in the render FAILS instead -- and `tier_mismatch` when the running card does not match
-the planned i2v tier). The snapshot carries `status` (`running` / `complete` / `error`), per-event
+that opt-in the render FAILS instead -- and `plan_tier`, an informational trace of the card that
+actually ran (`actual`) next to the tier(s) the planner targeted for i2v (`planned`); it is NOT a
+warning and never gates the render, which always runs on the job's `quality_tier`, not the device
+(#163 retired the old `tier_mismatch` warn, which false-fired on the by-design multi-arch pool)).
+The snapshot carries `status` (`running` / `complete` / `error`), per-event
 `counts`, the `last_event`, and any `error`; `progress.read_snapshot(store, project, job_id)`
 reads it back for a status route or a poll script.
 

@@ -120,7 +120,11 @@ RTX PRO 6000 / sm_120            proven (canary)  :0.3.3-lineage derisk_pass on 
 ## 4. Operational notes
 
 - **`tier_mismatch` is benign** (`pipeline.py`). It is an informational warn-once emitted when the
-  card the job landed on differs from the tier the planner targeted for i2v. The render proceeds using
+  card the job landed on differs from the tier the planner targeted for i2v.
+  (Historical: this :0.3.3 run emitted `tier_mismatch`. #163 later retired that false-alarm framing
+  -- on the by-design multi-arch draft pool a single planned-tier label always differs from two of
+  three cards -- and replaced it with an always-emitted informational `plan_tier {actual, planned}`
+  trace. The card-correlation signal below is preserved: `actual` is now always in the event.) The render proceeds using
   the **job's** `quality_tier`, never the device; there is zero output change and no fallback, so it is
   not a degrade. On this run it fired on the H200 jobs (planner prefers B200 for final tier) and was
   absent on the B200 jobs. Standing signal only: planner preference and scheduler placement diverge on
