@@ -141,7 +141,7 @@ the control plane's artifact routes. Project and shot names are slugified to saf
 | Keyframe | `renders/<project>/keyframes/<shot_id>.png` | A rendered SDXL keyframe. |
 | Clip | `renders/<project>/clips/<shot_id>.mp4` | A per-shot i2v clip (offloaded / per-shot finish). |
 | LoRA | `loras/<project>/<slot>/pytorch_lora_weights.safetensors` | A trained character adapter. |
-| Project state | `projects/<project>/state.tar.gz` | The working tree for incremental re-render. |
+| Keyframe hash | `renders/<project>/keyframes/<shot_id>.hash` | Param-hash sidecar driving reuse-vs-regen (#112). |
 | Progress log | `renders/<project>/progress/<job_id>.ndjson` | The append-only event stream. |
 | Progress snapshot | `renders/<project>/progress/<job_id>.json` | The latest-state snapshot a `/status` route polls. |
 | Models (mirror) | `models/hf-cache/...` | The HF weight mirror the cold start pulls. |
@@ -188,9 +188,10 @@ reads it back for a status route or a poll script.
 
 ## Warm workers and incremental state
 
-After each render the worker tars the project working tree (trained LoRAs with their `.trained`
-markers, keyframes with their `.hash` files) to `projects/<project>/state.tar.gz`. The next
-render restores it and the planner reuses every LoRA and keyframe that has not changed, so a
+After each render the worker uploads what it authored at per-identity keys: each keyframe PNG
+with a `.hash` param sidecar, each trained adapter at its `loras/` key. The next render derives
+reuse straight from those objects (no shared state tarball; #112 removed
+`projects/<project>/state.tar.gz` because concurrent shards raced it last-writer-wins), so a
 re-render of one tweaked shot retrains nothing and redraws only that shot (see
 [architecture.md](architecture.md#warm-workers-and-incremental-renders)). A warm worker also
 keeps every model loaded in `ModelServer`, so a second job pays no model-load cost.

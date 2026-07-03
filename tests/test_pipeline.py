@@ -318,7 +318,7 @@ def test_run_job_drives_gpu_pipeline_offloaded(tmp_path):
     assert [c["shot_id"] for c in res["clips"]] == ["shot_01", "shot_02", "shot_03"]
     assert {k["shot_id"] for k in res["keyframes"]} == {"shot_01", "shot_02", "shot_03"}
     assert any(k.endswith("manifest.json") for k in store.puts)
-    assert res["state_key"] == "projects/neon/state.tar.gz"
+    assert res["state_key"] is None  # #112: per-artifact objects, no shared state tar
 
 
 # ----------------------------------------------------- pretrained-LoRA R2 staging (item B)
