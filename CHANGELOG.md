@@ -5,6 +5,15 @@ pre-1.0: PATCH for fixes and backend-only tweaks, MINOR for new features). Entri
 newest-first. History before this file was introduced lives in the git tags; the recent
 releases are summarized below from that history.
 
+## [Unreleased]
+
+**feat(observability): mirror a job-done callback rejection into the run-scoped R2 channel (#90)**
+
+The `job_done_error{status:400}` on a successful job was printed ONLY to serverless-worker stdout, which is not retrievable via GraphQL / runpodctl / MCP, so the actual 400 could never be inspected. This makes the rejection observable in-band before we root-cause it.
+
+- **Run-scoped R2 mirror of the rejection (#90):** the SDK `_transmit` patch that catches a >=400 job-done post now also writes the record (`status`, `body`, `content_type`, `url`, `posted_status`) to a NDJSON object colocated with the render's other progress objects (`renders/<project>/progress/<job_id>.job-done-errors.ndjson`), a DISTINCT object that never clobbers the live progress snapshot the control plane polls. The patch has no run context, so the handler registers the live R2 store + project/job id at job start (`harness/job_done_diag`).
+- **Purely additive:** best-effort, never retries the post, never changes the job outcome, and every write is swallowed so a diagnostic path cannot become a worker failure mode. The `url` query string is stripped before it lands in the channel. The existing stdout `@event job_done_error` is unchanged (it gains the `url` field).
+
 ## [0.4.2] -- 2026-07-03
 
 **fix(release-gate): the live pod-staging gate is passable + correct end to end; verify/bake/harness hardening**

@@ -95,6 +95,18 @@ def progress_snapshot_key(project: str, job_id: str) -> str:
     return f"renders/{_slug(project)}/progress/{_slug(job_id)}.json"
 
 
+def job_done_error_key(project: str, job_id: str) -> str:
+    """The run-scoped NDJSON log of RunPod /job-done POST rejections for one render (#90).
+
+    Colocated with the render's other progress objects and keyed by project AND job id the same
+    way, but a DISTINCT object: it must NEVER clobber the live progress snapshot the control plane
+    polls. The SDK's job-done post (a late status mirror OR the terminal result) can be rejected
+    (observed: a 400 on a successful job) with the reason printed only to worker stdout, which is
+    not retrievable via GraphQL / runpodctl / MCP; mirroring each rejection here makes it
+    inspectable in-band. One record appended per rejected post."""
+    return f"renders/{_slug(project)}/progress/{_slug(job_id)}.job-done-errors.ndjson"
+
+
 def _verify_run(run_id: str) -> str:
     """A verify run id reduced to an R2-safe path segment (same discipline as _slug): a verify
     run must never smuggle a slash or whitespace into its key and scatter its channel."""

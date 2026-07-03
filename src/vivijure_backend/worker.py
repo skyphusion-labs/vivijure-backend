@@ -141,7 +141,11 @@ def _patch_runpod_content_type() -> None:
     The SDK's _transmit() hardcodes Content-Type: application/x-www-form-urlencoded while
     sending a JSON body, and RunPod's job-done endpoint rejects this with 400. Using aiohttp's
     json= kwarg lets the session encode properly and sets Content-Type automatically. No-ops
-    and logs if SDK internals change -- never silently breaks the worker startup."""
+    and logs if SDK internals change -- never silently breaks the worker startup.
+
+    On any >=400 the rejection is ALSO mirrored (best-effort) into the current run's R2
+    channel via job_done_diag, so the 400 is retrievable in-band and not only on worker
+    stdout (#90). The mirror never retries the post and never changes the job outcome."""
     try:
         import json as _json
         import runpod.serverless.modules.rp_http as _rp_http
@@ -156,17 +160,35 @@ def _patch_runpod_content_type() -> None:
                 body = await resp.text()
                 if resp.status >= 400:
                     import json as _j
-                    print("@event job_done_error " + _j.dumps({
-                        "status": resp.status,
-                        "body": body[:500],
-                        "content_type": resp.content_type,
-                        # #90 attribution: progress mirrors AND the terminal result share this
-                        # endpoint, and the SDK logs both failures as "Failed to return job
-                        # results." -- posted_status says WHICH post 400'd (IN_PROGRESS = a
-                        # late/racing mirror; anything else = the real result post).
-                        "posted_status": (payload.get("status")
-                                          if isinstance(payload, dict) else None),
-                    }), flush=True)
+                    # #90 attribution: progress mirrors AND the terminal result share this
+                    # endpoint, and the SDK logs both failures as "Failed to return job
+                    # results." -- posted_status says WHICH post 400'd (IN_PROGRESS = a
+                    # late/racing mirror; anything else = the real result post).
+                    posted_status = (payload.get("status")
+                                     if isinstance(payload, dict) else None)
+                    # Mirror the rejection into this run's R2 channel so it is retrievable
+                    # in-band, not just on worker stdout (#90). record() is best-effort and
+                    # returns the canonical record shared with the stdout @event line; the
+                    # import + call are wrapped so a diagnostic path never suppresses the
+                    # existing stdout signal or blocks the (still non-fatal) rejection.
+                    rec = None
+                    try:
+                        from .harness import job_done_diag
+                        rec = job_done_diag.record(
+                            url=url, posted_status=posted_status,
+                            http_status=resp.status, body=body,
+                            content_type=resp.content_type)
+                    except Exception:
+                        pass
+                    if rec is None:
+                        rec = {
+                            "status": resp.status,
+                            "body": body[:500],
+                            "content_type": resp.content_type,
+                            "url": str(url).split("?", 1)[0],
+                            "posted_status": posted_status,
+                        }
+                    print("@event job_done_error " + _j.dumps(rec), flush=True)
                     raise _aiohttp.ClientResponseError(
                         resp.request_info, resp.history,
                         status=resp.status, message=body[:200],

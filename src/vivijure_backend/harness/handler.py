@@ -23,6 +23,7 @@ from ..contract import Bundle, RenderRequest, RenderResult, Keyframe, Clip
 from ..orchestrator import RenderPlan, plan as make_plan, validate
 from . import keys
 from .progress import NullEmitter, ProgressEmitter
+from . import job_done_diag
 
 
 class HarnessError(RuntimeError):
@@ -560,6 +561,11 @@ def handler(job: dict) -> dict:
         except Exception as e:
             ProgressEmitter(None, project, job_id, on_progress=on_progress).error("config", e)
             raise
+        # Register the run context (the live store + identity) so the SDK's job-done _transmit
+        # patch can mirror a callback rejection into this run's R2 channel; the patch itself has
+        # no run context (#90). Best-effort; a config failure above never reaches here (R2 is the
+        # failure, so its own rejection can only degrade to stdout).
+        job_done_diag.register(store, project, job_id)
         try:
             mirrored = ensure_models()
         except Exception as e:
