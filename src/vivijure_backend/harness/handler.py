@@ -545,41 +545,49 @@ def handler(job: dict) -> dict:
     job_id = str(job.get("id") or "unknown")
     on_progress = _runpod_progress_hook(job)
 
+    # Everything below runs inside the quiesce guard (#90): on EVERY exit -- return or raise --
+    # in-flight progress-mirror posts are drained before the SDK posts the terminal result to
+    # the same /job-done endpoint, so a straggler mirror can never race the finalization.
     try:
-        store = R2(R2Config.from_env())
-    except Exception as e:
-        ProgressEmitter(None, project, job_id, on_progress=on_progress).error("config", e)
-        raise
-    try:
-        mirrored = ensure_models()
-    except Exception as e:
-        ProgressEmitter(store, project, job_id, on_progress=on_progress).error("mirror", e)
-        raise
+        try:
+            store = R2(R2Config.from_env())
+        except Exception as e:
+            ProgressEmitter(None, project, job_id, on_progress=on_progress).error("config", e)
+            raise
+        try:
+            mirrored = ensure_models()
+        except Exception as e:
+            ProgressEmitter(store, project, job_id, on_progress=on_progress).error("mirror", e)
+            raise
 
-    # Eager-start the Wan I2V pull in the background so it overlaps LoRA training: training is
-    # GPU-bound with the network idle, while the pull (~120GB from R2) is network-bound. The two
-    # run concurrently; ensure_i2v_models() joins the thread before loading the Wan pipeline.
-    # finish_clip never loads the Wan pipeline, so skip the prefetch for that action.
-    if str(payload.get("action", "render")) != "finish_clip":
-        from .models_mirror import start_i2v_prefetch
-        start_i2v_prefetch()
+        # Eager-start the Wan I2V pull in the background so it overlaps LoRA training: training is
+        # GPU-bound with the network idle, while the pull (~120GB from R2) is network-bound. The two
+        # run concurrently; ensure_i2v_models() joins the thread before loading the Wan pipeline.
+        # finish_clip never loads the Wan pipeline, so skip the prefetch for that action.
+        if str(payload.get("action", "render")) != "finish_clip":
+            from .models_mirror import start_i2v_prefetch
+            start_i2v_prefetch()
 
-    workdir = Path(tempfile.mkdtemp(prefix="vj-job-"))
-    try:
-        action = str(payload.get("action", "render"))
-        if action == "finish_clip":
-            return run_finish_job(payload, store=store, workdir=workdir,
-                                  job_id=job_id, on_progress=on_progress)
-        if action == "i2v_clip":
-            return run_i2v_clip_job(payload, store=store, workdir=workdir,
-                                    job_id=job_id, on_progress=on_progress)
+        workdir = Path(tempfile.mkdtemp(prefix="vj-job-"))
+        try:
+            action = str(payload.get("action", "render"))
+            if action == "finish_clip":
+                return run_finish_job(payload, store=store, workdir=workdir,
+                                      job_id=job_id, on_progress=on_progress)
+            if action == "i2v_clip":
+                return run_i2v_clip_job(payload, store=store, workdir=workdir,
+                                        job_id=job_id, on_progress=on_progress)
 
-        # Prior-state restore happens INSIDE run_job now (#112): it needs the extracted
-        # bundle's storyboard to name the per-artifact R2 keys it checks.
-        return run_job(payload, pipeline=get_pipeline(), store=store, workdir=workdir,
-                       job_id=job_id, mirrored=bool(mirrored), on_progress=on_progress)
+            # Prior-state restore happens INSIDE run_job now (#112): it needs the extracted
+            # bundle's storyboard to name the per-artifact R2 keys it checks.
+            return run_job(payload, pipeline=get_pipeline(), store=store, workdir=workdir,
+                           job_id=job_id, mirrored=bool(mirrored), on_progress=on_progress)
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
     finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+        quiesce = getattr(on_progress, "quiesce", None)
+        if callable(quiesce):
+            quiesce()
 
 
 def _runpod_progress_hook(job: dict):
@@ -594,13 +602,44 @@ def _runpod_progress_hook(job: dict):
     155ms config-error job read IN_PROGRESS forever with the error snapshot in `output`, holding
     the billed worker 344s until manual cancel, while the studio's poll translated it to "job
     not found". The terminal record still reaches R2 + stdout; RunPod's terminal status comes
-    from the handler's own return/raise, which must stand unclobbered."""
+    from the handler's own return/raise, which must stand unclobbered.
+
+    Mirror threads are TRACKED and joined via `hook.quiesce()` before the handler returns (#90):
+    the SDK's progress_update fires an UNTRACKED daemon thread at the same /job-done endpoint the
+    terminal result posts to, so a late mirror can arrive at (or race) a finalizing job and get
+    rejected 400 "internal server error" -- logged by the SDK's shared _handle_result as "Failed
+    to return job results.", misattributed to the result post (which succeeded: /status showed
+    COMPLETED with the full payload every time). Draining our own tracked threads before return
+    means no mirror is ever in flight when the result posts. Falls back to the untracked SDK
+    call if the internals move (best-effort doctrine; the R2 channel stays the source of
+    truth)."""
+    import threading
+    import time
+
+    threads: list = []
+
     def hook(snapshot: dict) -> None:
         if snapshot.get("status") in ("error", "complete"):
             return
         try:
             import runpod
-            runpod.serverless.progress_update(job, snapshot)
+            try:
+                from runpod.serverless.modules import rp_progress
+                t = threading.Thread(target=rp_progress._thread_target,
+                                     args=(job, dict(snapshot)), daemon=True)
+                t.start()
+                threads.append(t)
+            except ImportError:  # SDK internals moved: untracked fallback, mirror still works
+                runpod.serverless.progress_update(job, snapshot)
         except Exception:
             pass
+
+    def quiesce(timeout: float = 10.0) -> None:
+        """Join every in-flight mirror post (bounded): called before the handler returns so the
+        SDK's terminal result post never shares the endpoint with a straggler mirror."""
+        deadline = time.monotonic() + timeout
+        for t in threads:
+            t.join(max(0.0, deadline - time.monotonic()))
+
+    hook.quiesce = quiesce
     return hook

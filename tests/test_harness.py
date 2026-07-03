@@ -507,3 +507,66 @@ def test_emitter_error_path_sends_nothing_through_the_runpod_hook(monkeypatch):
     emitter.emit("started")
     emitter.error("config", "R2 config incomplete; missing env: R2_ACCESS_KEY_ID")
     assert [s["status"] for s in sent] == ["running"]
+
+
+# ------------------------------------------------- #90: mirror posts quiesce before the result
+
+def _fake_runpod_with_rp_progress(monkeypatch, target):
+    """Install a fake runpod SDK whose rp_progress._thread_target is `target`, matching the
+    import shape the hook uses (from runpod.serverless.modules import rp_progress)."""
+    import sys
+    import types
+
+    fake = types.ModuleType("runpod")
+    fake.serverless = types.ModuleType("runpod.serverless")
+    fake.serverless.modules = types.ModuleType("runpod.serverless.modules")
+    rp_progress = types.ModuleType("runpod.serverless.modules.rp_progress")
+    rp_progress._thread_target = target
+    fake.serverless.modules.rp_progress = rp_progress
+    monkeypatch.setitem(sys.modules, "runpod", fake)
+    monkeypatch.setitem(sys.modules, "runpod.serverless", fake.serverless)
+    monkeypatch.setitem(sys.modules, "runpod.serverless.modules", fake.serverless.modules)
+    monkeypatch.setitem(sys.modules, "runpod.serverless.modules.rp_progress", rp_progress)
+    return fake
+
+
+def test_runpod_hook_quiesce_joins_inflight_mirror_posts(monkeypatch):
+    """#90: a slow in-flight mirror post must be DRAINED by hook.quiesce() before the handler
+    returns -- otherwise it races the SDK's terminal result post on the same /job-done endpoint
+    (the 400 'internal server error' noise, misattributed as 'Failed to return job results.')."""
+    import threading
+    import time
+
+    from vivijure_backend.harness.handler import _runpod_progress_hook
+
+    done = []
+
+    def slow_post(job, snapshot):
+        time.sleep(0.15)          # an HTTP post still in flight when the handler finishes
+        done.append(snapshot)
+
+    _fake_runpod_with_rp_progress(monkeypatch, slow_post)
+    hook = _runpod_progress_hook({"id": "job-1"})
+    hook({"status": "running", "counts": {"i2v_step": 1}})
+    assert done == []             # post genuinely in flight
+    hook.quiesce()
+    assert len(done) == 1         # drained BEFORE the caller can post the terminal result
+
+
+def test_runpod_hook_falls_back_to_sdk_progress_update_without_rp_progress(monkeypatch):
+    """If the SDK internals move (no rp_progress module), the hook degrades to the untracked
+    progress_update call -- the mirror keeps working, best-effort doctrine."""
+    import sys
+    import types
+
+    from vivijure_backend.harness.handler import _runpod_progress_hook
+
+    sent = []
+    fake = types.ModuleType("runpod")
+    fake.serverless = types.SimpleNamespace(progress_update=lambda job, snap: sent.append(snap))
+    monkeypatch.setitem(sys.modules, "runpod", fake)
+
+    hook = _runpod_progress_hook({"id": "job-1"})
+    hook({"status": "running", "counts": {}})
+    assert [s["status"] for s in sent] == ["running"]
+    hook.quiesce()                # no tracked threads: a no-op, never an error

@@ -148,9 +148,10 @@ def _patch_runpod_content_type() -> None:
 
         async def _patched_transmit(client_session, url, job_data):
             import aiohttp as _aiohttp
+            payload = _json.loads(job_data)
             async with client_session.post(
                 url,
-                json=_json.loads(job_data),
+                json=payload,
             ) as resp:
                 body = await resp.text()
                 if resp.status >= 400:
@@ -159,6 +160,12 @@ def _patch_runpod_content_type() -> None:
                         "status": resp.status,
                         "body": body[:500],
                         "content_type": resp.content_type,
+                        # #90 attribution: progress mirrors AND the terminal result share this
+                        # endpoint, and the SDK logs both failures as "Failed to return job
+                        # results." -- posted_status says WHICH post 400'd (IN_PROGRESS = a
+                        # late/racing mirror; anything else = the real result post).
+                        "posted_status": (payload.get("status")
+                                          if isinstance(payload, dict) else None),
                     }), flush=True)
                     raise _aiohttp.ClientResponseError(
                         resp.request_info, resp.history,
