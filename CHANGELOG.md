@@ -5,6 +5,29 @@ pre-1.0: PATCH for fixes and backend-only tweaks, MINOR for new features). Entri
 newest-first. History before this file was introduced lives in the git tags; the recent
 releases are summarized below from that history.
 
+## [0.4.2] -- 2026-07-03
+
+**fix(release-gate): the live pod-staging gate is passable + correct end to end; verify/bake/harness hardening**
+
+The batch that makes the automated verify gate render, promote, and reap reliably, plus the worker/harness
+correctness fixes it surfaced. A clean re-bake off `main`; ships to prod through the gate itself.
+
+Release gate:
+- **Promote repins the endpoint TEMPLATE, not the endpoint (#194):** RunPod rejects an endpoint-level env PATCH (400); the promote now PATCHes the template (env lives on the template) and reads back the pinned image.
+- **Verify pod reads R2 via `RUNPOD_SECRET` references, not plaintext env (#184, #195):** the pod-side R2 creds are secret references, never rendered into pod env or logs.
+- **DC / cache affinity to skip the ~87GB cold pull (#187):** an ordered SECURE data-center affinity pins the verify pod to a machine warm on the image's weight layers, then falls back UNPINNED so a capacity miss never fails the gate.
+- **Make the gate passable (#190, #192, #193):** preflight cleans every injected pod-env value + the R2 shape / key-names; the pod TTL/timeout and `max_polls` follow the measured cold-pull (#186, #188); the smoke bundle `Verify_Smoke` is the default and the verify sharpness baseline is calibrated to 75.0.
+
+Verify + bake:
+- **Authoritative first channel write -- bad R2 creds fail LOUD (#189):** the first structured `@event` write is authoritative, so a bad/missing R2 credential fails loudly at the start instead of a silent empty prefix.
+- **Exact-pin torch / torchvision / torchaudio in the bake (#191):** kills wildcard drift so a re-bake is byte-reproducible.
+
+Worker + harness:
+- **Quiesce progress mirrors before the terminal result post (#90, #197):** progress mirrors are quiesced before the terminal COMPLETED/FAILED post, so a late `IN_PROGRESS` can never race and misattribute after the job is done.
+- **Per-artifact R2 state replaces the shared state tarball (#112, #196):** each artifact carries its own R2 state, removing the shared-tarball contention.
+- **Retire the false-alarm `tier_mismatch` warn (#163):** demoted to an informational `plan_tier` trace.
+- **i2v_clip conformance guard vs a shared golden (#129):** the i2v_clip contract is guarded against a shared golden so a drift is caught in CI.
+
 ## [0.4.1] -- 2026-07-02
 
 **fix(verify): the pod-staging gate renders end to end (pipeline registration + loud fatal + cold-pull TTL)**
