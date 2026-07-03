@@ -449,6 +449,12 @@ def run_i2v_clip_job(
 
     The keyframe defaults to the project/shot convention `renders/<project>/keyframes/<shot>.png`
     when `keyframe_key` is omitted. The clip lands at `renders/<project>/clips/<shot>_i2v.mp4`.
+
+    HARD INVARIANT (#129): this request/result shape + the two key templates are the `i2v_clip`
+    wire contract shared byte-for-byte with the local-gpu doors (vivijure-local-12gb / -16gb),
+    which vendor a parallel copy in `vivijure_local.core.contract`. The single reference is
+    `tests/fixtures/i2v_clip_contract.json` (byte-identical across all three repos);
+    `tests/test_i2v_clip_conformance.py` asserts this door matches it so the two cannot drift.
     """
     from .. import i2v as i2v_mod
     from ..config import I2VConfig
