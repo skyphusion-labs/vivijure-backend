@@ -1,0 +1,35 @@
+{
+  "contract": "i2v_clip",
+  "purpose": "The wire contract shared by the datacenter backend (vivijure-backend) and the local-gpu doors (vivijure-local-12gb / vivijure-local-16gb). All three are hand-kept copies with no shared source, so each repo's conformance test asserts against THIS golden; that ties the doors together and catches silent drift (see vivijure-backend #129). Keep this file BYTE-IDENTICAL across all three repos.",
+  "request": {
+    "action": "i2v_clip",
+    "required": ["prompt"],
+    "fields": {
+      "action": "string, the job type: 'i2v_clip'",
+      "project": "string, namespaces the R2 keys",
+      "shot_id": "string, the per-shot id",
+      "prompt": "string, REQUIRED (the motion description; an empty prompt is rejected)",
+      "keyframe_key": "string or null, OPTIONAL (when absent the backend applies its own keyframe convention below)",
+      "config": "object, engine knobs (tier-clamped; a caller may narrow, never widen)"
+    }
+  },
+  "result_pointer_fields": ["clip_key", "shot_id", "num_frames", "fps", "seconds", "distilled"],
+  "key_templates": {
+    "keyframe_key": "renders/{project_slug}/keyframes/{shot_slug}.png",
+    "clip_key": "renders/{project_slug}/clips/{shot_slug}_i2v.mp4"
+  },
+  "slug_rule": "strip surrounding whitespace; collapse any internal whitespace run to a single '_'; replace '/' with '_'; an empty result becomes 'untitled'",
+  "slug_examples": {
+    "Neon  City": "Neon_City",
+    "shot 01": "shot_01",
+    "My  Film/x": "My_Film_x",
+    "  ": "untitled",
+    "": "untitled"
+  },
+  "sample": {
+    "project": "neon city",
+    "shot_id": "shot 01",
+    "keyframe_key": "renders/neon_city/keyframes/shot_01.png",
+    "clip_key": "renders/neon_city/clips/shot_01_i2v.mp4"
+  }
+}
