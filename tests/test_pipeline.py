@@ -488,3 +488,29 @@ def test_i2v_params_from_respects_config_num_frames_ceiling():
     p = i2v_params_from(cfg, _scene(10.0))  # 10s * 16fps = 160 -> snap to 161
     assert p.num_frames == 161  # not 81 (the old engine ceiling)
     assert (p.num_frames - 1) % 4 == 0  # is 4k+1
+
+
+def test_execute_emits_informational_plan_tier_not_a_mismatch_warning(tmp_path):
+    # #163: the old `tier_mismatch` warn false-fired on the by-design multi-arch pool (a single
+    # planned-tier label always differs from two of three cards). It is downgraded to an
+    # always-emitted informational `plan_tier {actual, planned}` trace -- no "mismatch" framing,
+    # never a gate. The card-correlation value (actual card in the event) is preserved.
+    from vivijure_backend.harness.progress import ProgressEmitter
+
+    bundle = _extract_bundle(tmp_path)
+    req = RenderRequest.from_dict({"action": "render", "project": "neon",
+                                   "bundle_key": "x", "quality_tier": "final"})
+    plan = make_plan(req, bundle.storyboard)
+    pipe = StubPipeline(req.config)
+    emitter = ProgressEmitter(None, "neon", "j")     # store=None: emit accumulates in-memory
+    pipe.set_progress(emitter)
+    pipe.execute(plan, bundle, tmp_path / "work")
+
+    names = [e["event"] for e in emitter._events]
+    assert "tier_mismatch" not in names              # the false-alarm warning is gone
+    plan_tiers = [e for e in emitter._events if e["event"] == "plan_tier"]
+    assert len(plan_tiers) == 1                       # informational, emitted once per render
+    pt = plan_tiers[0]
+    assert isinstance(pt["actual"], str) and pt["actual"]        # the card that actually ran
+    assert isinstance(pt["planned"], list) and pt["planned"]     # the tier(s) the planner targeted
+    assert pt["planned"] == sorted(pt["planned"])                # deterministic ordering
