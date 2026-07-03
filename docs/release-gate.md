@@ -26,6 +26,19 @@ intended to enforce it. ICD-grade: the contract is reproducible from this doc al
   gives no insight. Any investigation happens on a pod built from the same image.
 - **An image reaches the serverless endpoint ONLY by passing the automated pod-staging verify.**
   There is no manual "pin it and see" path to prod. Build -> pod-verify (staging) -> promote (prod).
+- **The promote is a TEMPLATE repin, in code, only inside a green verify.** The one and only path
+  to prod is `promote_image()` in `deploy/runpod_verify.py`, and it fires ONLY when a `runpod-verify`
+  dispatch runs with `live=true promote=true` AND every verify check passes. It repins the `imageName`
+  on the production endpoint's TEMPLATE (endpoint `t9wcvlxh8rc5la` -> template `pdc3fsdqbc`), reads the
+  template back to prove the repin landed, then lets the scale-to-zero endpoint provision fresh workers
+  on the new `:version` tag. There is NO manual template repin, no dashboard pin, no direct endpoint
+  PATCH -- RunPod rejects an endpoint-level `imageName` with a 400 (the image lives on the template).
+- **`runpod-verify` is NOT a branch-protection required check, deliberately.** It is a manual,
+  GPU-spending, prod-promoting RELEASE gate that runs only on `workflow_dispatch`; it never posts a
+  status on a PR head, so requiring its context in the `main` ruleset would phantom-block every PR
+  forever. Branch protection guards MAIN (per-PR `coverage` + `CodeQL`, strict); this gate guards PROD.
+  Different doors. The gate is enforced doctrinally + structurally (the only path to prod is the code
+  above), never as a per-PR required check.
 
 ```mermaid
 flowchart LR
