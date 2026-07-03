@@ -94,6 +94,15 @@ class VerifyConfig:
     min_vram_free_gb: float = 8.0                # headroom floor after load
     expect_baked: bool = True                    # a baked image must NOT pull from R2
     pod_command: str = VERIFY_POD_COMMAND        # pod start command: RUN the verify entrypoint
+    data_center_ids: tuple[str, ...] = ()        # ordered SECURE data-center affinity: try each in
+    #                                              turn, then UNPINNED last. Empty = RunPod picks (the
+    #                                              prior behaviour). A machine warm on this image's
+    #                                              content-addressed weight bins (a code/dep candidate
+    #                                              reuses :prev's ~87GB layers byte-for-byte) skips the
+    #                                              cold pull; the unpinned tail never fails on a miss.
+    provision_grace_seconds: float = 120.0       # per pinned-DC schedulability probe: if RunPod does
+    #                                              not place the pod on a machine within this, that DC
+    #                                              is out of SECURE capacity -> fall to the next.
     env: dict[str, str] = field(default_factory=lambda: {
         # draft tier ONLY: few-step distill on, fp8 on; the cheap path, the spend-bounded one.
         "VJ_I2V_DISTILL": "1", "VJ_I2V_FP8": "1", "VJ_VERIFY": "1",
@@ -143,7 +152,8 @@ class PodClient(Protocol):
     def list_gpu_types(self) -> list[dict[str, Any]]: ...
     def create_pod(self, *, image: str, gpu_type_id: str, env: dict[str, str],
                    registry_auth_id: str | None, ttl_seconds: int,
-                   command: str | None = None) -> dict[str, Any]: ...
+                   command: str | None = None,
+                   data_center_id: str | None = None) -> dict[str, Any]: ...
     def get_pod(self, pod_id: str) -> dict[str, Any]: ...
     def read_logs(self, pod_id: str) -> list[str]: ...
     def stop_pod(self, pod_id: str) -> dict[str, Any]: ...
@@ -183,6 +193,11 @@ def _null_log_fetcher(_pod_id):
     read_logs pairing), is the seam this hook fills; until it lands, `--live` proves pod lifecycle
     (up/down/list), not a full verify PASS."""
     return []
+
+
+# Sentinel: create_pod distinguishes "caller did not pass a DC" (use the client default) from an
+# explicit ``data_center_id=None`` meaning UNPINNED (the affinity loop's final fallback candidate).
+_USE_CLIENT_DC = object()
 
 
 class RunpodSdkPodClient:
@@ -231,7 +246,8 @@ class RunpodSdkPodClient:
             out.append({"id": gid, "displayName": gid, "available": secure})
         return out
 
-    def create_pod(self, *, image, gpu_type_id, env, registry_auth_id, ttl_seconds, command=None):
+    def create_pod(self, *, image, gpu_type_id, env, registry_auth_id, ttl_seconds, command=None,
+                   data_center_id=_USE_CLIENT_DC):
         """Spin ONE SECURE-cloud GPU pod on `image`. `command` is the container start command (RunPod
         docker_args) -- for a verify run it RUNS the verify entrypoint; without it the pod boots the
         image default CMD (the serverless worker) and emits no @event contract. `ttl_seconds` is
@@ -243,11 +259,13 @@ class RunpodSdkPodClient:
             raise ValueError("RunpodSdkPodClient pulls public GHCR images (no registry auth). For a "
                              "private image, provision a RunPod template with containerRegistryAuthId "
                              "and spin from its template_id -- do not pass registry_auth_id here.")
+        # An explicit per-call value wins; the sentinel means "fall back to the client default".
+        dc = self._data_center_id if data_center_id is _USE_CLIENT_DC else data_center_id
         kwargs = dict(
             name=("%s-%s" % (self._name_prefix, gpu_type_id)).replace(" ", "-")[:60],
             image_name=image, gpu_type_id=gpu_type_id, cloud_type="SECURE",
             container_disk_in_gb=self._container_disk_gb, env=dict(env or {}),
-            data_center_id=self._data_center_id, support_public_ip=True, start_ssh=True)
+            data_center_id=dc, support_public_ip=True, start_ssh=True)
         if command:
             kwargs["docker_args"] = command   # RUN the verify entrypoint, not the default worker CMD
         pod = self._sdk.create_pod(**kwargs)
@@ -680,6 +698,62 @@ def pick_gpu_type(available: list[dict[str, Any]], tier: str) -> str | None:
 
 # --------------------------------------------------------------------------- orchestration
 
+def _pod_scheduled(pod: dict) -> bool:
+    """True once RunPod has PLACED the pod on a machine (SECURE capacity found), even while the image
+    is still pulling. A pinned DC with no capacity never reaches this: ``runtime``/``machineId`` stay
+    absent (``desiredStatus`` is always RUNNING -- the target -- so it is NOT a placement signal)."""
+    if not isinstance(pod, dict):
+        return False
+    if pod.get("runtime"):
+        return True
+    return bool(pod.get("machineId") or pod.get("machine"))
+
+
+def _pod_data_center(pod: dict) -> str | None:
+    """Best-effort landed data-center id from a get_pod payload, tolerant across SDK shapes. This is
+    the ground-truth affinity target: the DC a good run actually landed in, to pin next time."""
+    if not isinstance(pod, dict):
+        return None
+    for k in ("dataCenterId", "data_center_id", "datacenterId"):
+        v = pod.get(k)
+        if v:
+            return str(v)
+    machine = pod.get("machine")
+    if isinstance(machine, dict):
+        for k in ("dataCenterId", "data_center_id", "datacenterId", "location"):
+            v = machine.get(k)
+            if v:
+                return str(v)
+    return None
+
+
+def _await_scheduled(client, pod_id, *, clock, poll_sleep, grace_seconds):
+    """Poll get_pod until RunPod places the pod on a machine or the grace window elapses. Returns the
+    landed DC id (str) if known, True if scheduled but the DC is unknown, else False (== this pinned
+    DC is out of SECURE capacity; the caller tears the pod down and falls to the next candidate)."""
+    getter = getattr(client, "get_pod", None)
+    if not callable(getter):
+        return True                                  # cannot probe -> never block acquisition
+    step = min(5.0, grace_seconds) if grace_seconds > 0 else 0.0
+    max_iter = int(grace_seconds / step) + 2 if step > 0 else 1
+    t0 = clock()
+    for _ in range(max_iter):
+        try:
+            p = getter(pod_id) or {}
+        except Exception:  # noqa: BLE001 -- a probe fault must never fault the run
+            p = {}
+        if _pod_scheduled(p):
+            return _pod_data_center(p) or True
+        if clock() - t0 >= grace_seconds:
+            break
+        poll_sleep(step)
+    try:
+        p = getter(pod_id) or {}
+        return (_pod_data_center(p) or True) if _pod_scheduled(p) else False
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def run_verify(client: PodClient, cfg: VerifyConfig,
                *, clock: Callable[[], float], poll_sleep: Callable[[float], None] | None = None,
                max_polls: int | None = None,
@@ -713,17 +787,57 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
         return report
     report["gpu_type_id"] = gpu_id
 
+    # DC / cache-affinity (#187): try each preferred SECURE data center in order, then an UNPINNED
+    # attempt LAST so a capacity miss never fails the gate. A machine warm on this image's
+    # content-addressed weight bins skips the ~87GB cold pull. For a pinned candidate we probe
+    # schedulability within a grace window; if RunPod cannot place the pod there (no SECURE
+    # capacity), we delete it and fall through. The landed DC is recorded so affinity is evidence-
+    # driven from run one (issue acceptance).
+    candidates: list[str | None] = list(dict.fromkeys(cfg.data_center_ids))
+    candidates.append(None)                      # the guaranteed unpinned fallback (RunPod picks)
+    report["data_center_candidates"] = list(candidates)
+
     started = clock()
-    pod = client.create_pod(image=cfg.image, gpu_type_id=gpu_id, env=cfg.env,
-                            registry_auth_id=cfg.registry_auth_id, ttl_seconds=cfg.ttl_seconds,
-                            command=cfg.pod_command)
-    pod_id = pod["id"]
-    report["pod_id"] = pod_id
-    if on_pod_created is not None:
+    pod_id = None
+    dc_used: str | None = None
+    for _i, _cand in enumerate(candidates):
+        _is_last = _i == len(candidates) - 1
         try:
-            on_pod_created(pod_id)
-        except Exception:  # noqa: BLE001 -- bookkeeping only; must never fail the run
+            _pod = client.create_pod(image=cfg.image, gpu_type_id=gpu_id, env=cfg.env,
+                                     registry_auth_id=cfg.registry_auth_id,
+                                     ttl_seconds=cfg.ttl_seconds, command=cfg.pod_command,
+                                     data_center_id=_cand)
+        except Exception:  # noqa: BLE001 -- a create fault on a PINNED DC (e.g. no SECURE capacity)
+            if _is_last:   # the UNPINNED create failing is a real transport/quota fault -> propagate
+                raise
+            continue
+        _pid = _pod.get("id") if isinstance(_pod, dict) else None
+        if not _pid:
+            if _is_last:
+                raise RuntimeError("create_pod returned no id on the unpinned fallback: %r" % (_pod,))
+            continue
+        if on_pod_created is not None:           # record for the always() reap BEFORE any probe spend
+            try:
+                on_pod_created(_pid)
+            except Exception:  # noqa: BLE001 -- bookkeeping only; must never fail the run
+                pass
+        if _is_last:                             # nothing left to fall to -- accept it, the poll loop owns TTL
+            pod_id, dc_used = _pid, _cand
+            break
+        _landed = _await_scheduled(client, _pid, clock=clock, poll_sleep=poll_sleep,
+                                   grace_seconds=cfg.provision_grace_seconds)
+        if _landed is not False:                 # placed on a machine (capacity found) -> keep it
+            pod_id, dc_used = _pid, _cand
+            if isinstance(_landed, str):
+                report["data_center_landed"] = _landed
+            break
+        try:                                     # unschedulable here within grace -> reject + next
+            client.delete_pod(_pid)
+        except Exception:  # noqa: BLE001 -- best-effort reject; the always() reap is the backstop
             pass
+    assert pod_id is not None                    # the unpinned tail guarantees a pod or a raised fault
+    report["pod_id"] = pod_id
+    report["data_center_used"] = dc_used
 
     def _log_reader() -> tuple[list[tuple[str, dict]], str | None]:
         evs = parse_events(client.read_logs(pod_id))
@@ -745,6 +859,9 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
             p = getter(pod_id) or {}
         except Exception:  # noqa: BLE001 -- a state probe must never fault the run
             return
+        _dc = _pod_data_center(p)
+        if _dc:
+            report["data_center_landed"] = _dc
         st = (p.get("desiredStatus") or p.get("status") or "?", bool(p.get("runtime")))
         if st != _last_state[0] and len(pod_state_log) < 60:
             pod_state_log.append({"elapsed_s": round(clock() - started, 1),
@@ -1001,7 +1118,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--regression", action="store_true",
                     help="run the FULL capability regression (CAP-1..6 + BAK-3/4), not just the smoke")
     ap.add_argument("--data-center-id", default=None,
-                    help="pin the SECURE pod to a specific RunPod data center (default: RunPod picks)")
+                    help="ordered, comma-separated SECURE data-center affinity list (e.g. "
+                         "'EU-RO-1,EU-SE-1'); each is tried in turn, then an UNPINNED attempt last so "
+                         "a capacity miss never fails the gate (default: RunPod picks, unpinned)")
+    ap.add_argument("--provision-grace-seconds", type=float, default=120.0,
+                    help="per pinned-DC schedulability probe window: if RunPod does not place the pod "
+                         "on a machine within this, that DC is out of SECURE capacity -> next candidate")
     ap.add_argument("--container-disk-gb", type=int, default=500,
                     help="pod container disk in GB (default 500; a ~87GB baked image fits with room)")
     ap.add_argument("--run-id", default=None,
@@ -1070,12 +1192,17 @@ def main(argv: list[str] | None = None) -> int:
         gone = reap_pod(args.reap_pod, summary_sink=_summary)
         return 0 if gone is not False else 1  # confirmed-still-live => fail the step, loud
 
+    dc_ids = tuple(d.strip() for d in (args.data_center_id or "").split(",") if d.strip())
     if args.regression:
         cfg: VerifyConfig = RegressionConfig(image=args.image, tier=args.tier,
-                                             registry_auth_id=args.registry_auth_id)
+                                             registry_auth_id=args.registry_auth_id,
+                                             data_center_ids=dc_ids,
+                                             provision_grace_seconds=args.provision_grace_seconds)
         evaluator = evaluate_regression
     else:
-        cfg = VerifyConfig(image=args.image, tier=args.tier, registry_auth_id=args.registry_auth_id)
+        cfg = VerifyConfig(image=args.image, tier=args.tier, registry_auth_id=args.registry_auth_id,
+                           data_center_ids=dc_ids,
+                           provision_grace_seconds=args.provision_grace_seconds)
         evaluator = evaluate
     event_reader = None
     on_pod_created = None
@@ -1091,7 +1218,7 @@ def main(argv: list[str] | None = None) -> int:
             sharpness_baseline=args.sharpness_baseline)
         cfg = replace(cfg, env=pod_env)
         client: PodClient = RunpodSdkPodClient(  # type: ignore[assignment]
-            data_center_id=args.data_center_id, container_disk_gb=args.container_disk_gb)
+            container_disk_gb=args.container_disk_gb)  # DC affinity now lives in cfg + run_verify
         event_reader = r2_summary_event_reader(r2_read_env, run_id, prefix=args.key_prefix)
         on_pod_created = _github_env_writer("VJ_VERIFY_POD_ID")
         print("runpod_verify: LIVE run_id=%s image=%s bundle=%s promote=%s"
