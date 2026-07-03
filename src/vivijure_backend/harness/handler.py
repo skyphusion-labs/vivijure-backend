@@ -14,7 +14,6 @@ the per-shot clips plus a manifest for a separate CPU container to merge.
 from __future__ import annotations
 
 import shutil
-import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -62,13 +61,11 @@ def run_job(
     job_id: str = "local",
     mirrored: bool = False,
     on_progress=None,
-    trained_slots: set[str] = frozenset(),
-    existing_keyframes: dict[str, str | None] = {},
 ) -> dict:
     """Run one render job end to end and return the control-plane response dict.
 
-    `store` is an R2-like object with `get_file`, `put_file`, `put_dir_as_tar` (the real `R2`,
-    or a fake in tests). Nothing here touches a GPU; the GPU work is `pipeline.execute`.
+    `store` is an R2-like object with `get_file`, `put_file`, `exists`, `get_bytes` (the real
+    `R2`, or a fake in tests). Nothing here touches a GPU; the GPU work is `pipeline.execute`.
 
     Progress is emitted to the structured channel keyed by `(project, job_id)`: `mirrored` records
     whether the cold-start model mirror ran, `on_progress` is the optional RunPod hook. The whole
@@ -92,6 +89,11 @@ def run_job(
         _job_key(req.bundle_key, prefixes=("bundles/",), what=f"{req.action}: bundle_key")
         tar = store.get_file(req.bundle_key, workdir / "bundle.tar.gz")
         bundle = Bundle.extract(Path(tar), workdir / "project")
+
+        # --- prior state from R2's per-artifact objects (#112) ---
+        # Derived AFTER the bundle lands so the storyboard names every candidate key, and so
+        # bundle-provided keyframes take precedence over restored ones (hybrid lane contract).
+        trained_slots, existing_keyframes = _restore_prior_state(store, req.project, bundle)
 
         # --- validate + plan (CPU) ---
         errs = validate(req, bundle.storyboard, cast=bundle.cast)
@@ -208,32 +210,28 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
     # no submitter identity to stamp and /api/artifact is served by key (no per-row ownership check).
     # Artifacts therefore carry no identity metadata. (See SECURITY.md.)
 
-    # LoRA adapters: upload trained ones, pass pretrained through.
-    # Also write a zero-byte marker into the project tree so the next incremental render's
-    # state restore can derive trained_slots without an R2 list call.
+    # LoRA adapters: upload trained ones, pass pretrained through. The adapter object's
+    # existence at lora_key IS the "trained" record the next render's restore reads (#112);
+    # no local marker, no shared state object.
     for slot, path in outputs.loras.items():
         key = store.put_file(Path(path), keys.lora_key(project, slot))
         result.lora[slot] = {"lora_id": key}
-        marker = bundle.root / "loras" / slot / ".trained"
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.touch()
     for slot, lora_id in req.pretrained_loras.items():
         result.lora.setdefault(slot, {"lora_id": lora_id})
 
-    # Keyframes: upload whatever the stage drew; also persist into the project tree so the
-    # next incremental render's state restore can derive existing_keyframes without an R2 list.
+    # Keyframes: upload whatever the stage drew, each with its param-hash sidecar (#112).
+    # Every artifact this shard authored lands at its OWN per-identity key -- concurrent shards
+    # of one scattered render write disjoint objects, so nothing here can clobber a sibling.
     reported_shots: set[str] = set()
     for shot_id, path in outputs.keyframes.items():
         key = store.put_file(Path(path), keys.keyframe_key(project, shot_id),
                              content_type="image/png")
         result.keyframes.append(Keyframe(shot_id=shot_id, key=key))
         reported_shots.add(shot_id)
-        state_kf = bundle.root / "keyframes" / f"{shot_id}.png"
-        state_kf.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, state_kf)
         hash_src = Path(path).with_suffix(".hash")
         if hash_src.is_file():
-            shutil.copy2(hash_src, state_kf.with_suffix(".hash"))
+            store.put_file(hash_src, keys.keyframe_hash_key(project, shot_id),
+                           content_type="text/plain")
 
     # Reused keyframes: already in R2 from a prior run, not re-uploaded, but the caller needs
     # their keys to animate them. Report every REUSE/INJECT shot that wasn't freshly generated.
@@ -296,63 +294,67 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
         progress.emit("assemble_done", offloaded=False, seconds=result.seconds)
         progress.emit("upload_done", key=result.output_key)
 
-    # Project state for the next incremental render.
-    result.state_key = store.put_dir_as_tar(bundle.root, keys.state_key(project))
-    progress.emit("upload_done", key=result.state_key)
+    # No monolithic project-state object (#112): incremental-render state IS the per-artifact
+    # objects uploaded above (keyframe PNG + .hash sidecar per shot, adapter per slot).
+    # `result.state_key` stays None; the old shared projects/<slug>/state.tar.gz -- which
+    # concurrent shards raced last-writer-wins -- is no longer written or read.
     return result
 
 
-def _restore_prior_state(store, project: str, workdir: Path) -> tuple[set[str], dict[str, str | None]]:
-    """Fetch and extract the prior render's state_key into workdir/project, then derive the sets
-    the planner needs to skip already-done GPU work.
+def _restore_prior_state(store, project: str, bundle: Bundle) -> tuple[set[str], dict[str, str | None]]:
+    """Derive the planner's skip sets straight from R2's per-artifact objects (#112) and stage
+    the reusable keyframe PNGs into the bundle tree.
 
-    Returns (trained_slots, existing_keyframes). Both are empty on a fresh project (no prior state)
-    or if the fetch / extraction fails for any reason (best-effort: a stale state is worse than a
-    redundant re-render, but a failed fetch should not abort the job).
+    Returns (trained_slots, existing_keyframes). Both are empty on a fresh project (nothing in
+    R2 yet), and every per-item failure degrades to "regenerate" (best-effort: a redundant
+    re-render is the safe default; a fetch hiccup must not abort the job).
 
-    The state tar is extracted into the SAME directory run_job will later use for the bundle
-    (workdir/project). The fresh bundle tar (sent by the control plane) contains storyboard.yaml,
-    characters/, and refs/ -- it does NOT contain keyframes/ or loras/, so extracting the bundle
-    on top of the restored state leaves the prior keyframe PNGs and lora markers intact. The
-    pipeline's _resolve_keyframe checks bundle.root/keyframes/{shot_id}.png, which lands exactly
-    there."""
+    R2 is the ONLY source of truth. The old design extracted a shared projects/<slug>/state.tar.gz
+    that every shard of a scattered render rewrote whole -- last-writer-wins, so concurrent
+    keyframe-authoring shards clobbered each other's persisted state (#112). Now the storyboard
+    names every candidate key directly (no R2 list call needed):
+
+    - LoRA slot `s` is trained iff its adapter object exists at lora_key(project, s). The upload
+      in _finish happens only after a successful train, so existence == trained.
+    - Shot `sc.id` has a reusable keyframe iff its PNG exists at keyframe_key(project, sc.id);
+      its param hash comes from the .hash sidecar (absent sidecar -> None, which _keyframe_mode
+      treats as "reuse conservatively", the same contract as the old no-hash-file state).
+
+    Trusting R2 existence is also what #108 wanted: there is no stale state object left to name
+    a phantom keyframe.
+
+    PRECEDENCE: a keyframe file the BUNDLE already provided is never overwritten. The hybrid
+    keyframe lane splices exact frames into the bundle (overlayKeyframesIntoBundle in the
+    control plane) and relies on bundle-wins ordering; skipping the fetch when the local file
+    exists preserves that contract with the extraction order inverted."""
     trained_slots: set[str] = set()
     existing_keyframes: dict[str, str | None] = {}
-    try:
-        state_tar = workdir / "prior_state.tar.gz"
-        store.get_file(keys.state_key(project), state_tar)
-        state_root = workdir / "project"
-        state_root.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(state_tar, "r:gz") as tf:
-            from ..contract import _safe_extract
-            _safe_extract(tf, state_root)
-        state_tar.unlink(missing_ok=True)
-        loras_dir = state_root / "loras"
-        if loras_dir.is_dir():
-            trained_slots = {d.name for d in loras_dir.iterdir()
-                             if d.is_dir() and (d / ".trained").is_file()}
-        kf_dir = state_root / "keyframes"
-        if kf_dir.is_dir():
-            # Build shot_id -> stored_hash dict. Hash files are written alongside PNGs in
-            # _finish() so a warm worker can compare render params before reusing a keyframe.
-            # Old state (no .hash files) gets None as the value -- _keyframe_mode treats that
-            # as "reuse conservatively" so upgrading never forces a full regeneration.
-            for png in kf_dir.iterdir():
-                if png.suffix == ".png":
-                    shot_id = png.stem
-                    # Trust R2, not the state tar. A stale/partial state can name a keyframe whose
-                    # R2 object was since cleared (e.g. a "clear renders before re-render" that did
-                    # not also clear the per-project state.tar.gz). Marking such a shot REUSE skips
-                    # its keyframe render and reports a phantom key to a nonexistent object, hanging
-                    # the shard (#108). Only honor a state-claimed keyframe that is actually present
-                    # in R2; an absent one is omitted so the planner GENERATEs it (self-healing).
-                    if not store.exists(keys.keyframe_key(project, shot_id)):
-                        continue
-                    hash_file = png.with_suffix(".hash")
-                    stored = hash_file.read_text().strip() if hash_file.is_file() else None
-                    existing_keyframes[shot_id] = stored
-    except Exception:  # noqa: BLE001 -- any fetch/extract failure -> fresh render (safe default)
-        pass
+    for slot in bundle.storyboard.use_characters:
+        try:
+            if store.exists(keys.lora_key(project, slot)):
+                trained_slots.add(slot)
+        except Exception:  # noqa: BLE001 -- unknown -> retrain (safe default)
+            pass
+    kf_dir = bundle.root / "keyframes"
+    for sc in bundle.storyboard.scenes:
+        try:
+            if not store.exists(keys.keyframe_key(project, sc.id)):
+                continue
+            local_png = kf_dir / f"{sc.id}.png"
+            if not local_png.exists():  # bundle-provided frames win; only fill the gaps
+                local_png.parent.mkdir(parents=True, exist_ok=True)
+                store.get_file(keys.keyframe_key(project, sc.id), local_png)
+            stored: str | None = None
+            try:
+                raw = store.get_bytes(keys.keyframe_hash_key(project, sc.id))
+                stored = raw.decode("utf-8", "replace").strip() or None
+                if stored:
+                    local_png.with_suffix(".hash").write_text(stored)
+            except Exception:  # noqa: BLE001 -- no/unreadable sidecar -> reuse conservatively
+                pass
+            existing_keyframes[sc.id] = stored
+        except Exception:  # noqa: BLE001 -- any per-shot failure -> the planner GENERATEs it
+            continue
     return trained_slots, existing_keyframes
 
 
@@ -572,10 +574,10 @@ def handler(job: dict) -> dict:
             return run_i2v_clip_job(payload, store=store, workdir=workdir,
                                     job_id=job_id, on_progress=on_progress)
 
-        trained_slots, existing_keyframes = _restore_prior_state(store, project, workdir)
+        # Prior-state restore happens INSIDE run_job now (#112): it needs the extracted
+        # bundle's storyboard to name the per-artifact R2 keys it checks.
         return run_job(payload, pipeline=get_pipeline(), store=store, workdir=workdir,
-                       job_id=job_id, mirrored=bool(mirrored), on_progress=on_progress,
-                       trained_slots=trained_slots, existing_keyframes=existing_keyframes)
+                       job_id=job_id, mirrored=bool(mirrored), on_progress=on_progress)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

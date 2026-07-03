@@ -305,8 +305,9 @@ class Clip:
 @dataclass
 class RenderResult:
     """What the backend returns. The control plane polls for `output_key` (the final
-    MP4) plus the per-shot `keyframes` and `clips`; `state_key` is the project tree it
-    restores on the next render of this project."""
+    MP4) plus the per-shot `keyframes` and `clips`. `state_key` is always None since #112
+    (kept for wire-compat): incremental state lives as per-artifact R2 objects now, not a
+    shared tarball."""
     project: str
     output_key: str | None = None
     seconds: float | None = None
