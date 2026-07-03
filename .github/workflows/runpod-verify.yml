@@ -41,7 +41,13 @@ on:
       bundle_key:
         description: "R2 key of the draft project bundle the pod renders for the verify."
         type: string
-        default: "bundles/Packet_Chase.tar.gz"
+        # Default = the gate SMOKE bundle: single shot, use_characters=[] -> ZERO LoRA training
+        # (empty use_characters keyframes via plain SDXL), crisp/high-detail content so the
+        # sharpness gate clears (Laplacian >= 97 vs baseline 100). Exercises keyframe + i2v +
+        # finish, which is the release-gate's scope. NOT Packet_Chase: that bundle carries 2 cast
+        # slots with full ref sets, so the plan trains 2 LoRAs x 8800 steps (~2.3h) BEFORE any
+        # keyframe -- structurally over the pod's 90-min TTL; LoRA training is out of smoke scope.
+        default: "bundles/Verify_Smoke.tar.gz"
       promote:
         description: "On PASS, repin the PROD serverless endpoint to the image (leave OFF for a proof run)."
         type: boolean
@@ -84,7 +90,12 @@ jobs:
     # The real staging gate: ONE SECURE GPU pod on the candidate image, @event verify over R2, teardown.
     if: ${{ inputs.live == true }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # MUST exceed the pod hard TTL (ttl_seconds=5400 = 90 min in deploy/runpod_verify.py) plus a
+    # teardown margin, so the POD's own TTL is the true wall-clock ceiling -- never the runner. A
+    # 60-min cap killed a good :0.4.1 run mid-render (26-min cold pull + i2v > 60 min): the runner
+    # cancelled the job before the pod finished, aborting a passing image. 105 = 90 (TTL) + 15
+    # (cold-pull slack + always() reap). Spend stays bounded by the TTL + the always-run reap.
+    timeout-minutes: 105
     env:
       PYTHONPATH: src                       # src-layout: make vivijure_backend importable (pytest.ini parity)
       RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
@@ -119,11 +130,21 @@ jobs:
 
       - name: Live verify gate (SECURE pod -> @event verify -> delete+confirm-zero; promote gated)
         run: |
+          # SHARPNESS CALIBRATION (option 1, 2026-07-03) -- baseline 75.0, NOT the old 100.0 placeholder.
+          # Measured Laplacian 77.5 on the visually-confirmed-good draft-fp8 clip from run 28624514409
+          # (2026-07-03; lead eyeballed full.mp4: crisp rack edges, readable panel labels, in focus). So
+          # 77.5 is the HONEST sharpness of a good draft-fp8 clip of this bundle; 100.0 predated any real
+          # clip existing. 75.0 pins the 0.97 ratio floor at ~72.8, leaving headroom for fp8-kernel
+          # nondeterminism and the #191 torch re-pin on the next bake. A REAL quant regression craters
+          # sharpness far below that, so the #118 method-ii detector keeps its teeth.
+          # RECALIBRATION DOCTRINE: re-measure the baseline from a confirmed-good clip whenever the smoke
+          # bundle content or the i2v config changes -- NEVER move this number to make a failing run pass.
           python deploy/runpod_verify.py --live \
             --report-file verify-report.json \
             --image "${{ inputs.image }}" \
             --tier "${{ inputs.tier }}" \
             --bundle-key "${{ inputs.bundle_key }}" \
+            --sharpness-baseline 75.0 \
             ${{ inputs.promote && '--promote' || '' }}
 
       - name: Upload verify evidence (always)

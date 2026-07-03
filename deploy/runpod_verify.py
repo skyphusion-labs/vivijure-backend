@@ -861,28 +861,83 @@ def r2_summary_event_reader(env: dict, run_id: str, *, prefix: str = "verify"):
     return read
 
 
+def build_verify_pod_env(base_env: dict, source_env: "dict | Any", *, run_id: str, key_prefix: str,
+                         bundle_key: str, project: str, sharpness_baseline: float) -> "tuple[dict, dict]":
+    """Split R2 into its two consumers for a live verify run (#184), so only ONE ever sees plaintext:
+      - ``r2_read_env`` (returned second): the real R2 VALUES from ``source_env`` (the CI secrets), for
+        the HARNESS's own summary poll -- a ``{{ ... }}`` reference resolves only inside a pod, never on
+        the CI runner, so the runner-side read must keep the raw values.
+      - the POD env (returned first): R2 KEY creds as RunPod secret REFERENCES that resolve at pod
+        runtime and are NEVER stored or retrievable in plaintext via ``get-pod``. Only R2_ENDPOINT /
+        R2_BUCKET (non-secret config) ride as literals; the raw R2 key VALUES never touch the pod env.
+    Every non-reference value is whitespace/quote-normalised (the quote-wrapped-secret landing class)."""
+    r2_read_env: dict = {}
+    for k in ("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET"):
+        v = source_env.get(k)
+        if v:
+            r2_read_env[k] = _clean_key(v)
+    pod_env = dict(base_env)  # VJ_I2V_* + VJ_VERIFY (+ VJ_REGRESSION)
+    for k in ("R2_ENDPOINT", "R2_BUCKET"):  # non-secret R2 config: literal values
+        v = r2_read_env.get(k)
+        if v:
+            pod_env[k] = v
+    pod_env.update({
+        "VJ_VERIFY_RUN_ID": run_id,
+        "VJ_VERIFY_KEY_PREFIX": key_prefix,
+        "VJ_VERIFY_BUNDLE_KEY": bundle_key,
+        "VJ_VERIFY_PROJECT": project,
+        "VJ_SHARPNESS_BASELINE": repr(sharpness_baseline),
+    })
+    # Normalise EVERY value set so far: strip whitespace + a matched surrounding quote pair (a
+    # quote-wrapped secret passes presence checks but auth-fails on use).
+    pod_env = {k: _clean_key(val) for k, val in pod_env.items()}
+    # R2 secret REFERENCES set AFTER the clean pass so the {{ RUNPOD_SECRET_* }} braces + inner spacing
+    # survive verbatim (RunPod resolves this exact form at pod runtime; matches the prod template).
+    pod_env["R2_ACCESS_KEY_ID"] = "{{ RUNPOD_SECRET_R2_ACCESS_KEY_ID }}"
+    pod_env["R2_SECRET_ACCESS_KEY"] = "{{ RUNPOD_SECRET_R2_SECRET_ACCESS_KEY }}"
+    return pod_env, r2_read_env
+
+
 def promote_image(image: str, *, endpoint_id: str = PROD_ENDPOINT_ID, api_key: str | None = None,
                   transport: "Callable[..., Any] | None" = None) -> dict:
-    """Promote a verified image onto the PRODUCTION serverless endpoint by repinning its ``imageName``.
-    This is the ONLY path an image reaches prod (docs/release-gate.md doctrine); the caller gates it
-    behind an explicit ``--promote`` go, so a bare verify run never touches prod. ``transport`` is
-    injected in tests (no network). The RunPod API key is read from RUNPOD_API_KEY and NEVER logged."""
+    """Promote a verified image onto the PRODUCTION serverless endpoint by repinning the ``imageName``
+    on the endpoint's TEMPLATE. A serverless endpoint's image lives on its template, NOT the endpoint:
+    ``PATCH /v1/endpoints/{id}`` with an ``imageName`` is rejected by RunPod REST v1 with a 400 (see the
+    banked lesson runpod-rest-v1-honors-volume-env). This is the ONLY path an image reaches prod
+    (docs/release-gate.md doctrine); the caller gates it behind an explicit ``--promote`` go, so a bare
+    verify run never touches prod. ``transport`` is injected in tests (no network). The RunPod API key is
+    read from RUNPOD_API_KEY and NEVER logged."""
     key = _clean_key(api_key or os.environ.get("RUNPOD_API_KEY"))
     if not key:
         raise RuntimeError("promote needs RUNPOD_API_KEY (never hardcode a key)")
     if transport is None:
         import requests
 
-        def transport(url, *, headers, payload):  # noqa: ANN001 -- thin default HTTP leg
-            resp = requests.patch(url, headers=headers, json=payload, timeout=30)
+        def transport(url, *, method="PATCH", headers, payload=None):  # noqa: ANN001 -- thin HTTP leg
+            resp = requests.request(method, url, headers=headers, json=payload, timeout=30)
             resp.raise_for_status()
             return resp.json() if resp.content else {}
 
-    url = "https://rest.runpod.io/v1/endpoints/%s" % endpoint_id
-    body = transport(url,
-                     headers={"Authorization": "Bearer %s" % key, "Content-Type": "application/json"},
-                     payload={"imageName": image})
-    return {"endpoint_id": endpoint_id, "image": image, "response": body}
+    headers = {"Authorization": "Bearer %s" % key, "Content-Type": "application/json"}
+    base = "https://rest.runpod.io/v1"
+    # Resolve the endpoint's templateId at runtime (no hardcode), then repin the TEMPLATE's imageName.
+    # A :version-tag change forces the endpoint to re-provision workers onto the new image (:latest
+    # would cache); repinning the template is what actually moves prod.
+    endpoint = transport("%s/endpoints/%s" % (base, endpoint_id), method="GET", headers=headers)
+    template_id = endpoint.get("templateId")
+    if not template_id:
+        raise RuntimeError("promote: endpoint %s has no templateId; cannot repin image" % endpoint_id)
+    transport("%s/templates/%s" % (base, template_id), method="PATCH", headers=headers,
+              payload={"imageName": image})
+    # Read-back: the promote self-verifies -- the template must now report the promoted image, so a
+    # silent no-op (200 that did not take) fails the promote instead of falsely reporting success.
+    after = transport("%s/templates/%s" % (base, template_id), method="GET", headers=headers)
+    landed = after.get("imageName")
+    if landed != image:
+        raise RuntimeError("promote read-back mismatch: template %s imageName=%r, expected %r"
+                           % (template_id, landed, image))
+    return {"endpoint_id": endpoint_id, "template_id": template_id, "image": image,
+            "imageName": landed, "response": after}
 
 
 def _github_env_writer(name: str) -> "Callable[[str], None]":
@@ -1027,26 +1082,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.live:
         import uuid
         run_id = args.run_id or ("s1-" + uuid.uuid4().hex[:12])
-        pod_env = dict(cfg.env)  # VJ_I2V_* + VJ_VERIFY (+ VJ_REGRESSION)
-        for k in ("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET"):
-            v = os.environ.get(k)
-            if v:
-                pod_env[k] = v
-        pod_env.update({
-            "VJ_VERIFY_RUN_ID": run_id,
-            "VJ_VERIFY_KEY_PREFIX": args.key_prefix,
-            "VJ_VERIFY_BUNDLE_KEY": args.bundle_key,
-            "VJ_VERIFY_PROJECT": args.project,
-            "VJ_SHARPNESS_BASELINE": repr(args.sharpness_baseline),
-        })
-        # Normalise EVERY injected value: strip whitespace + a matched surrounding quote pair.
-        # A quote-wrapped secret (the RUNPOD_API_KEY / R2_* landing class) passes presence checks
-        # but auth-fails on use; cleaning here kills that class for all current + future vars.
-        pod_env = {k: _clean_key(val) for k, val in pod_env.items()}
+        # R2 has TWO consumers: the pod (secret REFERENCES, resolved at pod runtime) and this harness
+        # itself (real VALUES, for the summary poll on the CI runner). build_verify_pod_env keeps the
+        # raw R2 key values OUT of the pod env (#184); the harness reads R2 with r2_read_env.
+        pod_env, r2_read_env = build_verify_pod_env(
+            cfg.env, os.environ, run_id=run_id, key_prefix=args.key_prefix,
+            bundle_key=args.bundle_key, project=args.project,
+            sharpness_baseline=args.sharpness_baseline)
         cfg = replace(cfg, env=pod_env)
         client: PodClient = RunpodSdkPodClient(  # type: ignore[assignment]
             data_center_id=args.data_center_id, container_disk_gb=args.container_disk_gb)
-        event_reader = r2_summary_event_reader(pod_env, run_id, prefix=args.key_prefix)
+        event_reader = r2_summary_event_reader(r2_read_env, run_id, prefix=args.key_prefix)
         on_pod_created = _github_env_writer("VJ_VERIFY_POD_ID")
         print("runpod_verify: LIVE run_id=%s image=%s bundle=%s promote=%s"
               % (run_id, cfg.image, args.bundle_key, "on" if args.promote else "OFF"))

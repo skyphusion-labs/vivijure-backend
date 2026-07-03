@@ -468,19 +468,70 @@ def test_run_verify_calls_on_pod_created_with_id():
     assert seen == ["pod-xyz"]                            # id captured for the always-run stop backstop
 
 
-def test_promote_image_repins_prod_endpoint_with_image():
-    seen = {}
+def test_promote_image_repins_the_endpoints_template_not_the_endpoint():
+    calls = []
 
-    def transport(url, *, headers, payload):
-        seen.update(url=url, headers=headers, payload=payload)
-        return {"id": "t9wcvlxh8rc5la"}
+    def transport(url, *, method="PATCH", headers, payload=None):
+        calls.append((method, url, payload))
+        if method == "GET" and "/endpoints/" in url:
+            return {"id": "t9wcvlxh8rc5la", "templateId": "tpl-1"}
+        if method == "PATCH" and "/templates/" in url:
+            return {}
+        if method == "GET" and "/templates/" in url:
+            return {"imageName": "ghcr.io/x:2"}  # read-back: repin took
+        raise AssertionError("unexpected promote call: %s %s" % (method, url))
 
     out = rv.promote_image("ghcr.io/x:2", endpoint_id="t9wcvlxh8rc5la", api_key="k-1",
                            transport=transport)
-    assert "t9wcvlxh8rc5la" in seen["url"]
-    assert seen["payload"] == {"imageName": "ghcr.io/x:2"}
-    assert seen["headers"]["Authorization"].startswith("Bearer ")
-    assert out["image"] == "ghcr.io/x:2" and out["endpoint_id"] == "t9wcvlxh8rc5la"
+    # resolved the endpoint's template, then PATCHed the TEMPLATE image -- never the endpoint (that 400s)
+    assert ("GET", "https://rest.runpod.io/v1/endpoints/t9wcvlxh8rc5la", None) in calls
+    patch = [c for c in calls if c[0] == "PATCH"][0]
+    assert "/templates/tpl-1" in patch[1]
+    assert patch[2] == {"imageName": "ghcr.io/x:2"}
+    assert not any(m == "PATCH" and "/endpoints/" in u for m, u, _ in calls)
+    assert out["image"] == "ghcr.io/x:2" and out["template_id"] == "tpl-1"
+    assert out["imageName"] == "ghcr.io/x:2"
+
+
+def test_promote_image_raises_on_readback_mismatch():
+    def transport(url, *, method="PATCH", headers, payload=None):
+        if method == "GET" and "/endpoints/" in url:
+            return {"templateId": "tpl-1"}
+        if method == "PATCH":
+            return {}
+        if method == "GET" and "/templates/" in url:
+            return {"imageName": "ghcr.io/x:OLD"}  # repin silently did not take
+        raise AssertionError("unexpected call")
+
+    with pytest.raises(RuntimeError):
+        rv.promote_image("ghcr.io/x:2", endpoint_id="e", api_key="k-1", transport=transport)
+
+
+def test_build_verify_pod_env_sends_secret_references_not_raw_r2_values():
+    source = {
+        "R2_ENDPOINT": "https://acct.r2.cloudflarestorage.com",
+        "R2_ACCESS_KEY_ID": "AKIA-REAL-VALUE",
+        "R2_SECRET_ACCESS_KEY": "super-secret-real-value",
+        "R2_BUCKET": "vivijure",
+    }
+    pod_env, r2_read_env = rv.build_verify_pod_env(
+        {"VJ_VERIFY": "1"}, source, run_id="s1-abc", key_prefix="verify",
+        bundle_key="bundles/x.tar.gz", project="p", sharpness_baseline=75.0)
+    # the POD receives RunPod secret REFERENCES for the creds, matching the prod template form
+    assert pod_env["R2_ACCESS_KEY_ID"] == "{{ RUNPOD_SECRET_R2_ACCESS_KEY_ID }}"
+    assert pod_env["R2_SECRET_ACCESS_KEY"] == "{{ RUNPOD_SECRET_R2_SECRET_ACCESS_KEY }}"
+    # non-secret R2 config rides as literals
+    assert pod_env["R2_ENDPOINT"] == "https://acct.r2.cloudflarestorage.com"
+    assert pod_env["R2_BUCKET"] == "vivijure"
+    # the raw secret VALUES never appear anywhere in the pod env (the get-pod exposure #184 closes)
+    blob = "|".join("%s=%s" % (k, v) for k, v in pod_env.items())
+    assert "AKIA-REAL-VALUE" not in blob
+    assert "super-secret-real-value" not in blob
+    # the HARNESS keeps the real values for its own R2 summary poll (references resolve only in a pod)
+    assert r2_read_env["R2_ACCESS_KEY_ID"] == "AKIA-REAL-VALUE"
+    assert r2_read_env["R2_SECRET_ACCESS_KEY"] == "super-secret-real-value"
+    # run metadata + base env pass through
+    assert pod_env["VJ_VERIFY_RUN_ID"] == "s1-abc" and pod_env["VJ_VERIFY"] == "1"
 
 
 def test_promote_image_requires_key(monkeypatch):
