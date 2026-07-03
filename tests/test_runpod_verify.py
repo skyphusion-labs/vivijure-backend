@@ -787,3 +787,126 @@ def test_key_shape_reports_r2_edges_without_values(capsys, monkeypatch):
     assert "R2SECRETBODY" not in out                          # value never echoed
     assert "R2_SECRET_ACCESS_KEY: present=yes" in out
     assert "R2_SECRET_ACCESS_KEY:" in out and "starts_quote=yes ends_quote=yes" in out
+
+
+# ---------------------------------------------------------------- R1 (#187) DC / cache-affinity
+
+
+class _AffinityClient(FakePodClient):
+    """Multi-create fake for the DC-affinity fallback. `schedules` maps each created pod-id -> the DC
+    it lands in (a machine is assigned == SECURE capacity found), or None to model a pod that never
+    schedules (== no SECURE capacity there). Records the data_center_id every create was asked to pin."""
+
+    def __init__(self, log_lines, schedules):
+        super().__init__(log_lines)
+        self._schedules = schedules
+        self._seq = 0
+        self.created_dcs = []
+        self.deleted = []
+
+    def create_pod(self, **kw):                 # NOTE: overrides the base single-pod assert on purpose
+        self._seq += 1
+        self.created_dcs.append(kw.get("data_center_id"))
+        self.calls.append(("create_pod", kw))
+        return {"id": "pod-%d" % self._seq}
+
+    def get_pod(self, pod_id):
+        self.calls.append(("get_pod", pod_id))
+        dc = self._schedules.get(pod_id, "DC-DEFAULT")
+        if dc is None:                          # placed on NO machine -> pending / no capacity here
+            return {"id": pod_id, "desiredStatus": "RUNNING"}
+        return {"id": pod_id, "desiredStatus": "RUNNING", "runtime": {"uptimeInSeconds": 2},
+                "machineId": "m-x", "dataCenterId": dc}
+
+    def delete_pod(self, pod_id):
+        self.deleted.append(pod_id)
+        self.calls.append(("delete_pod", pod_id))
+        return {"id": pod_id, "deleted": True}
+
+
+def test_pod_scheduled_helper():
+    assert rv._pod_scheduled({"runtime": {"uptimeInSeconds": 1}}) is True
+    assert rv._pod_scheduled({"machineId": "m-1"}) is True
+    assert rv._pod_scheduled({"machine": {"id": "m-1"}}) is True
+    # desiredStatus RUNNING alone is the TARGET, not a placement -> a pending pod is NOT scheduled.
+    assert rv._pod_scheduled({"desiredStatus": "RUNNING"}) is False
+    assert rv._pod_scheduled({}) is False
+    assert rv._pod_scheduled(None) is False
+
+
+def test_pod_data_center_helper():
+    assert rv._pod_data_center({"dataCenterId": "EU-RO-1"}) == "EU-RO-1"
+    assert rv._pod_data_center({"machine": {"dataCenterId": "EU-SE-1"}}) == "EU-SE-1"
+    assert rv._pod_data_center({"machine": {"location": "US-KS-2"}}) == "US-KS-2"
+    assert rv._pod_data_center({"desiredStatus": "RUNNING"}) is None
+    assert rv._pod_data_center({}) is None
+
+
+def test_run_verify_no_dc_ids_spins_one_unpinned_pod():
+    # Default cfg (no affinity): exactly ONE pod, pinned to nothing, and the report says so.
+    client = FakePodClient(_pass_log())
+    cfg = rv.VerifyConfig(image="ghcr.io/x:1")
+    report = rv.run_verify(client, cfg, clock=_clock())
+    assert report["passed"] is True
+    assert report["data_center_candidates"] == [None]
+    assert report["data_center_used"] is None
+    create = next(c for c in client.calls if c[0] == "create_pod")[1]
+    assert create["data_center_id"] is None       # explicitly unpinned, never the client default path
+
+
+def test_run_verify_affinity_first_dc_schedules_kept():
+    # One preferred DC that has capacity: the pod is pinned there, kept, and its landed DC is recorded.
+    client = _AffinityClient(_pass_log(), schedules={"pod-1": "EU-RO-1"})
+    cfg = rv.VerifyConfig(image="ghcr.io/x:1", data_center_ids=("EU-RO-1",),
+                          provision_grace_seconds=10.0)
+    report = rv.run_verify(client, cfg, clock=_clock())
+    assert report["passed"] is True
+    assert client.created_dcs == ["EU-RO-1"]                  # ONE create, on the pinned DC
+    assert report["data_center_used"] == "EU-RO-1"
+    assert report["data_center_landed"] == "EU-RO-1"
+    assert report["data_center_candidates"] == ["EU-RO-1", None]
+    assert client.deleted == ["pod-1"]                        # only the normal end-of-run teardown
+
+
+def test_run_verify_affinity_falls_through_capacity_miss_to_next_dc():
+    # DC-A has no SECURE capacity (never schedules) -> its pod is torn down and DC-B is tried next.
+    client = _AffinityClient(_pass_log(), schedules={"pod-1": None, "pod-2": "EU-SE-1"})
+    cfg = rv.VerifyConfig(image="ghcr.io/x:1", data_center_ids=("EU-RO-1", "EU-SE-1"),
+                          provision_grace_seconds=10.0)
+    report = rv.run_verify(client, cfg, clock=_clock())
+    assert report["passed"] is True
+    assert client.created_dcs == ["EU-RO-1", "EU-SE-1"]       # tried A, then B
+    # pod-1 (unschedulable A) reaped during acquisition, pod-2 (kept B) deleted at normal teardown.
+    assert client.deleted == ["pod-1", "pod-2"]
+    assert report["data_center_used"] == "EU-SE-1"
+    assert report["data_center_landed"] == "EU-SE-1"
+
+
+def test_run_verify_affinity_create_exception_falls_through_to_unpinned():
+    # A pinned-DC create that RAISES (a classic no-availability error) must fall through, never fail.
+    class _RaiseThenOk(_AffinityClient):
+        def create_pod(self, **kw):
+            if kw.get("data_center_id") == "EU-RO-1":
+                raise RuntimeError("no instances available in EU-RO-1")
+            return super().create_pod(**kw)
+
+    client = _RaiseThenOk(_pass_log(), schedules={"pod-1": "DC-DEFAULT"})
+    cfg = rv.VerifyConfig(image="ghcr.io/x:1", data_center_ids=("EU-RO-1",),
+                          provision_grace_seconds=10.0)
+    report = rv.run_verify(client, cfg, clock=_clock())
+    assert report["passed"] is True
+    assert client.created_dcs == [None]                       # only the UNPINNED create succeeded
+    assert report["data_center_used"] is None                 # landed unpinned, gate not failed
+
+
+def test_run_verify_affinity_all_pinned_miss_lands_unpinned():
+    # Every pinned DC is out of capacity -> the guaranteed unpinned tail keeps the last pod (no fail).
+    client = _AffinityClient(_pass_log(), schedules={"pod-1": None, "pod-2": None})
+    cfg = rv.VerifyConfig(image="ghcr.io/x:1", data_center_ids=("EU-RO-1",),
+                          provision_grace_seconds=10.0)
+    report = rv.run_verify(client, cfg, clock=_clock())
+    assert report["passed"] is True
+    assert client.created_dcs == ["EU-RO-1", None]            # pinned miss, then unpinned
+    # pod-1 (pinned miss) reaped during acquisition, pod-2 (kept unpinned) deleted at normal teardown.
+    assert client.deleted == ["pod-1", "pod-2"]
+    assert report["data_center_used"] is None
