@@ -160,6 +160,29 @@ pod run, exactly like the harness's own `RunpodMcpPodClient` seam.
 - **Tier-aware GPU.** H200/B200 for the datacenter bf16 image (the only image that runs full Wan); a
   cheap consumer GPU for the homelab-lite images.
 
+### Cold-pull cost: data-center / cache-affinity (#187)
+
+The dominant cost of a gate run is the **~87GB cold image pull**, not the render: a warm-cache
+machine runs verify in seconds, while a cold pull measured ~37 min. RunPod caches image layers
+**per physical machine**, and the baked weight bins (`deploy/Dockerfile` `bin-00`..`bin-23`) are
+**content-addressed** -- a code/dep-only candidate (a `src/` or torch-pin change) reuses the prior
+image's weight-layer blobs byte-for-byte, so a machine warm on any recent build re-pulls only the
+small top layers, not the 87GB.
+
+The `runpod-verify.yml` **`data_center_id`** input (harness `--data-center-id`) is the affinity
+knob: an **ordered, comma-separated** SECURE data-center list, tried in turn, with an **UNPINNED
+attempt always last** so a capacity miss never fails the gate. For each pinned candidate the harness
+probes schedulability within `--provision-grace-seconds`; if RunPod cannot place the pod there (no
+SECURE capacity), it deletes that pod and falls to the next candidate. Every run records
+`data_center_used` (the pin that won) and **`data_center_landed`** (the DC the pod actually ran in)
+in the report -- set the next run's `data_center_id` to the last good run's `data_center_landed`, so
+affinity is evidence-driven, not a guess. A DC pin **raises the probability** of a warm hit (the
+cache is per-machine, not per-DC); the unpinned tail guarantees the gate still runs on a miss.
+
+> **Not a slim image.** The gate MUST pull the EXACT prod candidate (that is how a torch-ABI break
+> gets caught), so it can never run a verify-only slim image. Slimming the prod image for
+> scale-from-zero cold-start latency is a separate, parked concern.
+
 ## Image matrix (build lanes)
 
 Three images, quality-differentiated. Motion (Wan i2v) quality is always the datacenter ceiling;

@@ -52,6 +52,10 @@ on:
         description: "On PASS, repin the PROD serverless endpoint to the image (leave OFF for a proof run)."
         type: boolean
         default: false
+      data_center_id:
+        description: "Ordered SECURE data-center affinity, comma-separated (e.g. EU-RO-1,EU-SE-1). Pins the verify pod to a machine warm on this image's weight layers to skip the ~87GB cold pull; each is tried in turn, then UNPINNED last so a capacity miss never fails the gate. Empty = RunPod picks. Set it to the data_center_landed of the last good run report."
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -145,6 +149,7 @@ jobs:
             --tier "${{ inputs.tier }}" \
             --bundle-key "${{ inputs.bundle_key }}" \
             --sharpness-baseline 75.0 \
+            ${{ inputs.data_center_id != '' && format('--data-center-id {0}', inputs.data_center_id) || '' }} \
             ${{ inputs.promote && '--promote' || '' }}
 
       - name: Upload verify evidence (always)
