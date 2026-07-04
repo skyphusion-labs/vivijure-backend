@@ -248,6 +248,29 @@ def assert_finish_shas(root: Path, manifest_path=None, log=print) -> dict:
     return {"facexlib_dir": str(fx), "verified": checked}
 
 
+def assert_no_tree_cache(root, log=print):
+    """Hard-fail if any huggingface_hub tree-cache listing (`<repo>/trees/<commit>.json`) survives
+    under `root` (the HF hub). A baked tree listing makes hf_hub 1.x offline load hard-fail
+    (IncompleteSnapshotError) against our deliberately-curated model subset -- the exact #206 break:
+    the listing names siblings we correctly omit (e.g. RealVisXL_V5.0 root single-file checkpoints,
+    one 13.8 GB, over the 10 GB layer ceiling), and the render-time completeness check demands them.
+    deploy/bake_hf_configs.py scrubs these after the online config bake; THIS gate re-asserts, at
+    BAKE, that none survived, so the class fails at build, never at the first prod job. Stdlib-only;
+    scans `<root>/**/trees/*.json` so it is robust to the HF_HOME layout. Returns a summary; raises
+    SystemExit on any survivor."""
+    root = Path(root)
+    stray = sorted(str(q.relative_to(root)) for q in root.rglob("trees/*.json"))
+    if stray:
+        sample = ", ".join(stray[:5]) + (f", ... ({len(stray) - 5} more)" if len(stray) > 5 else "")
+        raise SystemExit(
+            f"bake_layers: assert-no-tree-cache FATAL -- {len(stray)} huggingface_hub tree listing(s) "
+            f"survived under {root} ({sample}). A baked tree listing makes offline load hard-fail with "
+            f"IncompleteSnapshotError against the curated model subset (#206). deploy/bake_hf_configs.py "
+            f"must scrub every <repo>/trees/ after the online config bake; re-run it or drop these.")
+    log(f"bake_layers: assert-no-tree-cache OK -- no tree listing survives under {root}.")
+    return {"root": str(root), "tree_listings": 0}
+
+
 def _floor_for(precision: str | None, explicit_min_gb: float | None) -> float:
     """Resolve the byte floor: an explicit --min-gb wins; else the precision default; else the global
     default. Keeps the Dockerfile/CI call sites declarative (pass --precision, get the right floor)."""
@@ -355,6 +378,11 @@ def main() -> None:
     p_fx.add_argument("--manifest", type=Path, default=None,
                       help="bake-manifest.json with the facexlib pins (default: alongside this script)")
 
+    p_tc = sub.add_parser("assert-no-tree-cache",
+                          help="hard-fail if any hf_hub tree-cache listing survives (the #206 gate)")
+    p_tc.add_argument("--root", required=True, type=Path,
+                      help="models root (or HF hub root); scanned recursively for */trees/*.json")
+
     p_v = sub.add_parser("verify-image", help="assert built image layers < ceiling")
     p_v.add_argument("--image", required=True)
     p_v.add_argument("--ceiling-gb", type=float, default=10.0)
@@ -374,6 +402,8 @@ def main() -> None:
                        int(args.min_shard_gb * 1024**3))
     elif args.cmd == "assert-finish-shas":
         assert_finish_shas(args.root, args.manifest)
+    elif args.cmd == "assert-no-tree-cache":
+        assert_no_tree_cache(args.root)
     elif args.cmd == "verify-image":
         sys.exit(verify_image(args.image, int(args.ceiling_gb * 1024**3)))
     elif args.cmd == "bins-needed":

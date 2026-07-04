@@ -183,6 +183,7 @@ COPY deploy/bake-manifest.json /tmp/bake-manifest.json
 COPY deploy/bake-manifest.json /opt/models/bake-manifest.json
 RUN python /tmp/bake_layers.py assert-weights --root "$VJ_MODELS_ROOT" --precision "${VJ_BAKE_PRECISION}" \
     && python /tmp/bake_layers.py assert-finish-shas --root "$VJ_MODELS_ROOT" --manifest /tmp/bake-manifest.json \
+    && python /tmp/bake_layers.py assert-no-tree-cache --root "$VJ_MODELS_ROOT" \
     && printf 'baked_utc=%s\nprecision=%s\nmodel_version=%s\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${VJ_BAKE_PRECISION}" "${VJ_MODEL_VERSION}" \
         > /opt/models/.vj-baked \
