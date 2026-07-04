@@ -905,7 +905,9 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
     # than leave data_center_landed absent (reads like a dropped value) or report a bare null that
     # looks like a bug, mark it the explicit sentinel "unknown" and record why, so the affinity-
     # feedback field is HONEST about the SDK gap. data_center_used stays None when the run pinned no
-    # DC (unpinned == RunPod picked) -- that null is correct, not a telemetry miss.
+    # DC (unpinned == RunPod picked) -- that null is correct, not a telemetry miss. FUTURE: to
+    # capture the REAL landed DC, switch this read path to the RunPod REST v1 pod GET (its machine
+    # object carries the data center); that needs a live pod to prove, so it is deferred (no spend).
     if not report.get("data_center_landed"):
         report["data_center_landed"] = "unknown"
         report["data_center_note"] = (
