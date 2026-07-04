@@ -854,6 +854,29 @@ def test_run_verify_no_dc_ids_spins_one_unpinned_pod():
     assert create["data_center_id"] is None       # explicitly unpinned, never the client default path
 
 
+def test_run_verify_landed_dc_unknown_is_honest_not_null():
+    # #202: the runpod SDK pod query surfaces no dataCenterId, so a run that captures no landed DC
+    # reports the explicit sentinel "unknown" + a note -- never an absent field or a bare null that
+    # reads like a dropped value. data_center_used stays None (honest: this run pinned nothing).
+    client = FakePodClient(_pass_log())            # FakePodClient.get_pod carries no DC field
+    report = rv.run_verify(client, rv.VerifyConfig(image="ghcr.io/x:1"), clock=_clock())
+    assert report["passed"] is True
+    assert report["data_center_used"] is None
+    assert report["data_center_landed"] == "unknown"
+    assert "runpod SDK" in report["data_center_note"]
+
+
+def test_run_verify_real_landed_dc_is_not_clobbered_by_unknown():
+    # The #202 honesty sentinel must NEVER overwrite a genuinely captured DC (affinity feedback
+    # stays real, and no spurious note is attached).
+    client = _AffinityClient(_pass_log(), schedules={"pod-1": "EU-RO-1"})
+    cfg = rv.VerifyConfig(image="ghcr.io/x:1", data_center_ids=("EU-RO-1",),
+                          provision_grace_seconds=10.0)
+    report = rv.run_verify(client, cfg, clock=_clock())
+    assert report["data_center_landed"] == "EU-RO-1"
+    assert "data_center_note" not in report
+
+
 def test_run_verify_affinity_first_dc_schedules_kept():
     # One preferred DC that has capacity: the pod is pinned there, kept, and its landed DC is recorded.
     client = _AffinityClient(_pass_log(), schedules={"pod-1": "EU-RO-1"})
