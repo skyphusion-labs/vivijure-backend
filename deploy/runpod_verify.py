@@ -899,6 +899,20 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
         report["pod_state_log"] = pod_state_log
         report["pod_ever_running"] = any(x.get("running") for x in pod_state_log)
 
+    # DC telemetry honesty (#202): the runpod SDK pod query (generate_pod_query / QUERY_POD in
+    # runpod/api/queries/pods.py) selects `machine { gpuDisplayName }` only -- it exposes NO
+    # data-center field, so _pod_data_center() can never read the landed DC over the SDK path. Rather
+    # than leave data_center_landed absent (reads like a dropped value) or report a bare null that
+    # looks like a bug, mark it the explicit sentinel "unknown" and record why, so the affinity-
+    # feedback field is HONEST about the SDK gap. data_center_used stays None when the run pinned no
+    # DC (unpinned == RunPod picked) -- that null is correct, not a telemetry miss.
+    if not report.get("data_center_landed"):
+        report["data_center_landed"] = "unknown"
+        report["data_center_note"] = (
+            "data_center_used null == this run pinned no DC (unpinned; RunPod picked). "
+            "data_center_landed 'unknown' == the runpod SDK pod query surfaces no dataCenterId "
+            "(machine{gpuDisplayName} only), so the landed DC is not captured for affinity feedback.")
+
     report["checks"] = result.checks
     report["metrics"] = result.metrics
     report["reasons"] = result.reasons
