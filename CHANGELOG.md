@@ -5,6 +5,17 @@ pre-1.0: PATCH for fixes and backend-only tweaks, MINOR for new features). Entri
 newest-first. History before this file was introduced lives in the git tags; the recent
 releases are summarized below from that history.
 
+## [0.4.4] -- 2026-07-04
+
+**fix(bake): scrub the hf_hub tree cache so the offline SDXL keyframe load stops failing (#206)**
+
+The first live SDXL keyframe job on `:0.4.3` failed loud with huggingface_hub `IncompleteSnapshotError` for `SG161222/RealVisXL_V5.0`: the cached snapshot was reported "missing" the two root single-file checkpoints (`RealVisXL_V5.0_fp16.safetensors` / `RealVisXL_V5.0_fp32.safetensors`), which the diffusers folder-layout `from_pretrained` never loads and which the curated bake deliberately omits (the fp32 one, 13.8 GB, is over the 10 GB GHCR per-layer ceiling and cannot be baked at all). An over-strict completeness gate, NOT a partial bake; every file the pipeline actually loads is present. Confirmed against the shipped `:0.4.3` artifact (manifest `sha256:ac43e7a8...`).
+
+- **Root cause:** `huggingface_hub` (unpinned, transitive) drifted up to 1.x, which added an offline snapshot-completeness check that fires only when a repo tree listing is cached. The build-time online config bake (`bake_hf_configs.py`) writes `hub/<repo>/trees/<commit>.json` listing ALL siblings; baked into the image, it makes the render-time offline load hard-fail against the curated subset. Only the baked path breaks -- the rclone-staged R2 mirror and the local-gpu doors carry no tree cache.
+- **Fix:** `bake_hf_configs.py` scrubs every `<repo>/trees/` after the online config bake, so the offline check reverts to its documented no-op path (folder-as-is, the pre-1.x behaviour). Protects the Wan I2V config bake too.
+- **Fail-at-bake gate:** `bake_layers.py` gains `assert-no-tree-cache`, wired into the Dockerfile sentinel `RUN` -- the bake FAILS if any tree listing survives, so this class dies at build, never at the first prod job. (A "loaded-files-present" assertion would have PASSED this exact failure, since every loaded file was present.)
+- **Pin:** `huggingface_hub==1.22.0` (was transitive/unpinned) stops silent behaviour drift; in-bounds for `transformers 5.10.2` (`<2.0,>=1.5.0`) and `diffusers 0.38.0` (`>=0.34.0`).
+
 ## [0.4.3] -- 2026-07-03
 
 **feat(observability): mirror a job-done callback rejection into the run-scoped R2 channel (#90)**
