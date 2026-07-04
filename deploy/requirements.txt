@@ -11,6 +11,14 @@
 # --- render engines (SDXL keyframe + Wan 2.2 i2v) : exact, pod-validated ---
 diffusers==0.38.0
 transformers==5.10.2
+# huggingface_hub: PINNED (#206). Was unpinned (transitive via transformers/diffusers) and
+# drifted up to 1.x, which added an offline snapshot-completeness check
+# (_raise_if_incomplete_snapshot): it hard-fails when a baked tree listing names a curated-out
+# sibling, which broke the SDXL keyframe path in prod (:0.4.3). deploy/bake_hf_configs.py now
+# scrubs the tree cache so the check stays dormant; this pin stops silent behaviour drift (the
+# tested-with-pin doctrine). In-bounds for the stack: transformers 5.10.2 needs <2.0,>=1.5.0,
+# diffusers 0.38.0 needs >=0.34.0. Bump deliberately + re-validate on the pod, never by drift.
+huggingface_hub==1.22.0
 tokenizers==0.22.2
 accelerate==1.13.0
 peft==0.19.1

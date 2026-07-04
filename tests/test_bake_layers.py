@@ -104,3 +104,28 @@ def test_bin_pack_succeeds_above_floor(tmp_path):
     assert (out / "bake-bins.json").is_file()
     for i in range(4):
         assert (out / f"bin-{i:02d}").is_dir()
+
+
+# ------------------------------------------------------------------- assert-no-tree-cache (#206)
+
+def _tree_listing(hub: Path, repo: str, commit: str) -> Path:
+    """Write a fake hf_hub tree-cache listing at <hub>/<repo>/trees/<commit>.json."""
+    p = hub / repo / "trees" / f"{commit}.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text('{"format_version": 1, "files": {}}')
+    return p
+
+
+def test_assert_no_tree_cache_clean_passes(tmp_path):
+    """No trees/ anywhere -> the gate passes (the scrubbed, shippable state)."""
+    _mkfile(tmp_path / "hf-cache" / "hub" / "models--x--y" / "snapshots" / "abc" / "config.json", 512)
+    summary = bake_layers.assert_no_tree_cache(tmp_path)
+    assert summary["tree_listings"] == 0
+
+
+def test_assert_no_tree_cache_survivor_fails(tmp_path):
+    """A surviving tree listing (the #206 landmine) must fail the bake, not ship."""
+    hub = tmp_path / "hf-cache" / "hub"
+    _tree_listing(hub, "models--SG161222--RealVisXL_V5.0", "ac93e0dd")
+    with pytest.raises(SystemExit):
+        bake_layers.assert_no_tree_cache(tmp_path)
