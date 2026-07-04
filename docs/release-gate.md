@@ -30,9 +30,27 @@ intended to enforce it. ICD-grade: the contract is reproducible from this doc al
   to prod is `promote_image()` in `deploy/runpod_verify.py`, and it fires ONLY when a `runpod-verify`
   dispatch runs with `live=true promote=true` AND every verify check passes. It repins the `imageName`
   on the production endpoint's TEMPLATE (endpoint `t9wcvlxh8rc5la` -> template `pdc3fsdqbc`), reads the
-  template back to prove the repin landed, then lets the scale-to-zero endpoint provision fresh workers
-  on the new `:version` tag. There is NO manual template repin, no dashboard pin, no direct endpoint
-  PATCH -- RunPod rejects an endpoint-level `imageName` with a 400 (the image lives on the template).
+  template back to prove the repin landed, **flushes the warm worker pool** so the new image lands on
+  the running workers (see the next bullet), then **smokes a freshly-provisioned worker** to prove it
+  serves the new image before reporting success. There is NO manual template repin, no dashboard pin,
+  no direct endpoint `imageName` PATCH -- RunPod rejects an endpoint-level `imageName` with a 400 (the
+  image lives on the template).
+- **A template repin does NOT recycle an already-warm worker pool (the #209 correction).** The earlier
+  doctrine assumed "the scale-to-zero endpoint provisions fresh workers on the new `:version` tag" --
+  true ONLY when the endpoint is actually at zero. On a busy endpoint (an active warm pool from ongoing
+  traffic) the existing workers keep serving the OLD image after a repin, so a promote would silently
+  report success while prod still ran the pre-promote image (proven live on the v0.4.4 release: a stale
+  `:0.4.3` warm worker served the fixed-bug error at `delayTime` ~10.3s, not a `:0.4.4` defect). So the
+  promote now OWNS the recycle: `flush_worker_pool()` first **waits until no job is running**
+  (`workers.running == 0`) so a promote never kills an in-flight render (bounded; on timeout it refuses
+  the promote loud and reports "endpoint busy, promote not landed" WITHOUT ever draining -- `workersMax`
+  untouched), then records the endpoint's `workersMax`/`workersMin`, sets both to 0, polls
+  `GET /v2/{id}/health` until every worker state drains to 0, then **restores the recorded values in a
+  `finally` -- prod is NEVER left scaled to zero on any exit path** (a drain that never reaches zero
+  raises loud AFTER restoring; a stuck-at-zero endpoint is the one state worse than a stale pool).
+  Because the pool was drained, whatever worker runs the post-promote smoke MUST be newly
+  provisioned on the new template, so a COMPLETED `action:preview` draft-keyframe job (cold-start
+  `delayTime` expected) is the proof the new image actually serves.
 - **`runpod-verify` is NOT a branch-protection required check, deliberately.** It is a manual,
   GPU-spending, prod-promoting RELEASE gate that runs only on `workflow_dispatch`; it never posts a
   status on a PR head, so requiring its context in the `main` ruleset would phantom-block every PR
@@ -45,7 +63,7 @@ flowchart LR
     A[git tag backend-vX.Y.Z<br/>or workflow_dispatch] --> B[release.yml<br/>build + push baked image<br/>on vivijure-bake]
     B --> C[runpod-verify.yml<br/>spin GPU POD on the image]
     C --> D{verify on pod<br/>structured @event<br/>+ pod-only insight}
-    D -- PASS --> E[promote image onto<br/>PROD serverless endpoint] --> F[terminate pod]
+    D -- PASS --> E[promote: repin template<br/>flush warm pool + smoke<br/>fresh worker] --> F[terminate pod]
     D -- FAIL --> G[capture evidence<br/>DELETE pod<br/>list-confirm zero] --> H[FAIL the build<br/>surface R2 + artifact evidence<br/>NO promote]
 ```
 
@@ -61,7 +79,9 @@ Two workflows, one chain:
 2. **`.github/workflows/runpod-verify.yml` -- the staging gate (GPU pod).** Spins a GPU **pod** on
    the pushed image, runs the verify harness (`deploy/runpod_verify.py`: structured `@event`
    assertions + pod-only insight checks), then:
-   - **PASS:** promote the image onto the production serverless endpoint, then **terminate** the pod.
+   - **PASS:** promote the image onto the production serverless endpoint (repin the template, flush the
+     warm worker pool to zero + restore, smoke a fresh worker to confirm the new image serves), then
+     **terminate** the pod.
    - **FAIL:** capture evidence FIRST (the R2 `summary.json` + `events.ndjson` outlive the pod; the
      pod-log tail is pulled into a workflow artifact), then **DELETE** the pod and **list-confirm
      zero**, **fail the build, do not promote.** A stopped pod still bills disk and leaves a pad
