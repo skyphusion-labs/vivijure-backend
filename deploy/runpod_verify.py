@@ -948,6 +948,17 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
 
 PROD_ENDPOINT_ID = "t9wcvlxh8rc5la"  # the production serverless endpoint (docs/release-gate.md)
 
+# The image + endpoint config live on the RunPod REST v1 control plane; the run/status/health job API
+# lives on the v2 endpoint host. Both authenticate with the same Bearer RUNPOD_API_KEY.
+RUNPOD_REST_BASE = "https://rest.runpod.io/v1"
+RUNPOD_RUN_BASE = "https://api.runpod.ai/v2"
+# Worker states reported by GET /v2/{id}/health -> "workers". The pool is DRAINED when every one is 0.
+_WORKER_STATES = ("idle", "initializing", "ready", "running", "throttled", "unhealthy")
+# A freshly-provisioned worker that cold-pulls the baked image reports a large delayTime (queue + cold
+# start, in ms). Advisory only: the drain-to-zero is what GUARANTEES freshness; this just tags the
+# smoke's delayTime as cold-start-shaped evidence (S13: warm ~10.3s vs cold ~67.3s on this endpoint).
+COLD_DELAY_MS = 30_000
+
 
 def r2_summary_event_reader(env: dict, run_id: str, *, prefix: str = "verify"):
     """LIVE event source: a zero-arg callable that polls the run-scoped R2 ``summary.json`` the pod-side
@@ -1015,46 +1026,203 @@ def build_verify_pod_env(base_env: dict, source_env: "dict | Any", *, run_id: st
     return pod_env, r2_read_env
 
 
+def _default_promote_transport() -> "Callable[..., Any]":
+    """The live HTTP leg for the promote/flush/smoke RunPod calls (injected as a fake in tests)."""
+    import requests
+
+    def transport(url, *, method="GET", headers, payload=None):  # noqa: ANN001 -- thin HTTP leg
+        resp = requests.request(method, url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        return resp.json() if resp.content else {}
+
+    return transport
+
+
+def _auth_headers(key: str) -> dict:
+    return {"Authorization": "Bearer %s" % key, "Content-Type": "application/json"}
+
+
+def _worker_counts(health: dict) -> dict:
+    """Project a GET /v2/{id}/health body down to the integer per-state worker counts."""
+    workers = health.get("workers") or {}
+    return {s: int(workers.get(s) or 0) for s in _WORKER_STATES}
+
+
+def wait_endpoint_quiescent(endpoint_id: str, *, transport: "Callable[..., Any]", headers: dict,
+                            clock: "Callable[[], float]", poll_sleep: "Callable[[float], None] | None",
+                            timeout_s: float = 1800.0, poll_interval_s: float = 10.0) -> dict:
+    """Poll ``GET /v2/{id}/health`` until no worker is running a job (``workers.running == 0``), so a
+    promote NEVER drains an endpoint with in-flight work (#209). Every future release promote has the
+    same hazard as the live proof, so the quiesce-wait lives in the GATE, not just the proof. Bounded:
+    on timeout, raise loud WITHOUT touching ``workersMax`` -- the promote is refused, prod is untouched,
+    and the caller reports "endpoint busy, promote not landed". Returns the running-count timeline."""
+    t0 = clock()
+    timeline: list[dict] = []
+    while True:
+        health = transport("%s/%s/health" % (RUNPOD_RUN_BASE, endpoint_id), method="GET", headers=headers)
+        running = _worker_counts(health)["running"]
+        elapsed = clock() - t0
+        timeline.append({"elapsed_s": round(elapsed, 1), "running": running})
+        if running == 0:
+            return {"quiesced": True, "wait_seconds": round(elapsed, 1), "timeline": timeline}
+        if elapsed >= timeout_s:
+            raise RuntimeError("promote refused: endpoint %s still has %d running job(s) after %.0fs "
+                               "(endpoint busy, promote NOT landed, workersMax untouched)"
+                               % (endpoint_id, running, timeout_s))
+        if poll_sleep is not None:
+            poll_sleep(poll_interval_s)
+
+
+def flush_worker_pool(endpoint_id: str, *, transport: "Callable[..., Any]", headers: dict,
+                      clock: "Callable[[], float]", poll_sleep: "Callable[[float], None] | None",
+                      timeout_s: float = 900.0, poll_interval_s: float = 10.0,
+                      quiesce_timeout_s: float = 1800.0) -> dict:
+    """Recycle the endpoint's warm worker pool so a template repin actually lands on the running workers
+    (#209). A :version repin moves the TEMPLATE, but an already-warm serverless pool keeps serving the
+    OLD image until those workers happen to recycle -- so prod silently stays on the pre-promote image.
+
+    Sequence: wait until ``running == 0`` (never kill an in-flight render; bounded, raises loud on
+    timeout WITHOUT draining) -> record the endpoint's ``workersMax``/``workersMin`` -> set BOTH to 0 to
+    drain -> poll ``/health`` until every worker state reaches 0 (timeout-bounded) -> ALWAYS restore the
+    recorded values in a ``finally`` (prod is NEVER left at 0 on any exit path). Returns the quiesce +
+    drain timelines as evidence. A drain that never reaches zero raises loud (after restore); the one
+    state worse than a stale pool is a stuck-at-zero endpoint, so a restore-PATCH fault raises loudest."""
+    # 1) Never drain in-flight work: block until the endpoint is quiescent (raises loud on timeout).
+    quiesce = wait_endpoint_quiescent(endpoint_id, transport=transport, headers=headers, clock=clock,
+                                      poll_sleep=poll_sleep, timeout_s=quiesce_timeout_s,
+                                      poll_interval_s=poll_interval_s)
+    # 2) Record the live config AFTER quiesce, so the restore target is the real pre-drain state.
+    ep = transport("%s/endpoints/%s" % (RUNPOD_REST_BASE, endpoint_id), method="GET", headers=headers)
+    max_before = ep.get("workersMax")
+    if max_before is None:
+        raise RuntimeError("flush: endpoint %s has no workersMax; refusing to drain blind" % endpoint_id)
+    min_before = ep.get("workersMin")
+    restore_payload = {"workersMax": max_before, "workersMin": min_before if min_before is not None else 0}
+    t0 = clock()
+    timeline: list[dict] = []
+    drained = False
+    try:
+        transport("%s/endpoints/%s" % (RUNPOD_REST_BASE, endpoint_id), method="PATCH", headers=headers,
+                  payload={"workersMax": 0, "workersMin": 0})
+        while True:
+            health = transport("%s/%s/health" % (RUNPOD_RUN_BASE, endpoint_id), method="GET",
+                               headers=headers)
+            counts = _worker_counts(health)
+            elapsed = clock() - t0
+            timeline.append({"elapsed_s": round(elapsed, 1), "workers": counts})
+            if sum(counts.values()) == 0:
+                drained = True
+                break
+            if elapsed >= timeout_s:
+                break
+            if poll_sleep is not None:
+                poll_sleep(poll_interval_s)
+    finally:
+        # HARD REQUIREMENT (#209): restore on EVERY exit path so prod never stays scaled to zero.
+        transport("%s/endpoints/%s" % (RUNPOD_REST_BASE, endpoint_id), method="PATCH", headers=headers,
+                  payload=restore_payload)
+    if not drained:
+        raise RuntimeError("flush: worker pool on %s did not drain to zero within %.0fs (last=%r); "
+                           "workersMax restored to %r"
+                           % (endpoint_id, timeout_s, timeline[-1] if timeline else None, max_before))
+    return {"workers_max_before": max_before, "workers_min_before": restore_payload["workersMin"],
+            "drained": True, "drain_seconds": round(clock() - t0, 1), "quiesce": quiesce,
+            "timeline": timeline}
+
+
+def smoke_fresh_worker(endpoint_id: str, *, transport: "Callable[..., Any]", headers: dict,
+                       clock: "Callable[[], float]", poll_sleep: "Callable[[float], None] | None",
+                       bundle_key: str, project: str = "verify", timeout_s: float = 1800.0,
+                       poll_interval_s: float = 15.0) -> dict:
+    """Post-promote smoke: submit a cheap draft-keyframe (``action:preview``) job to the endpoint and
+    poll ``/status`` to a terminal state, PROVING a freshly-provisioned worker actually serves the
+    promoted image before the gate reports success. Because the pool was just drained to zero, whatever
+    worker runs this job MUST be newly provisioned on the new template. Returns the job id, terminal
+    status, and the cold ``delayTime`` (start latency, ms) as evidence. A FAILED / timed-out job raises
+    (the promote is not proven landed)."""
+    submit = transport("%s/%s/run" % (RUNPOD_RUN_BASE, endpoint_id), method="POST", headers=headers,
+                       payload={"input": {"action": "preview", "project": project,
+                                          "bundle_key": bundle_key, "quality_tier": "draft"}})
+    job_id = submit.get("id")
+    if not job_id:
+        raise RuntimeError("smoke: endpoint %s /run returned no job id (%r)" % (endpoint_id, submit))
+    t0 = clock()
+    while True:
+        last = transport("%s/%s/status/%s" % (RUNPOD_RUN_BASE, endpoint_id, job_id), method="GET",
+                         headers=headers)
+        status = str(last.get("status") or "").upper()
+        elapsed = clock() - t0
+        if status == "COMPLETED":
+            delay_ms = last.get("delayTime")
+            return {"job_id": job_id, "status": status, "delay_ms": delay_ms,
+                    "execution_ms": last.get("executionTime"), "smoke_seconds": round(elapsed, 1),
+                    "cold_start": bool(delay_ms) and delay_ms >= COLD_DELAY_MS}
+        if status in ("FAILED", "CANCELLED", "TIMED_OUT"):
+            raise RuntimeError("smoke: promote proof job %s on %s terminal=%s (new image does not serve): %r"
+                               % (job_id, endpoint_id, status, last.get("error") or last.get("output")))
+        if elapsed >= timeout_s:
+            raise RuntimeError("smoke: promote proof job %s on %s did not finish within %.0fs (last=%s)"
+                               % (job_id, endpoint_id, timeout_s, status))
+        if poll_sleep is not None:
+            poll_sleep(poll_interval_s)
+
+
 def promote_image(image: str, *, endpoint_id: str = PROD_ENDPOINT_ID, api_key: str | None = None,
-                  transport: "Callable[..., Any] | None" = None) -> dict:
-    """Promote a verified image onto the PRODUCTION serverless endpoint by repinning the ``imageName``
-    on the endpoint's TEMPLATE. A serverless endpoint's image lives on its template, NOT the endpoint:
-    ``PATCH /v1/endpoints/{id}`` with an ``imageName`` is rejected by RunPod REST v1 with a 400 (see the
-    banked lesson runpod-rest-v1-honors-volume-env). This is the ONLY path an image reaches prod
-    (docs/release-gate.md doctrine); the caller gates it behind an explicit ``--promote`` go, so a bare
-    verify run never touches prod. ``transport`` is injected in tests (no network). The RunPod API key is
-    read from RUNPOD_API_KEY and NEVER logged."""
+                  transport: "Callable[..., Any] | None" = None, flush: bool = True, smoke: bool = True,
+                  bundle_key: str = "bundles/Packet_Chase.tar.gz", project: str = "verify",
+                  clock: "Callable[[], float] | None" = None,
+                  poll_sleep: "Callable[[float], None] | None" = None,
+                  flush_timeout_s: float = 900.0, smoke_timeout_s: float = 1800.0,
+                  quiesce_timeout_s: float = 1800.0) -> dict:
+    """Promote a verified image onto the PRODUCTION serverless endpoint. Three legs, all inside the gate:
+
+    1. **Repin the TEMPLATE ``imageName``** + read-back verify. A serverless endpoint's image lives on
+       its template, NOT the endpoint: ``PATCH /v1/endpoints/{id}`` with an ``imageName`` 400s (banked
+       lesson runpod-rest-v1-honors-volume-env).
+    2. **Flush the warm worker pool** (``flush=True``): a repin alone does NOT recycle already-warm
+       workers, so a busy endpoint keeps serving the old image (#209). Drain ``workersMax``->0, poll
+       ``/health`` to zero, restore in a ``finally``.
+    3. **Smoke a fresh worker** (``smoke=True``): submit a draft-keyframe job and confirm a
+       freshly-provisioned worker serves the new image before reporting success.
+
+    This is the ONLY path an image reaches prod (docs/release-gate.md); the caller gates it behind an
+    explicit ``--promote`` go. ``transport``/``clock``/``poll_sleep`` are injected in tests (no network,
+    no wall-clock). The RunPod API key is read from RUNPOD_API_KEY and NEVER logged."""
     key = _clean_key(api_key or os.environ.get("RUNPOD_API_KEY"))
     if not key:
         raise RuntimeError("promote needs RUNPOD_API_KEY (never hardcode a key)")
     if transport is None:
-        import requests
-
-        def transport(url, *, method="PATCH", headers, payload=None):  # noqa: ANN001 -- thin HTTP leg
-            resp = requests.request(method, url, headers=headers, json=payload, timeout=30)
-            resp.raise_for_status()
-            return resp.json() if resp.content else {}
-
-    headers = {"Authorization": "Bearer %s" % key, "Content-Type": "application/json"}
-    base = "https://rest.runpod.io/v1"
-    # Resolve the endpoint's templateId at runtime (no hardcode), then repin the TEMPLATE's imageName.
-    # A :version-tag change forces the endpoint to re-provision workers onto the new image (:latest
-    # would cache); repinning the template is what actually moves prod.
-    endpoint = transport("%s/endpoints/%s" % (base, endpoint_id), method="GET", headers=headers)
+        transport = _default_promote_transport()
+    if clock is None:
+        import time
+        clock = time.monotonic
+    headers = _auth_headers(key)
+    # 1) Resolve the endpoint's templateId at runtime (no hardcode), repin the TEMPLATE's imageName, and
+    # read it back so a silent no-op (200 that did not take) fails the promote instead of faking success.
+    endpoint = transport("%s/endpoints/%s" % (RUNPOD_REST_BASE, endpoint_id), method="GET", headers=headers)
     template_id = endpoint.get("templateId")
     if not template_id:
         raise RuntimeError("promote: endpoint %s has no templateId; cannot repin image" % endpoint_id)
-    transport("%s/templates/%s" % (base, template_id), method="PATCH", headers=headers,
+    transport("%s/templates/%s" % (RUNPOD_REST_BASE, template_id), method="PATCH", headers=headers,
               payload={"imageName": image})
-    # Read-back: the promote self-verifies -- the template must now report the promoted image, so a
-    # silent no-op (200 that did not take) fails the promote instead of falsely reporting success.
-    after = transport("%s/templates/%s" % (base, template_id), method="GET", headers=headers)
+    after = transport("%s/templates/%s" % (RUNPOD_REST_BASE, template_id), method="GET", headers=headers)
     landed = after.get("imageName")
     if landed != image:
         raise RuntimeError("promote read-back mismatch: template %s imageName=%r, expected %r"
                            % (template_id, landed, image))
-    return {"endpoint_id": endpoint_id, "template_id": template_id, "image": image,
-            "imageName": landed, "response": after}
+    result = {"endpoint_id": endpoint_id, "template_id": template_id, "image": image,
+              "imageName": landed, "response": after}
+    # 2) The repin is on the template; recycle the running pool so the new image actually serves (#209).
+    if flush:
+        result["flush"] = flush_worker_pool(endpoint_id, transport=transport, headers=headers,
+                                            clock=clock, poll_sleep=poll_sleep, timeout_s=flush_timeout_s,
+                                            quiesce_timeout_s=quiesce_timeout_s)
+    # 3) Prove a freshly-provisioned worker serves the new image before the gate reports success.
+    if smoke:
+        result["smoke"] = smoke_fresh_worker(endpoint_id, transport=transport, headers=headers,
+                                            clock=clock, poll_sleep=poll_sleep, bundle_key=bundle_key,
+                                            project=project, timeout_s=smoke_timeout_s)
+    return result
 
 
 def _github_env_writer(name: str) -> "Callable[[str], None]":
@@ -1141,6 +1309,12 @@ def main(argv: list[str] | None = None) -> int:
                          "default: a proof run validates up|verify|down without ever touching prod")
     ap.add_argument("--promote-endpoint", default=PROD_ENDPOINT_ID,
                     help="the production serverless endpoint id to promote onto")
+    ap.add_argument("--skip-flush", action="store_true",
+                    help="promote WITHOUT recycling the warm worker pool (#209 drain). Only safe when "
+                         "the endpoint is already scaled to zero; a warm pool keeps serving the old image")
+    ap.add_argument("--skip-smoke", action="store_true",
+                    help="skip the post-promote fresh-worker smoke (submit a draft-keyframe job and "
+                         "confirm the new image serves). Off by default so a promote proves it landed")
     ap.add_argument("--reap-pod", default=None,
                     help="teardown backstop: STOP then DELETE this pod id and list-confirm it is gone, "
                          "then exit. The workflow always-run step calls it so a killed/cancelled run "
@@ -1236,7 +1410,11 @@ def main(argv: list[str] | None = None) -> int:
     if report.get("passed") and report.get("signal") == "promote":
         if args.promote:
             try:
-                report["promote"] = promote_image(cfg.image, endpoint_id=args.promote_endpoint)
+                report["promote"] = promote_image(
+                    cfg.image, endpoint_id=args.promote_endpoint,
+                    flush=not args.skip_flush, smoke=not args.skip_smoke,
+                    bundle_key=args.bundle_key, project=args.project,
+                    clock=time.monotonic, poll_sleep=time.sleep)
                 report["promoted"] = True
             except Exception as e:  # noqa: BLE001 -- a promote fault is loud; teardown already ran
                 report["promoted"] = False

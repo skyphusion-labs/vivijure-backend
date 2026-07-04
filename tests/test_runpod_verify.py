@@ -482,7 +482,7 @@ def test_promote_image_repins_the_endpoints_template_not_the_endpoint():
         raise AssertionError("unexpected promote call: %s %s" % (method, url))
 
     out = rv.promote_image("ghcr.io/x:2", endpoint_id="t9wcvlxh8rc5la", api_key="k-1",
-                           transport=transport)
+                           transport=transport, flush=False, smoke=False)
     # resolved the endpoint's template, then PATCHed the TEMPLATE image -- never the endpoint (that 400s)
     assert ("GET", "https://rest.runpod.io/v1/endpoints/t9wcvlxh8rc5la", None) in calls
     patch = [c for c in calls if c[0] == "PATCH"][0]
@@ -910,3 +910,187 @@ def test_run_verify_affinity_all_pinned_miss_lands_unpinned():
     # pod-1 (pinned miss) reaped during acquisition, pod-2 (kept unpinned) deleted at normal teardown.
     assert client.deleted == ["pod-1", "pod-2"]
     assert report["data_center_used"] is None
+
+
+# ============================================================= #209 warm-pool flush + restore + smoke
+
+
+def _mk_clock(step=1.0):
+    """Deterministic monotonic clock: returns 0, step, 2*step, ... one tick per call (no wall time)."""
+    state = {"t": -step}
+
+    def clk():
+        state["t"] += step
+        return state["t"]
+
+    return clk
+
+
+class _PromoteFake:
+    """Fake RunPod transport for the promote path: models the REST v1 endpoint/template control plane
+    and the v2 run/status/health job API. `health_seq` and `status_seq` are consumed one per poll (the
+    last item repeats). Records every (method, url, payload) so a test can assert the drain/restore."""
+
+    def __init__(self, image, *, workers_max=14, workers_min=0, template_id="tpl-1",
+                 endpoint_id="t9wcvlxh8rc5la", health_seq=None, status_seq=None, run_id="job-smoke-1"):
+        self.image = image
+        self.workers_max = workers_max
+        self.workers_min = workers_min
+        self.template_id = template_id
+        self.endpoint_id = endpoint_id
+        self.run_id = run_id
+        self._health = list(health_seq or [{"idle": 0, "ready": 0, "running": 0, "initializing": 0,
+                                            "throttled": 0, "unhealthy": 0}])
+        self._status = list(status_seq or [{"status": "COMPLETED", "delayTime": 67300,
+                                            "executionTime": 41000}])
+        self.calls = []
+        self.endpoint_patches = []  # payloads sent to PATCH /endpoints/{id}, in order
+
+    def _next(self, seq):
+        return seq.pop(0) if len(seq) > 1 else seq[0]
+
+    def __call__(self, url, *, method="GET", headers=None, payload=None):
+        self.calls.append((method, url, payload))
+        if method == "GET" and url.endswith("/endpoints/%s" % self.endpoint_id):
+            return {"id": self.endpoint_id, "templateId": self.template_id,
+                    "workersMax": self.workers_max, "workersMin": self.workers_min}
+        if method == "PATCH" and url.endswith("/endpoints/%s" % self.endpoint_id):
+            self.endpoint_patches.append(payload)
+            return {}
+        if method == "PATCH" and "/templates/" in url:
+            return {}
+        if method == "GET" and "/templates/" in url:
+            return {"imageName": self.image}
+        if method == "GET" and url.endswith("/%s/health" % self.endpoint_id):
+            return {"workers": self._next(self._health)}
+        if method == "POST" and url.endswith("/%s/run" % self.endpoint_id):
+            return {"id": self.run_id}
+        if method == "GET" and "/status/" in url:
+            return self._next(self._status)
+        raise AssertionError("unexpected promote call: %s %s" % (method, url))
+
+
+def test_promote_image_drains_restores_and_smokes_the_warm_pool():
+    # Warm pool: first health poll still busy (idle 4), second fully drained -> then a COMPLETED smoke.
+    fake = _PromoteFake(
+        "ghcr.io/x:2", workers_max=14, workers_min=0,
+        health_seq=[{"idle": 13, "ready": 13, "running": 2, "initializing": 0, "throttled": 0,
+                     "unhealthy": 0},   # quiesce poll 1: a job is still running -> wait
+                    {"idle": 13, "ready": 13, "running": 0, "initializing": 0, "throttled": 0,
+                     "unhealthy": 0},   # quiesce poll 2: running == 0 -> proceed
+                    {"idle": 4, "ready": 2, "running": 0, "initializing": 3, "throttled": 1,
+                     "unhealthy": 0},   # drain poll 1: workers still present
+                    {"idle": 0, "ready": 0, "running": 0, "initializing": 0, "throttled": 0,
+                     "unhealthy": 0}],  # drain poll 2: fully drained
+        status_seq=[{"status": "IN_PROGRESS"}, {"status": "COMPLETED", "delayTime": 67300,
+                                                "executionTime": 41000}])
+    out = rv.promote_image("ghcr.io/x:2", api_key="k-1", transport=fake, clock=_mk_clock(),
+                           poll_sleep=lambda _s: None)
+    # waited for the in-flight job to finish (running->0) BEFORE any drain PATCH
+    assert out["flush"]["quiesce"]["quiesced"] is True
+    assert len(out["flush"]["quiesce"]["timeline"]) == 2
+    # drained to zero, then workersMax restored to the recorded 14 (both endpoint PATCHes, in order)
+    assert fake.endpoint_patches[0] == {"workersMax": 0, "workersMin": 0}
+    assert fake.endpoint_patches[-1] == {"workersMax": 14, "workersMin": 0}
+    assert out["flush"]["drained"] is True
+    assert out["flush"]["workers_max_before"] == 14
+    assert len(out["flush"]["timeline"]) == 2  # one busy sample, one drained sample
+    # the smoke submitted a cheap draft-keyframe preview job and confirmed a COMPLETED fresh worker
+    run_calls = [c for c in fake.calls if c[0] == "POST" and c[1].endswith("/run")]
+    assert run_calls and run_calls[0][2]["input"]["action"] == "preview"
+    assert run_calls[0][2]["input"]["quality_tier"] == "draft"
+    assert out["smoke"]["status"] == "COMPLETED"
+    assert out["smoke"]["delay_ms"] == 67300 and out["smoke"]["cold_start"] is True
+
+
+def test_flush_worker_pool_restores_workers_max_on_drain_timeout():
+    # Pool never drains: the flush must RAISE, but only AFTER restoring workersMax (never leave prod at 0).
+    fake = _PromoteFake("img", workers_max=14,
+                        health_seq=[{"idle": 6, "ready": 6, "running": 0, "initializing": 0,
+                                     "throttled": 0, "unhealthy": 0}])
+    with pytest.raises(RuntimeError, match="did not drain"):
+        rv.flush_worker_pool("t9wcvlxh8rc5la", transport=fake,
+                             headers={"Authorization": "Bearer k"}, clock=_mk_clock(step=1000.0),
+                             poll_sleep=lambda _s: None, timeout_s=5.0)
+    # restore ran in the finally: the LAST endpoint PATCH put workersMax back to 14, not left at 0
+    assert fake.endpoint_patches[0] == {"workersMax": 0, "workersMin": 0}
+    assert fake.endpoint_patches[-1] == {"workersMax": 14, "workersMin": 0}
+
+
+def test_flush_worker_pool_restores_even_when_a_poll_raises():
+    # A transport fault mid-drain must still restore workersMax (the finally), then propagate.
+    calls = {"n": 0}
+
+    def transport(url, *, method="GET", headers=None, payload=None):
+        if method == "GET" and url.endswith("/endpoints/t9wcvlxh8rc5la"):
+            return {"templateId": "t", "workersMax": 14, "workersMin": 0}
+        if method == "PATCH" and url.endswith("/endpoints/t9wcvlxh8rc5la"):
+            transport.patches.append(payload)
+            return {}
+        if url.endswith("/health"):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"workers": {"running": 0, "idle": 1, "ready": 1}}  # quiesce passes
+            raise RuntimeError("health endpoint 503")  # a later DRAIN poll faults
+        raise AssertionError("unexpected: %s %s" % (method, url))
+
+    transport.patches = []
+    with pytest.raises(RuntimeError, match="503"):
+        rv.flush_worker_pool("t9wcvlxh8rc5la", transport=transport,
+                             headers={"Authorization": "Bearer k"}, clock=_mk_clock(),
+                             poll_sleep=None, timeout_s=100.0)
+    assert transport.patches[0] == {"workersMax": 0, "workersMin": 0}
+    assert transport.patches[-1] == {"workersMax": 14, "workersMin": 0}  # restored despite the fault
+
+
+def test_flush_worker_pool_refuses_to_drain_without_a_recorded_workers_max():
+    # Never drain blind: if the endpoint GET has no workersMax, refuse (no PATCH to 0 at all).
+    def transport(url, *, method="GET", headers=None, payload=None):
+        if url.endswith("/health"):
+            return {"workers": {"running": 0}}  # quiesced, so the blind-drain guard is what fires
+        if method == "GET" and url.endswith("/endpoints/e"):
+            return {"templateId": "t"}  # no workersMax
+        raise AssertionError("must not PATCH before knowing workersMax: %s %s" % (method, url))
+
+    with pytest.raises(RuntimeError, match="no workersMax"):
+        rv.flush_worker_pool("e", transport=transport, headers={}, clock=_mk_clock(), poll_sleep=None)
+
+
+def test_flush_worker_pool_refuses_a_busy_endpoint_without_draining():
+    # running != 0 (an in-flight render): the promote is refused loud and workersMax is NEVER touched.
+    fake = _PromoteFake("img", workers_max=14,
+                        health_seq=[{"idle": 10, "ready": 11, "running": 1, "initializing": 0,
+                                     "throttled": 0, "unhealthy": 0}])
+    with pytest.raises(RuntimeError, match="promote NOT landed"):
+        rv.flush_worker_pool("t9wcvlxh8rc5la", transport=fake, headers={},
+                             clock=_mk_clock(step=1000.0), poll_sleep=lambda _s: None,
+                             quiesce_timeout_s=5.0)
+    assert fake.endpoint_patches == []  # never drained a busy endpoint -- no workersMax flip at all
+
+
+def test_wait_endpoint_quiescent_returns_when_running_reaches_zero():
+    fake = _PromoteFake("img",
+                        health_seq=[{"idle": 5, "ready": 6, "running": 3, "initializing": 0,
+                                     "throttled": 0, "unhealthy": 0},
+                                    {"idle": 8, "ready": 8, "running": 0, "initializing": 0,
+                                     "throttled": 0, "unhealthy": 0}])
+    out = rv.wait_endpoint_quiescent("t9wcvlxh8rc5la", transport=fake, headers={},
+                                     clock=_mk_clock(), poll_sleep=lambda _s: None, timeout_s=100.0)
+    assert out["quiesced"] is True and len(out["timeline"]) == 2
+
+
+def test_smoke_fresh_worker_raises_when_the_proof_job_fails():
+    fake = _PromoteFake("img", status_seq=[{"status": "FAILED", "error": "IncompleteSnapshotError"}])
+    with pytest.raises(RuntimeError, match="does not serve"):
+        rv.smoke_fresh_worker("t9wcvlxh8rc5la", transport=fake,
+                              headers={"Authorization": "Bearer k"}, clock=_mk_clock(),
+                              poll_sleep=None, bundle_key="bundles/x.tar.gz")
+
+
+def test_promote_image_skips_flush_and_smoke_when_disabled():
+    # flush=False + smoke=False: ONLY the repin legs fire; the endpoint is never PATCHed, /run never hit.
+    fake = _PromoteFake("ghcr.io/x:2")
+    out = rv.promote_image("ghcr.io/x:2", api_key="k-1", transport=fake, flush=False, smoke=False)
+    assert out["imageName"] == "ghcr.io/x:2" and "flush" not in out and "smoke" not in out
+    assert fake.endpoint_patches == []
+    assert not any(c[0] == "POST" for c in fake.calls)
