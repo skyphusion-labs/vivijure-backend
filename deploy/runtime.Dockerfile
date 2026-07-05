@@ -29,7 +29,7 @@
 # (design law #2). Two precisions from one Dockerfile via `FROM seed-${VJ_BAKE_PRECISION}` selection;
 # BuildKit pulls only the selected stage. Repin BOTH tag and @sha256 (matching precision) after a
 # seed rebuild. bf16 = self-contained public/prod; fp8 = partial-prod.
-ARG SEED_REF_BF16=ghcr.io/skyphusion-labs/vivijure-backend-seed:1-bf16@sha256:0000000000000000000000000000000000000000000000000000000000000000
+ARG SEED_REF_BF16=ghcr.io/skyphusion-labs/vivijure-backend-seed:1-bf16@sha256:6c96ac5163d679786946a7f034ab446314dbde0c9f1a7c4b0f65403425aae971
 ARG SEED_REF_FP8=ghcr.io/skyphusion-labs/vivijure-backend-seed:1-fp8@sha256:0000000000000000000000000000000000000000000000000000000000000000
 ARG VJ_BAKE_PRECISION=bf16
 FROM ${SEED_REF_BF16} AS seed-bf16
