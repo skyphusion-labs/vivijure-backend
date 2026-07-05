@@ -26,9 +26,16 @@ Why: the weights + full runtime live in `vivijure-backend-runtime`, pinned by di
 (`vivijure-backend-seed`) is the only image that stages from R2, and only on a weight change. This
 makes a src-only release an assemble-and-push, stages R2 once per weight version, and keeps a
 toolchain/CUDA bump a deliberate, revalidated base build (repin, not a tag silently rebuilding
-everything). Full architecture: `docs/weights-base-and-snapshots.md`. The base builds are
+everything). Full architecture: `docs/weights-base-and-snapshots.md`. NOTE (#537 dedup fix): the runtime is a `runtime-*` TAG in the `vivijure-backend` package (not a separate package), so a release `FROM` it dedups same-repo; pinned runtime tags must be retained (untagged digests are GC-bait). The base builds are
 `workflow_dispatch` only on `vivijure-bake` (never fork-reachable). Promotion to prod is still the
 separate pod-staging verify gate (`docs/release-gate.md`) -- unchanged.
+
+**Re-bake cadence (CVE freshness):** the RUNTIME base is rebuilt monthly (a `runtime-build.yml` cron
+floor) plus on demand, because every release inherits its layers so runtime age = shipped CVE posture.
+The scheduled re-bake reads the currently shipped pin, rebuilds at the same tag with fresh layers, and
+auto-opens a `RUNTIME_REF` repin PR (a human merges). The runner snapshot is event-coupled to each
+re-bake (+ a monthly backstop). The SEED is exempt (content-addressed weight data, not software). Full
+policy: `docs/weights-base-and-snapshots.md`.
 
 | git tag | GHCR image | source commit | built | notes |
 |---|---|---|---|---|

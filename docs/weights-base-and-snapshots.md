@@ -109,3 +109,38 @@ consuming runner) is tracked in fleet-chezmoi #377.
 - Dedup: a 2nd consecutive src-only release build shows "layer already exists" on the inherited
   runtime + weight blobs.
 - Timed: a release bake on the snapshot runner vs the pre-split R2-stage bake.
+
+## Re-bake cadence (CVE freshness)
+
+Baked images rot: CVEs and stale toolchains freeze in at bake time. Post-Shape-Y this matters most for
+the RUNTIME base, because every released image inherits its layers, so **runtime age = shipped CVE
+posture**. The cadence policy (wired as `cron` triggers alongside `workflow_dispatch` on the existing
+dispatch workflows, no new machinery):
+
+| Artifact | Cadence | Mechanism |
+|---|---|---|
+| **RUNTIME base** | monthly floor + on-demand | `runtime-build.yml` cron (`0 6 1 * *`) reads the currently shipped `RUNTIME_REF_BF16` tag from `deploy/Dockerfile` and rebuilds at the SAME tag (fresh base/apt/pip-patch layers, new digest -- NO R2, weights come from the seed). It then auto-opens a `RUNTIME_REF` digest-bump PR (`auto/runtime-repin-<prec>`, force-updated, human merges through the gate) and re-triggers the snapshot. Deliberate toolchain bumps use the `workflow_dispatch` inputs (bump `-t<N>`). |
+| **RUNNER snapshot** | event-coupled + monthly backstop | `runtime-build.yml` dispatches `runner-snapshot.yml` on every successful re-bake (its whole job is pre-pulling the runtime). `runner-snapshot.yml` also has a monthly cron (`0 7 1 * *`) that reads the exact shipped pin as a safety net. Snapshot age as a health signal is infra's half (fleet-chezmoi #370). |
+| **SEED** | EXEMPT | The seed is content-addressed weight DATA, not software -- no CVE surface, rebuilt ONLY on a weight-set change. Do NOT add a periodic 87 GB restage. |
+
+Drift guard: the scheduled paths READ the current pin rather than carrying a frozen input, so a cron can
+never refresh a config nobody ships (that would LOOK like hygiene while doing nothing). The auto-repin
+PR degrades gracefully: if the org "Actions can create/approve PRs" setting is ever off, the branch is
+still pushed and the run logs a warning -- never a hard fail.
+
+## Same-package runtime topology + digest retention (#537, dedup fix)
+
+The runtime base is published as a TAG in the CONSUMER's package -- `ghcr.io/skyphusion-labs/vivijure-backend:runtime-<modelver>-<precision>-t<toolchainver>` -- NOT a separate `vivijure-backend-runtime` package. Reason (proven by acceptance): GHCR FROM-inheritance dedup only works SAME-repo; a cross-package `FROM` re-uploads the runtime's ~87 GB of weight layers on every release push (buildx + GITHUB_TOKEN do not auto cross-repo layer-mount, even for public packages -- measured: 0 "Mounted from", 41 re-uploaded). With the runtime as a `runtime-*` tag in `vivijure-backend`, a release `FROM ghcr.io/.../vivijure-backend:runtime-...` is same-repo, so the runtime layers dedup as "Layer already exists" and only the app layer uploads. The runtime tag uploads the weights ONCE; every release after is app-only. The SEED stays its own package (`vivijure-backend-seed`) -- it is `COPY --from`'d (fresh layers), never inherited, so no mount is needed.
+
+**Digest retention (GC safety):** a pinned runtime digest MUST stay TAGGED in the package -- an untagged digest is garbage-collection bait, and GC-ing a runtime whose layers a released image depends on would break re-pulls. So: keep every `runtime-*` tag that any `deploy/Dockerfile` RUNTIME_REF still pins; the cadence auto-repin flow overwrites the SAME immutable content at the SAME tag (same-tag-new-digest for a CVE refresh) and must never delete a previous runtime tag until no release Dockerfile pins it.
+
+### The pull half (consuming the warm store)
+
+The upload win (same-package) is only half. The runner snapshot warms the DOCKER DAEMON image store,
+but `release.yml` built with the default buildx **docker-container** driver (whose cache is separate
+from the daemon store) AND `pull: true` (which re-pulls the FROM base every run) -- either alone
+defeats the warm cache. So `release.yml` uses the **docker driver** (its cache IS the daemon store)
+and drops `pull: true` (the FROM runtime is digest-pinned/immutable, so pull-if-absent is exactly as
+correct as pull-always and free when warm). Acceptance for a warmed build: the push log shows ZERO
+runtime-layer uploads (upload half, same-package) AND no re-pull of the FROM base (pull half, docker
+driver + local store hit).

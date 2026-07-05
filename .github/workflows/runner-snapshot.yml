@@ -31,10 +31,16 @@ on:
       runtime_refs:
         description: 'Space-separated RUNTIME base refs to pre-pull (tag or tag@digest). bf16 is prod.'
         required: true
-        default: 'ghcr.io/skyphusion-labs/vivijure-backend-runtime:1-bf16-t1'
+        default: 'ghcr.io/skyphusion-labs/vivijure-backend:runtime-1-bf16-t1'
+  # Monthly BACKSTOP (#537 cadence): the snapshot is normally refreshed by runtime-build.yml's
+  # event-couple whenever a new runtime digest lands. This cron is the safety net (snapshot age is a
+  # health signal -- infra's half, fleet-chezmoi #370). On a scheduled run it reads the exact shipped
+  # runtime pin from deploy/Dockerfile (no drift).
+  schedule:
+    - cron: '0 7 1 * *'   # 07:00 UTC, 1st of each month (1h after the runtime re-bake floor)
 
 permissions:
-  contents: read
+  contents: read   # checkout for the scheduled pin read
   packages: read   # docker pull the runtime base from GHCR
 
 concurrency:
@@ -65,18 +71,37 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # A scheduled backstop run has no inputs, so read the exact shipped runtime pin (tag@digest) from
+      # deploy/Dockerfile -- the snapshot always pre-pulls whatever is actually released, never a drifted
+      # constant. A dispatch passes runtime_refs directly and skips this.
+      - name: Checkout (scheduled pin read)
+        if: github.event_name == 'schedule'
+        uses: actions/checkout@v4
+
+      - name: Resolve refs to pre-pull
+        id: refs
+        run: |
+          set -eu
+          REFS="${{ github.event.inputs.runtime_refs }}"
+          if [ -z "${REFS}" ]; then
+            REFS="$(grep '^ARG RUNTIME_REF_BF16=' deploy/Dockerfile | sed 's/^ARG RUNTIME_REF_BF16=//')"
+            [ -n "${REFS}" ] || { echo "::error::no runtime_refs input and no RUNTIME_REF_BF16 pin found"; exit 1; }
+            echo "Scheduled backstop: pre-pulling the shipped pin ${REFS}"
+          fi
+          echo "refs=${REFS}" >> "$GITHUB_OUTPUT"
+
       # THE POINT: pull the pinned runtime base(s) so the ~100 GB image (toolchain + weights) lives in
       # the runner's docker image store BEFORE the snapshot. A backend bake on the resulting runner
       # then reads the base cache-warm (a fast local COPY --from) instead of pulling it.
       - name: Pre-pull runtime base image(s) into the docker cache
         run: |
           set -eu
-          for ref in ${{ github.event.inputs.runtime_refs }}; do
+          for ref in ${{ steps.refs.outputs.refs }}; do
             echo "::group::docker pull ${ref}"
             docker pull "${ref}"
             echo "::endgroup::"
           done
-          echo "Pre-pulled: ${{ github.event.inputs.runtime_refs }}"
+          echo "Pre-pulled: ${{ steps.refs.outputs.refs }}"
 
       # HF CLI into the snapshot (toolchain the seed-curation / staging paths use). pipx keeps it
       # isolated; the binary + venv persist on the runner filesystem the snapshot captures.
