@@ -18,8 +18,8 @@ name: Build runner snapshot image (#537)
 #
 # HOW THE `snapshot:` MECHANISM WORKS (GitHub custom images for larger runners):
 #   1. An org/enterprise admin creates an IMAGE-GENERATION runner (UI-only; enterprise group
-#      "Enterprise Image Generation Runners" is already provisioned) and gives it a NAME. This job's
-#      `runs-on` must be that runner's name (see VJ_IMAGE_GEN_RUNNER below -- INFRA provides it).
+#      "Enterprise Image Generation Runners" group, provisioned by Conrad). This job's `runs-on` is
+#      that runner's label: ubuntu-latest-32c-128gb-1200-gen.
 #   2. This job installs the tools, and the job-level `snapshot:` key captures the runner state into a
 #      versioned image named `vivijure-bake-snapshot` on SUCCESS (a failed job creates no image).
 #   3. INFRA then creates a normal larger runner FROM that image, labels it, and release.yml's
@@ -43,10 +43,11 @@ concurrency:
 
 jobs:
   snapshot:
-    # PLACEHOLDER -- infra provides the image-generation runner NAME (from the enterprise
-    # "Image Generation Runners" group). Until then this workflow is landed + validated but a dispatch
-    # will not schedule. The name is tracked in the fleet-chezmoi handoff issue (see vivijure#537).
-    runs-on: vivijure-image-gen
+    # The image-generation runner Conrad built (enterprise "Image Generation Runners" group,
+    # GitHub-owned Ubuntu 24.04, image-gen ENABLED, 32c/128GB/1200GB). Its label IS the runner name.
+    # Reachability + the enterprise tag/workflow allowlist are verified in the fleet-chezmoi handoff
+    # issue (see vivijure#537); this workflow's ref must match an allowlist entry to schedule.
+    runs-on: ubuntu-latest-32c-128gb-1200-gen
     # The job-level snapshot key: on SUCCESS, GitHub captures this runner into the named image
     # (auto-versioned: 1.0.0, then 1.1.0, ...). release.yml consumes a runner built from it.
     snapshot: vivijure-bake-snapshot
