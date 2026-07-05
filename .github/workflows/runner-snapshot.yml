@@ -7,7 +7,7 @@ name: Build runner snapshot image (#537)
 # 2026-03 for larger runners). A backend release then runs on a larger runner built from THIS image
 # and skips the ~87 GB base pull.
 #
-# ACCELERATOR ONLY (design law #3): the consuming backend Dockerfile pins the weights base by DIGEST
+# ACCELERATOR ONLY (design law #3): the consuming backend Dockerfile pins the RUNTIME base by DIGEST
 # and verifies its sha256 manifest. If this snapshot's cached base is older than the pinned digest,
 # docker pulls the newer one (SLOW); if a cached layer were ever wrong, `sha256sum -c` fails the build
 # LOUD. A stale snapshot can only ever make a build SLOWER, never change WHAT it builds. Rebuild the
@@ -28,14 +28,14 @@ name: Build runner snapshot image (#537)
 on:
   workflow_dispatch:
     inputs:
-      weights_refs:
-        description: 'Space-separated weights base refs to pre-pull (tag or tag@digest). bf16 is prod.'
+      runtime_refs:
+        description: 'Space-separated RUNTIME base refs to pre-pull (tag or tag@digest). bf16 is prod.'
         required: true
-        default: 'ghcr.io/skyphusion-labs/vivijure-weights-backend:1-bf16'
+        default: 'ghcr.io/skyphusion-labs/vivijure-backend-runtime:1-bf16-t1'
 
 permissions:
   contents: read
-  packages: read   # docker pull the weights base from GHCR
+  packages: read   # docker pull the runtime base from GHCR
 
 concurrency:
   group: runner-snapshot
@@ -53,7 +53,7 @@ jobs:
     snapshot: vivijure-bake-snapshot
     timeout-minutes: 240
     steps:
-      # GHCR auth to pull the weights base (public today, but least-privilege + private-safe).
+      # GHCR auth to pull the runtime base (public today, but least-privilege + private-safe).
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -65,18 +65,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # THE POINT: pull the pinned weights base(s) so the ~87 GB (bf16) / ~90 GB (fp8) image lives in
+      # THE POINT: pull the pinned runtime base(s) so the ~100 GB image (toolchain + weights) lives in
       # the runner's docker image store BEFORE the snapshot. A backend bake on the resulting runner
       # then reads the base cache-warm (a fast local COPY --from) instead of pulling it.
-      - name: Pre-pull weights base image(s) into the docker cache
+      - name: Pre-pull runtime base image(s) into the docker cache
         run: |
           set -eu
-          for ref in ${{ github.event.inputs.weights_refs }}; do
+          for ref in ${{ github.event.inputs.runtime_refs }}; do
             echo "::group::docker pull ${ref}"
             docker pull "${ref}"
             echo "::endgroup::"
           done
-          echo "Pre-pulled: ${{ github.event.inputs.weights_refs }}"
+          echo "Pre-pulled: ${{ github.event.inputs.runtime_refs }}"
 
       # HF CLI into the snapshot (toolchain the seed-curation / staging paths use). pipx keeps it
       # isolated; the binary + venv persist on the runner filesystem the snapshot captures.
@@ -92,7 +92,7 @@ jobs:
       - name: Report cached state (what the snapshot will carry)
         run: |
           set -eu
-          echo "== docker images (weights base should be present) =="
+          echo "== docker images (runtime base should be present) =="
           docker images --format '{{.Repository}}:{{.Tag}}  {{.Size}}' | sed -n '1,20p'
           echo "== buildx =="
           docker buildx version || true
