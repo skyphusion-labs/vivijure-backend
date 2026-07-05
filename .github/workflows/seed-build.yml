@@ -1,10 +1,10 @@
-name: Build weights base image to GHCR (#537)
+name: Build seed image to GHCR (#537)
 
-# Build + push the WEIGHTS BASE image -- the versioned, source-of-truth carrier for the curated model
+# Build + push the SEED image -- the versioned, source-of-truth carrier for the curated model
 # seed. This is the EXPENSIVE, RARE half of the bake, split out of release.yml so a backend-v* release
 # no longer re-stages ~87 GB from R2 every tag:
 #
-#   ghcr.io/skyphusion-labs/vivijure-weights-backend:<model_version>-<precision>   (+ an immutable
+#   ghcr.io/skyphusion-labs/vivijure-backend-seed:<model_version>-<precision>   (+ an immutable
 #                                                                                    -<run> tag)
 #
 # This runs ONLY on workflow_dispatch (a weights bump is a deliberate, one-button act, not a per-commit
@@ -38,13 +38,13 @@ permissions:
   packages: write
 
 concurrency:
-  group: weights-base-${{ github.event.inputs.precision }}
+  group: seed-build-${{ github.event.inputs.precision }}
   cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
   OWNER: skyphusion-labs
-  WEIGHTS_IMAGE: vivijure-weights-backend
+  SEED_IMAGE: vivijure-backend-seed
   R2_BUCKET: vivijure
 
 jobs:
@@ -69,7 +69,7 @@ jobs:
           echo "tag=${TAG}"                       >> "$GITHUB_OUTPUT"
           echo "immutable_tag=${TAG}-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
           echo "seed_prefix=bake-seed-${PREC}/"   >> "$GITHUB_OUTPUT"
-          echo "Building ${WEIGHTS_IMAGE}:${TAG} (precision=${PREC}, seed=bake-seed-${PREC}/)."
+          echo "Building ${SEED_IMAGE}:${TAG} (precision=${PREC}, seed=bake-seed-${PREC}/)."
 
       - name: Install rclone
         run: curl -fsSL https://rclone.org/install.sh | sudo bash
@@ -115,7 +115,7 @@ jobs:
           COUNT="$(find ./_seed -type f ! -name '*.rclonelink' | wc -l)"
           if [ "${COUNT}" -eq 0 ]; then
             echo "::error::staged bake seed is EMPTY (r2:${R2_BUCKET}/${PREFIX} has no files). Refusing"
-            echo "::error::to build a hollow weights base (#4). Populate the R2 seed prefix and re-run."
+            echo "::error::to build a hollow seed (#4). Populate the R2 seed prefix and re-run."
             exit 1
           fi
           echo "staged ${COUNT} seed file(s)."
@@ -158,7 +158,7 @@ jobs:
 
       # Build context is the repo ROOT (COPY deploy/seed-bins/... resolves). Load into the local daemon
       # (not pushed yet) so the per-layer gate runs before publish.
-      - name: Build weights base image
+      - name: Build seed image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -171,45 +171,47 @@ jobs:
             VJ_BAKE_PRECISION=${{ steps.cfg.outputs.precision }}
             VJ_MODEL_VERSION=${{ steps.cfg.outputs.model_version }}
           tags: |
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WEIGHTS_IMAGE }}:${{ steps.cfg.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WEIGHTS_IMAGE }}:${{ steps.cfg.outputs.immutable_tag }}
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.SEED_IMAGE }}:${{ steps.cfg.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.SEED_IMAGE }}:${{ steps.cfg.outputs.immutable_tag }}
 
       # Authoritative per-layer gate: assert no image layer is >=10GB so GHCR will accept the push.
       - name: Verify image layers under the 10GB GHCR ceiling
         run: |
           set -eu
-          IMG="${REGISTRY}/${OWNER}/${WEIGHTS_IMAGE}:${{ steps.cfg.outputs.tag }}"
+          IMG="${REGISTRY}/${OWNER}/${SEED_IMAGE}:${{ steps.cfg.outputs.tag }}"
           python deploy/bake_layers.py verify-image --image "${IMG}" --ceiling-gb 10.0
 
       - name: Push tags to GHCR
         id: push
         run: |
           set -eu
-          IMG="${REGISTRY}/${OWNER}/${WEIGHTS_IMAGE}"
+          IMG="${REGISTRY}/${OWNER}/${SEED_IMAGE}"
           docker push "${IMG}:${{ steps.cfg.outputs.tag }}"
           docker push "${IMG}:${{ steps.cfg.outputs.immutable_tag }}"
           # The registry digest -- what the consuming Dockerfile pins after the tag (design law #2).
           DIGEST="$(docker inspect --format '{{ index .RepoDigests 0 }}' "${IMG}:${{ steps.cfg.outputs.tag }}" | sed 's/.*@//')"
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
-          echo "Pushed ${WEIGHTS_IMAGE}:${{ steps.cfg.outputs.tag }} (+ :${{ steps.cfg.outputs.immutable_tag }}) -- ${DIGEST}"
+          echo "Pushed ${SEED_IMAGE}:${{ steps.cfg.outputs.tag }} (+ :${{ steps.cfg.outputs.immutable_tag }}) -- ${DIGEST}"
 
-      - name: Summary (pin these in deploy/Dockerfile)
+      - name: Summary (pin the seed in deploy/runtime.Dockerfile)
         run: |
-          IMG="${REGISTRY}/${OWNER}/${WEIGHTS_IMAGE}"
+          IMG="${REGISTRY}/${OWNER}/${SEED_IMAGE}"
+          PREC='${{ steps.cfg.outputs.precision }}'
+          ARGNAME="SEED_REF_$(echo "$PREC" | tr '[:lower:]' '[:upper:]')"
           {
-            echo "## Weights base published"
+            echo "## Seed image published"
             echo ""
             echo "| field | value |"
             echo "|---|---|"
             echo "| tag | \`${IMG}:${{ steps.cfg.outputs.tag }}\` |"
             echo "| immutable tag | \`${IMG}:${{ steps.cfg.outputs.immutable_tag }}\` |"
             echo "| digest | \`${{ steps.push.outputs.digest }}\` |"
-            echo "| precision | ${{ steps.cfg.outputs.precision }} |"
+            echo "| precision | ${PREC} |"
             echo "| model_version | ${{ steps.cfg.outputs.model_version }} |"
             echo ""
-            echo "Pin in \`deploy/Dockerfile\`:"
+            echo "Repin in \`deploy/runtime.Dockerfile\` (matching precision), then rebuild the runtime image:"
             echo ""
             echo '```dockerfile'
-            echo "ARG WEIGHTS_REF=${IMG}:${{ steps.cfg.outputs.tag }}@${{ steps.push.outputs.digest }}"
+            echo "ARG ${ARGNAME}=${IMG}:${{ steps.cfg.outputs.tag }}@${{ steps.push.outputs.digest }}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

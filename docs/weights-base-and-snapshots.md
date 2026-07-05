@@ -1,127 +1,111 @@
-# Weights base image + runner snapshots (#537)
+# Backend image chain: seed -> runtime -> backend + runner snapshots (#537)
 
-How the backend bake stopped re-downloading ~87 GB of model weights on every release, and how a
-custom runner snapshot makes a bake assemble-and-push only. ICD-grade: the contract is reproducible
-from this doc alone.
+How the backend bake stopped re-downloading ~87 GB of weights from R2 on every release, and how a
+custom runner snapshot makes a release bake assemble-and-push only. ICD-grade: reproducible from this
+doc alone.
 
-> **Status (2026-07-05, S19):** the weights-base image + its build workflow (PR 1) land first; the
-> backend `deploy/Dockerfile` + `release.yml` refactor to CONSUME the base (PR 2) and the runner
-> snapshot workflow (PR 3) follow. The runner snapshot is an ACCELERATOR; the data path is correct
-> and provable without it (a release just does a slow `docker pull` of the base). See the ownership
-> split at the end -- infra owns onlining the runners; we own everything in this repo.
+> **Status (2026-07-05, S19, Shape Y):** the SEED image + its build (`seed-build.yml`) and the RUNTIME
+> base + its build (`runtime-build.yml`) land first; the backend `deploy/Dockerfile` + `release.yml`
+> slim to `FROM runtime` + `COPY src` (follow-up PR, with the release-contract doc). The runner
+> snapshot pre-pulls the RUNTIME image. The image-generation runner is real
+> (`ubuntu-latest-32c-128gb-1200-gen`); enterprise scoping items are tracked in fleet-chezmoi #377.
 
-## The problem it solves
+## Why (the problem)
 
 `release.yml` used to, on EVERY `backend-v*` tag, `rclone` the curated ~87 GB (bf16) / ~90 GB (fp8)
-weight seed from R2, reconstruct the HF-cache symlinks, bin-pack it into <10 GB layers, THEN build.
-That stage + bin-pack is the dominant release cost and it repeats unchanged every release even though
-the weights change rarely. The fix: do it ONCE per weights bump, publish the result as a versioned
-image, and have the release bake consume that image.
+weight seed from R2, bin-pack it, and bake it. That stage + bin-pack + the ~87 GB image push repeat
+unchanged every release even though the weights change rarely. The fix splits the image into a chain
+so a src-only release re-pushes ONLY the app layer and stages R2 exactly once per weight version.
 
-## The three pieces
+## The chain (three images, one responsibility each)
 
 ```
-  weights bump (rare, one button)                 backend release (frequent, per backend-v* tag)
-  ------------------------------                  ------------------------------------------------
-  weights-base.yml (dispatch)                     release.yml (tag / dispatch)
-     stage R2 seed -> symlinks                       FROM weights-backend:<ver>@sha256:<digest>
-     -> bin-pack -> sha256 manifest        =====>    24x COPY --from=weights bin-NN -> /opt/models
-     -> build weights.Dockerfile                     sha256sum -c weights-manifest.sha256  (LOUD gate)
-     -> push                                         assemble app + push   (NO R2 stage, NO bin-pack)
-     ghcr.io/skyphusion-labs/                        |
-       vivijure-weights-backend:<ver>                v
-                     ^                            runner-snapshot.yml (dispatch, image-gen runner)
-                     |                               docker pull weights-backend:<ver>
-                     +---- pre-pulled into --------- install buildx + HF CLI
-                           the runner's                snapshot: vivijure-bake-snapshot
-                           docker cache                (a stale snapshot degrades to a slow pull,
-                                                        NEVER to a wrong image)
+  seed-build.yml (dispatch, R2)                 runtime-build.yml (dispatch, NO R2)        release.yml (tag)
+  --------------------------------              -----------------------------------        -----------------
+  stage R2 seed -> symlinks -> bin-pack         FROM nvidia/cuda + toolchain               FROM runtime@digest
+   -> sha256 manifest -> assert non-hollow        + hf-configs (before weights, #206)        COPY src + smoke + CMD
+   -> debian-slim carrier                         + COPY --from=seed 24 bin layers           push  (only the app
+   -> push                                        + sha256sum -c manifest gate                     layers upload;
+      vivijure-backend-seed                        + assert-weights/finish/no-tree             the runtime + weight
+        :<modelver>-<precision>                    + .vj-baked stamp                           layers dedup)
+              |                                    -> push
+              |  COPY --from (24 bins,             vivijure-backend-runtime
+              |  deterministic -> dedup)             :<modelver>-<precision>-t<toolchainver>
+              +----------------------------------------->  |
+                                                           |  FROM @digest
+                                                           +----------------->  vivijure-backend:<X.Y.Z>
 ```
 
-### 1. Weights base image (`ghcr.io/skyphusion-labs/vivijure-weights-backend:<model_version>-<precision>`)
+### 1. SEED image -- `ghcr.io/skyphusion-labs/vivijure-backend-seed:<modelver>-<precision>`
 
-The versioned, immutable, source-of-truth carrier for the curated model seed. Built by
-`.github/workflows/weights-base.yml` (workflow_dispatch only; never fork-reachable; runs on the
-existing `vivijure-bake` 1200 GB larger runner). The build:
+The immutable, versioned carrier for the curated model seed (a tiny `debian:bookworm-slim` holding
+`/seed-bins/bin-00..23` + the union-keyed `weights-manifest.sha256` + the model licenses). Built by
+`.github/workflows/seed-build.yml` (dispatch-only, on `vivijure-bake`): stage R2 seed -> reconstruct
+HF-cache symlinks -> `assert-weights` (non-hollow) -> bin-pack (`deploy/bake_layers.py bin`) ->
+`manifest` -> build `deploy/seed.Dockerfile` -> per-layer gate -> push. **This is the ONLY image that
+stages from R2**, and only on a weight-set change. `deploy/seed.Dockerfile`.
 
-1. Stages the precision-selected seed (`bake-seed-<precision>/`) from R2 with the same `rclone`
-   invocation `release.yml` used, and reconstructs the HF-cache symlinks from the `.rclonelink`
-   markers.
-2. `assert-weights` (host-side): a non-hollow gate (byte floor + at least one real shard) so a hollow
-   base can never be published (the #4 empty-bake defense, restated at this new boundary).
-3. Bin-packs into `deploy/seed-bins/bin-00..23` (`deploy/bake_layers.py bin`), each bin < 9 GB (under
-   the 10 GB GHCR per-layer ceiling), each mirroring its path relative to `VJ_MODELS_ROOT`.
-4. Writes `deploy/seed-bins/weights-manifest.sha256` (`deploy/bake_layers.py manifest`): a
-   `sha256sum -c`-compatible, UNION-KEYED SHA-256 of every weight file (the `bin-NN/` prefix stripped,
-   so a key is the runtime path under `VJ_MODELS_ROOT`). This is the byte-identity contract the
-   consumer verifies.
-5. Builds `deploy/weights.Dockerfile` (a tiny `debian:bookworm-slim` carrier that COPYs the 24 bins,
-   the manifest, and the third-party model licenses into `/seed-bins`), per-layer-gates it, pushes
-   `:<ver>` + an immutable `:<ver>-<run>` tag, and prints the digest to the job summary.
+### 2. RUNTIME base -- `ghcr.io/skyphusion-labs/vivijure-backend-runtime:<modelver>-<precision>-t<toolchainver>`
 
-The carrier OS contributes NOTHING to the consumer image -- the consumer `COPY --from`s only
-`/seed-bins`. This image is data + a checksum manifest, not a runtime.
+The full validated runtime + baked weights: `FROM nvidia/cuda` + apt + conda + torch(cu128) + render
+deps + finish-dep patches + RIFE + the HF config bake + the weights `COPY --from=seed` (24 `<10 GB`
+bin layers) + the `sha256sum -c` manifest gate + `assert-weights`/`assert-finish-shas`/
+`assert-no-tree-cache` + the `.vj-baked` stamp. Built by `.github/workflows/runtime-build.yml`
+(dispatch-only). **NO R2**: the weights come from the pinned seed. `deploy/runtime.Dockerfile`.
 
-### 2. Consumer refactor (`deploy/Dockerfile` + `release.yml`) -- PR 2
+- The toolchain + assert/stamp sections are byte-identical to the pre-split monolith (verified), so
+  the proven CUDA/torch layout and the `#206` hf-configs->weights order are preserved exactly
+  (hf-configs runs BEFORE the weight `COPY --from`, both inside this image).
+- Two precisions from one Dockerfile via `FROM seed-${VJ_BAKE_PRECISION}` selection; both seed pins
+  are authoritative in `runtime.Dockerfile` (tag + `@sha256`).
+- `COPY --from=seed@digest` is **deterministic** (fixed source bytes + metadata), so the 24 weight
+  layers reuse identical blobs across runtime rebuilds -> they dedup on GHCR. A toolchain/CUDA bump
+  rebuilds this image but pulls the seed (no R2) and re-pushes only the changed toolchain layers.
 
-`deploy/Dockerfile` pins the base by TAG AND DIGEST and copies the bins out, preserving the <10 GB
-layer structure and decoupling the weights (rarely bumped) from the CUDA/torch/app toolchain
-(frequently bumped -- a torch bump never re-stages 87 GB):
+### 3. BACKEND (consumer) -- `ghcr.io/skyphusion-labs/vivijure-backend:<X.Y.Z>`
 
-```dockerfile
-ARG WEIGHTS_REF=ghcr.io/skyphusion-labs/vivijure-weights-backend:1-bf16@sha256:<digest>
-FROM ${WEIGHTS_REF} AS weights
-# ... CUDA + conda + torch + deps + rife + hf-configs (unchanged) ...
-COPY --from=weights /seed-bins/bin-00/ /opt/models/
-# ... bin-01 .. bin-23 ...
-COPY --from=weights /seed-bins/weights-manifest.sha256 /opt/models/weights-manifest.sha256
-RUN cd /opt/models && sha256sum -c weights-manifest.sha256 --quiet   # LOUD byte-identity gate
-# ... assert-weights + assert-finish-shas + .vj-baked stamp (unchanged) ...
-```
+`FROM runtime@digest` + `WORKDIR` + `COPY src` + `COPY smoke_imports.py` + `CMD`. Built by
+`release.yml` on a `backend-v*` tag. Every layer below `COPY src` is inherited from the runtime base
+by blob identity, so a src-only release **re-pushes only the app layers** ("layer already exists" on
+the runtime + weight blobs). Lands in the follow-up PR with the release-contract doc.
 
-`release.yml` loses the R2-stage + bin-pack steps entirely: it becomes assemble + push. It runs on
-the snapshot runner when one is online (the base is pre-cached), and degrades to `vivijure-bake` (a
-one-time `docker pull` of the base) otherwise -- SLOW, never WRONG.
+## Why this shape (Shape Y), not the alternatives
 
-**Why `COPY --from`, not `FROM weights-base`:** `COPY --from` keeps the weights out of the toolchain's
-layer chain, so a CUDA/torch bump rebuilds only the toolchain, never re-stages the seed. Upload per
-release is unchanged from today (~87 GB, already the case). `FROM`-inheritance would dedup the weight
-layers on push (near-zero upload) but couples the CUDA/apt base into the "weights" image, so a CUDA
-bump would force an 87 GB re-stage. We optimize for the frequent case (releases) and clean semantics.
+- **`hf-configs` is load-bearing and constrains the layering.** `deploy/bake_hf_configs.py` runs
+  ONLINE (needs the conda/HF stack) and MUST run BEFORE the weight COPY (the `#206` tree-cache /
+  curated-subset prod bug). So the weights cannot sit in a weights-only base with the toolchain on
+  top (hf-configs would run after them, inverting the order), and "plain base + apt-install CUDA"
+  abandons the validated `nvidia/cuda` sm_120 layout. The only correctness-preserving FROM-base is
+  one that carries the full runtime with hf-configs before the weights -> the RUNTIME image.
+- **Dedup vs COPY --from.** `FROM runtime` inherits the weight layers as identical blobs, so a
+  release push dedups them (near-zero upload). A consumer that `COPY --from`'d the weights would
+  re-create them as new blobs and re-push ~87 GB every release.
+- **R2 exactly once.** The immutable SEED image is the weight source the runtime `COPY --from`s, so a
+  toolchain rebuild never re-stages R2; R2 runs only when the weight set itself changes.
 
-### 3. Runner snapshot (`runner-snapshot.yml`) -- PR 3
+## Runner snapshot (`runner-snapshot.yml`)
 
-GitHub custom images for larger runners (GA 2026-03) use a job-level `snapshot:` keyword: a job runs
-on an IMAGE-GENERATION runner, installs tools, and on success GitHub captures the runner state into a
-reusable, auto-versioned image. Our snapshot job (`workflow_dispatch` only) `docker pull`s the weights
-base and installs buildx + the HF CLI, so those land in the runner image's docker cache. The backend
-release then targets a runner built from that image and skips the base pull. Rebuild the snapshot
-(one dispatch) after a weights bump.
+Pre-pulls the pinned RUNTIME image + buildx + HF CLI into a larger-runner image via GitHub's
+job-level `snapshot:` keyword (custom images for larger runners, GA 2026-03), on the image-generation
+runner `ubuntu-latest-32c-128gb-1200-gen`. A release bake on a runner built from that image reads the
+runtime base cache-warm (a fast local `FROM`) instead of pulling it. **ACCELERATOR ONLY** (design law
+#3): the consumer pins the runtime by digest, so a stale snapshot degrades to a slow pull, never to a
+wrong image. Enterprise scoping (group grant + tag/workflow allowlist + the second, image-gen-OFF
+consuming runner) is tracked in fleet-chezmoi #377.
 
-**A stale snapshot is safe by construction:** the consumer pins the base by DIGEST and verifies the
-checksum manifest. If the snapshot's cached base is older than the pinned digest, docker pulls the
-newer one (slow); if a cached layer were ever wrong, `sha256sum -c` fails the build LOUD. The snapshot
-can only ever make a build FASTER, never change WHAT it builds.
+## Rebuild triggers (summary; the full release contract lands with `release.yml`)
 
-## Ownership split (infra <-> us)
-
-| Owned by INFRA (org admin, UI-only, no REST API) | Owned by US (this repo) |
-|---|---|
-| Create the IMAGE-GENERATION larger runner (class `ubuntu-latest-32c-128gb-1200-gen`), enable "generate custom images" | `weights.Dockerfile` + `weights-base.yml` (the weights base) |
-| Run/authorize the snapshot workflow; online the resulting custom-image runner and set its label | `deploy/Dockerfile` + `release.yml` refactor (consume the base) |
-| Keep the `vivijure-bake` build runner online | `runner-snapshot.yml` (the snapshot definition) |
-|  | `deploy/bake_layers.py manifest` (the checksum tool) + this doc |
-
-Runner labels are the interface: infra sets the image-generation runner's label to match
-`runner-snapshot.yml`'s `runs-on`, and the snapshot-image runner's label to match `release.yml`'s
-`runs-on`. The exact strings are tracked in the infra handoff (fleet-chezmoi issue) referenced from
-vivijure#537.
+- **src-only change:** tag `backend-vX.Y.Z` -> `release.yml` (`FROM runtime` + `COPY src`). Fast.
+- **weight-set change:** `seed-build.yml` -> repin `SEED_REF_*` in `runtime.Dockerfile` ->
+  `runtime-build.yml` -> repin `RUNTIME_REF_*` in `deploy/Dockerfile` -> tag.
+- **toolchain/deps/CUDA change:** `runtime-build.yml` (bump `-t<N>`, no R2) -> repin `RUNTIME_REF_*`
+  in `deploy/Dockerfile` -> tag.
 
 ## Acceptance
 
-- Weights base builds + pushes on `vivijure-bake`; digest captured. (dispatch)
-- Refactored `release.yml` consumes the pinned base, the `sha256sum -c` gate passes on a good base and
-  FAILS LOUD on a tampered one, and the built image is byte-identical to the pre-refactor bake.
-- Timed: a release bake on the snapshot runner vs the current stage-from-R2 bake.
-- Snapshot-runner timing is PENDING-RUNNER until infra onlines the image-generation runner; the data
-  path (base builds, consumer consumes, gate proven) is provable now on `vivijure-bake`.
+- Seed builds + pushes (R2); runtime builds from the pinned seed; the `sha256sum -c` gate passes on a
+  good seed and FAILS LOUD on a tampered one (proven with real local images: gate PASS / tamper exit 1
+  / symlink survives / precision selection).
+- Dedup: a 2nd consecutive src-only release build shows "layer already exists" on the inherited
+  runtime + weight blobs.
+- Timed: a release bake on the snapshot runner vs the pre-split R2-stage bake.

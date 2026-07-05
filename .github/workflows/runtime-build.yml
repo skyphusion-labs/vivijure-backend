@@ -1,0 +1,155 @@
+name: Build runtime base image to GHCR (#537)
+
+# Build + push the RUNTIME BASE image (Shape Y, #537): the full validated runtime (CUDA/torch/conda +
+# render deps + finish patches + RIFE + HF config bake) with the model WEIGHTS COPY --from'd out of the
+# pinned, immutable SEED image. The consuming backend release (release.yml) is then just
+# `FROM this@digest` + COPY src, so a src-only release re-pushes ONLY the app layers.
+#
+#   ghcr.io/skyphusion-labs/vivijure-backend-runtime:<model_version>-<precision>-t<toolchain_version>
+#
+# NO R2 here: the weights come from the seed image (seed-build.yml stages R2 exactly once per weight
+# version). A toolchain/CUDA rebuild of this image pulls the seed and the deterministic COPY --from
+# weight layers dedup on GHCR. Rebuild triggers: a toolchain/deps/CUDA bump (bump toolchain_version) OR
+# a weight bump (rebuild the seed, repin SEED_REF in deploy/runtime.Dockerfile, bump model_version).
+#
+# workflow_dispatch ONLY (never fork-reachable; larger runners bill -- design law #5). Runs on the
+# existing vivijure-bake 1200 GB larger runner (the ~100 GB build fits with headroom).
+
+on:
+  workflow_dispatch:
+    inputs:
+      precision:
+        description: 'Baked weight precision (selects the pinned seed stage in runtime.Dockerfile).'
+        required: true
+        default: bf16
+        type: choice
+        options: [bf16, fp8]
+      model_version:
+        description: 'Model set version (must match the seed the Dockerfile pins).'
+        required: true
+        default: '1'
+        type: string
+      toolchain_version:
+        description: 'Toolchain version -> the -t<N> tag suffix (bump on a CUDA/torch/deps change).'
+        required: true
+        default: '1'
+        type: string
+
+permissions:
+  contents: read
+  packages: write   # push the runtime image; pull the seed
+
+concurrency:
+  group: runtime-build-${{ github.event.inputs.precision }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: skyphusion-labs
+  RUNTIME_IMAGE: vivijure-backend-runtime
+
+jobs:
+  build-and-push:
+    runs-on: vivijure-bake
+    timeout-minutes: 180
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve config
+        id: cfg
+        run: |
+          set -eu
+          PREC='${{ github.event.inputs.precision }}'
+          MVER='${{ github.event.inputs.model_version }}'
+          TVER='${{ github.event.inputs.toolchain_version }}'
+          case "${PREC}" in fp8|bf16) ;; *) echo "::error::precision must be fp8 or bf16"; exit 1;; esac
+          case "${MVER}" in ''|*[!0-9]*) echo "::error::model_version must be a positive integer"; exit 1;; esac
+          case "${TVER}" in ''|*[!0-9]*) echo "::error::toolchain_version must be a positive integer"; exit 1;; esac
+          TAG="${MVER}-${PREC}-t${TVER}"
+          echo "precision=${PREC}"                     >> "$GITHUB_OUTPUT"
+          echo "model_version=${MVER}"                 >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}"                            >> "$GITHUB_OUTPUT"
+          echo "immutable_tag=${TAG}-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "Building ${RUNTIME_IMAGE}:${TAG} (precision=${PREC}; weights from the pinned seed)."
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # GHCR auth: pull the (public) seed image + push the runtime image. GITHUB_TOKEN, least-privilege.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build the runtime image. VJ_BAKE_PRECISION selects the pinned seed stage; the seed is pulled
+      # (cache-warm on the snapshot runner) and its 24 bin layers COPY --from into /opt/models, then the
+      # sha256 manifest gate + assert-weights/finish-shas/no-tree-cache run before .vj-baked is stamped.
+      # Load into the local daemon (not pushed yet) so the per-layer gate runs before publish.
+      - name: Build runtime base image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/runtime.Dockerfile
+          platforms: linux/amd64
+          pull: true
+          load: true
+          push: false
+          build-args: |
+            VJ_BAKE_PRECISION=${{ steps.cfg.outputs.precision }}
+            VJ_MODEL_VERSION=${{ steps.cfg.outputs.model_version }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.RUNTIME_IMAGE }}:${{ steps.cfg.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.RUNTIME_IMAGE }}:${{ steps.cfg.outputs.immutable_tag }}
+
+      # Authoritative per-layer gate: assert no image layer is >=10GB so GHCR will accept the push.
+      - name: Verify image layers under the 10GB GHCR ceiling
+        run: |
+          set -eu
+          IMG="${REGISTRY}/${OWNER}/${RUNTIME_IMAGE}:${{ steps.cfg.outputs.tag }}"
+          python deploy/bake_layers.py verify-image --image "${IMG}" --ceiling-gb 10.0
+
+      # Toolchain import smoke (CPU, no GPU, no app): catch a torch/CUDA ABI break in the runtime here,
+      # in seconds, rather than at the end of a 33-min GPU render. The APP import smoke runs in the
+      # consuming release build (it needs COPY src).
+      - name: Toolchain import smoke (CPU, no GPU)
+        run: |
+          set -eu
+          IMG="${REGISTRY}/${OWNER}/${RUNTIME_IMAGE}:${{ steps.cfg.outputs.tag }}"
+          docker run --rm "${IMG}" conda run --no-capture-output -n vivijure \
+            python -c "import torch, torchvision, diffusers, transformers, safetensors; print('runtime import smoke OK:', torch.__version__)"
+
+      - name: Push tags to GHCR
+        id: push
+        run: |
+          set -eu
+          IMG="${REGISTRY}/${OWNER}/${RUNTIME_IMAGE}"
+          docker push "${IMG}:${{ steps.cfg.outputs.tag }}"
+          docker push "${IMG}:${{ steps.cfg.outputs.immutable_tag }}"
+          DIGEST="$(docker inspect --format '{{ index .RepoDigests 0 }}' "${IMG}:${{ steps.cfg.outputs.tag }}" | sed 's/.*@//')"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Pushed ${RUNTIME_IMAGE}:${{ steps.cfg.outputs.tag }} (+ immutable) -- ${DIGEST}"
+
+      - name: Summary (pin the runtime in deploy/Dockerfile)
+        run: |
+          IMG="${REGISTRY}/${OWNER}/${RUNTIME_IMAGE}"
+          PREC='${{ steps.cfg.outputs.precision }}'
+          ARGNAME="RUNTIME_REF_$(echo "$PREC" | tr '[:lower:]' '[:upper:]')"
+          {
+            echo "## Runtime base image published"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| tag | \`${IMG}:${{ steps.cfg.outputs.tag }}\` |"
+            echo "| immutable tag | \`${IMG}:${{ steps.cfg.outputs.immutable_tag }}\` |"
+            echo "| digest | \`${{ steps.push.outputs.digest }}\` |"
+            echo "| precision | ${PREC} |"
+            echo ""
+            echo "Repin in \`deploy/Dockerfile\` (matching precision), then cut a backend release tag:"
+            echo ""
+            echo '```dockerfile'
+            echo "ARG ${ARGNAME}=${IMG}:${{ steps.cfg.outputs.tag }}@${{ steps.push.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

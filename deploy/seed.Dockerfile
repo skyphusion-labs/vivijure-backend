@@ -1,4 +1,4 @@
-# Vivijure backend WEIGHTS BASE image -- the source-of-truth carrier for the curated model seed.
+# Vivijure backend SEED image (#537) -- the immutable, versioned carrier for the curated model seed.
 #
 # WHY THIS EXISTS (#537)
 # ----------------------
@@ -7,7 +7,7 @@
 # image stages + bin-packs the seed ONCE per weights bump and publishes it as a versioned, immutable
 # GHCR artifact:
 #
-#   ghcr.io/skyphusion-labs/vivijure-weights-backend:<model_version>-<precision>   (e.g. 1-bf16)
+#   ghcr.io/skyphusion-labs/vivijure-backend-seed:<model_version>-<precision>   (e.g. 1-bf16)
 #
 # The consuming backend Dockerfile pins this base by TAG AND DIGEST and COPY --from's the bins in,
 # then verifies /seed-bins/weights-manifest.sha256 with `sha256sum -c` (a byte mismatch fails LOUD).
@@ -20,7 +20,7 @@
 #
 # The bins are bin-packed by deploy/bake_layers.py into <10 GB layers (GHCR rejects a >=10 GB layer),
 # each mirroring its path relative to VJ_MODELS_ROOT so their union reconstructs the HF cache +
-# finish-model tree. The weights-base build workflow (.github/workflows/weights-base.yml) stages the
+# finish-model tree. The seed build workflow (.github/workflows/seed-build.yml) stages the
 # seed from R2, reconstructs the HF-cache symlinks, bin-packs, writes the manifest, and asserts a real
 # (non-hollow) weight set BEFORE this image is built -- so a hollow base can never be published.
 #
@@ -34,7 +34,7 @@ FROM debian:bookworm-slim
 # the authoritative pins are the tag+digest the consumer references and the checksum manifest below.
 ARG VJ_BAKE_PRECISION=bf16
 ARG VJ_MODEL_VERSION=1
-LABEL org.opencontainers.image.title="vivijure-weights-backend" \
+LABEL org.opencontainers.image.title="vivijure-backend-seed" \
       org.opencontainers.image.description="Curated, bin-packed model seed for the vivijure-backend bake (source of truth)." \
       org.opencontainers.image.source="https://github.com/skyphusion-labs/vivijure-backend" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later" \
