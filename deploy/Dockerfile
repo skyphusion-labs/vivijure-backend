@@ -23,7 +23,7 @@
 # stage. release.yml passes VJ_BAKE_PRECISION (bf16 = self-contained public/prod; fp8 = partial-prod).
 # Repin BOTH tag and @sha256 (matching precision) after a runtime rebuild -- that is the ONE line a
 # weight or toolchain bump changes here. Digests are placeholders until runtime-build.yml prints them.
-ARG RUNTIME_REF_BF16=ghcr.io/skyphusion-labs/vivijure-backend-runtime:1-bf16-t1@sha256:0000000000000000000000000000000000000000000000000000000000000000
+ARG RUNTIME_REF_BF16=ghcr.io/skyphusion-labs/vivijure-backend-runtime:1-bf16-t1@sha256:4a05d3e4ef774113111aef1a0c7d5827e962103a20c2aae56dc803c010aecb5f
 ARG RUNTIME_REF_FP8=ghcr.io/skyphusion-labs/vivijure-backend-runtime:1-fp8-t1@sha256:0000000000000000000000000000000000000000000000000000000000000000
 ARG VJ_BAKE_PRECISION=bf16
 FROM ${RUNTIME_REF_BF16} AS runtime-bf16
