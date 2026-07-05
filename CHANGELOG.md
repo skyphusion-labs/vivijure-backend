@@ -5,6 +5,23 @@ pre-1.0: PATCH for fixes and backend-only tweaks, MINOR for new features). Entri
 newest-first. History before this file was introduced lives in the git tags; the recent
 releases are summarized below from that history.
 
+## [0.4.5] -- 2026-07-05
+
+**ci(release): point release.yml at the snapshot runner vivijure-bake-snap (fc#377)**
+
+The release bake now runs on the enterprise SNAPSHOT runner (label `vivijure-bake-snap`, Vivijure Bake
+enterprise group, org-scoped to skyphusion-labs, allow-public). Its custom image
+(`vivijure-bake-snapshot`) ships the pinned runtime base pre-pulled into the docker daemon store, so the
+`FROM` is a local cache hit and the bake is assemble+push only, no cold ~87 GB base pull. Accelerator
+only; the built image is byte-for-byte what the prior runner produced.
+
+- **Flip:** `runs-on: vivijure-bake` -> `runs-on: vivijure-bake-snap`; header + runs-on comments updated
+  to reflect that the snapshot runner is live and that the access control is the label + the `backend-v*`
+  tag ruleset (`backend-release-tags`, id 18524678) -- a fork PR cannot create a `backend-v*` tag, so no
+  untrusted code reaches the runner.
+- **No re-bake:** the runtime image is unchanged; this release consumes the existing snapshot. A stale or
+  absent snapshot degrades to a one-time base pull -- SLOW, never WRONG.
+
 ## [0.4.4] -- 2026-07-04
 
 **fix(bake): scrub the hf_hub tree cache so the offline SDXL keyframe load stops failing (#206)**
