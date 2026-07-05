@@ -11,6 +11,25 @@ GitHub Actions in backend-v0.2.25 (#107) when Jenkins was decommissioned.
 > gap below -- those tags were cut on mindcrimes local clone, never pushed, and lost when
 > the box was released.
 
+## Release contract (#537: the seed -> runtime -> backend chain)
+
+Since #537 the backend image is the top of a three-image chain, so a release does NOT rebuild the
+world. What you do depends on WHAT changed:
+
+| What changed | Steps |
+|---|---|
+| **App code only** (`src/vivijure_backend`) -- the common case | Push the tag `backend-v<semver>`. `release.yml` builds `deploy/Dockerfile` (`FROM the pinned runtime base` + `COPY src`) and pushes. Only the app layers upload; the runtime + weight layers dedup on GHCR. Fast. |
+| **Model weights** (new/changed curated set) | 1. Dispatch `seed-build.yml` (stages R2, rebuilds `vivijure-backend-seed`, bump `model_version`). 2. Repin `SEED_REF_<PREC>` (tag + `@sha256`) in `deploy/runtime.Dockerfile`. 3. Dispatch `runtime-build.yml`. 4. Repin `RUNTIME_REF_<PREC>` in `deploy/Dockerfile`. 5. Push the tag. |
+| **Toolchain / deps / CUDA / torch / hf-configs** | 1. Dispatch `runtime-build.yml` (bump `toolchain_version` -> the `-t<N>` tag; NO R2, weights come from the existing seed). 2. Repin `RUNTIME_REF_<PREC>` in `deploy/Dockerfile`. 3. Push the tag. |
+
+Why: the weights + full runtime live in `vivijure-backend-runtime`, pinned by digest; the seed
+(`vivijure-backend-seed`) is the only image that stages from R2, and only on a weight change. This
+makes a src-only release an assemble-and-push, stages R2 once per weight version, and keeps a
+toolchain/CUDA bump a deliberate, revalidated base build (repin, not a tag silently rebuilding
+everything). Full architecture: `docs/weights-base-and-snapshots.md`. The base builds are
+`workflow_dispatch` only on `vivijure-bake` (never fork-reachable). Promotion to prod is still the
+separate pod-staging verify gate (`docs/release-gate.md`) -- unchanged.
+
 | git tag | GHCR image | source commit | built | notes |
 |---|---|---|---|---|
 | backend-v0.4.1 | 0.4.1 | f3a0d41 | 2026-07-02 (GHA) | fix(verify): the pod-staging gate renders end to end -- #183 register the GPU pipeline for the verify render (route _pod_draft_render through worker.handler, the production entrypoint that registers the per-job pipeline; fixes the "no GPU Pipeline registered" the H200 watched pod hit in ~3s), #180+#182 loud verify_fatal {stage,missing} instead of a silent pre-emitter death, #181 cold-pull TTL 3000s + pod-state timing log. Emitter + R2 channel proven healthy on the pod (gpu_probe real H200 values, summary.json + events.ndjson in ~3s). Fixes on top of :0.4.0. |

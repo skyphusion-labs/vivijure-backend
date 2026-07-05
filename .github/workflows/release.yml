@@ -11,17 +11,20 @@ name: Release worker image to GHCR (baked)
 # reaches the production serverless endpoint ONLY by passing the pod-staging verify (.github/
 # workflows/runpod-verify.yml) -- see docs/release-gate.md. An iteration tag never re-pins prod.
 #
-# Runner: the org GitHub-hosted larger runner "vivijure-bake" (32-core / 128 GB / 1200 GB SSD,
-# runner group Default). vivijure-backend is a PUBLIC repo, so a self-hosted fleet runner is off the
-# table (a fork PR could run untrusted code on a fleet box); GitHub-hosted runners are fork-safe.
-# This build STAGES the curated weight seed (~90 GB fp8 / ~87 GB bf16 RE-CAST) from R2, bin-packs it
-# into <10GB layers, builds the CUDA 12.8 + cu128 image with the weights baked in, and pushes. The
-# bf16 seed must be the fp32->bf16 RE-CAST (the Wan experts ship FP32; raw fp32 would be ~140 GB /
-# ~440 GB transient). Peak transient disk is ~3x the payload (staged seed + buildkit snapshot +
-# loaded image) + the base stack, i.e. ~280-290 GB -- which the 1200 GB runner builds at ~4x headroom
-# (the raw-fp32 contingency, ~440 GB, is why we size to 1200, not 600; see docs/cold-start-design.md).
-# The build is tag-push / dispatch only (only a maintainer can create a backend-v* tag -- a fork PR
-# cannot), so it never runs untrusted code; keeping it GitHub-hosted means zero fleet exposure.
+# WEIGHTS + RUNTIME COME FROM THE PINNED RUNTIME BASE (#537, Shape Y): this build is assemble + push
+# only -- `FROM ghcr.io/skyphusion-labs/vivijure-backend-runtime:<ver>@sha256:<digest>` (selected by
+# VJ_BAKE_PRECISION) + COPY src. No R2 stage, no bin-pack, no weight COPY. A src-only release re-pushes
+# ONLY the app layers; the runtime + weight layers dedup on GHCR. The runtime base itself is built by
+# runtime-build.yml (from the seed image, which stages R2 once per weight version); see
+# docs/deploy.md for the release contract and docs/weights-base-and-snapshots.md for the chain.
+#
+# Runner: the org GitHub-hosted larger runner "vivijure-bake". vivijure-backend is a PUBLIC repo, so a
+# self-hosted fleet runner is off the table (a fork PR could run untrusted code on a fleet box);
+# GitHub-hosted runners are fork-safe. Once infra onlines the runner SNAPSHOT (runtime base pre-pulled
+# into the runner image's docker cache, runner-snapshot.yml), flip runs-on to that runner's label: the
+# base is cache-warm and the bake is a fast local FROM. A stale/absent snapshot degrades to a one-time
+# docker pull of the base -- SLOW, never WRONG. Tag-push / dispatch only (a fork PR cannot create a
+# backend-v* tag), so it never runs untrusted code; GitHub-hosted means zero fleet exposure.
 
 on:
   push:
@@ -34,7 +37,7 @@ on:
         required: true
         type: string
       precision:
-        description: 'Baked weight precision (selects the R2 bake-seed prefix).'
+        description: 'Baked weight precision (selects the pinned runtime base).'
         required: true
         default: bf16
         type: choice
@@ -52,13 +55,12 @@ env:
   REGISTRY: ghcr.io
   OWNER: skyphusion-labs
   WORKER_IMAGE: vivijure-backend
-  R2_BUCKET: vivijure
-  # Bump when the baked model set changes so a deploy's workers re-stamp the version. Paired with a
-  # re-staged seed; written into the image's .vj-baked marker.
-  VJ_MODEL_VERSION: '1'
 
 jobs:
   build-and-push:
+    # vivijure-bake = the existing 1200 GB larger runner; it pulls the runtime base once (degrade-to-
+    # slow). Flip this label to the snapshot-image runner once infra onlines it (the runtime base is
+    # pre-pulled into that image's docker cache -> assemble+push only). Accelerator only; identical output.
     runs-on: vivijure-bake
     timeout-minutes: 180
     steps:
@@ -89,75 +91,7 @@ jobs:
           case "${PREC}" in fp8|bf16) ;; *) echo "::error::precision must be fp8 or bf16"; exit 1;; esac
           echo "version=${VER}"   >> "$GITHUB_OUTPUT"
           echo "precision=${PREC}" >> "$GITHUB_OUTPUT"
-          echo "seed_prefix=bake-seed-${PREC}/" >> "$GITHUB_OUTPUT"
-          echo "Building ${WORKER_IMAGE}:${VER} (precision=${PREC}, seed=bake-seed-${PREC}/)."
-
-      - name: Install rclone
-        run: curl -fsSL https://rclone.org/install.sh | sudo bash
-
-      # R2 credentials arrive as encrypted Actions secrets (NEVER a tracked file). A read-only,
-      # per-CI R2 token scoped to the vivijure bucket is the right credential here (per-function key);
-      # set R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT as repo or org Actions secrets.
-      - name: Configure rclone for R2
-        env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-        run: |
-          set -eu
-          : "${R2_ACCESS_KEY_ID:?missing R2_ACCESS_KEY_ID secret}"
-          : "${R2_SECRET_ACCESS_KEY:?missing R2_SECRET_ACCESS_KEY secret}"
-          : "${R2_ENDPOINT:?missing R2_ENDPOINT secret}"
-          mkdir -p "$HOME/.config/rclone"
-          umask 077
-          {
-            printf '[r2]\n'
-            printf 'type = s3\n'
-            printf 'provider = Cloudflare\n'
-            printf 'access_key_id = %s\n' "$R2_ACCESS_KEY_ID"
-            printf 'secret_access_key = %s\n' "$R2_SECRET_ACCESS_KEY"
-            printf 'endpoint = %s\n' "$R2_ENDPOINT"
-            printf 'acl = private\nno_check_bucket = true\n'
-          } > "$HOME/.config/rclone/rclone.conf"
-          echo "rclone configured (R2 creds present)."
-
-      # Stage the curated, precision-selected bake seed, then rebuild the HF-cache symlinks from the
-      # .rclonelink markers rclone leaves (same convention as the runtime R2 mirror).
-      - name: Stage bake seed from R2
-        run: |
-          set -eu
-          PREFIX='${{ steps.cfg.outputs.seed_prefix }}'
-          echo "Staging r2:${R2_BUCKET}/${PREFIX} -> ./_seed ..."
-          # --timeout/--contimeout bound a stalled R2 connection so rclone's default retries fire
-          # on a hang instead of wedging the 180-min build; the IO-idle timeout only trips on
-          # inactivity, never on a healthy multi-thread transfer.
-          rclone copy "r2:${R2_BUCKET}/${PREFIX}" ./_seed \
-            --links --transfers 16 --checkers 16 \
-            --multi-thread-streams 8 --multi-thread-cutoff 100M \
-            --timeout 120s --contimeout 30s \
-            --stats 30s --stats-one-line
-          python deploy/bake_layers.py reconstruct-symlinks --root ./_seed
-          du -sh ./_seed || true
-          # Fast, explicit empty-seed guard: `rclone copy` of an empty/wrong R2 prefix exits 0, which
-          # is how the #4 hollow image shipped. Fail loud HERE, before the build, pointing at the seed.
-          COUNT="$(find ./_seed -type f ! -name '*.rclonelink' | wc -l)"
-          if [ "${COUNT}" -eq 0 ]; then
-            echo "::error::staged bake seed is EMPTY (r2:${R2_BUCKET}/${PREFIX} has no files). Refusing"
-            echo "::error::to build a hollow bake (#4). Populate the R2 seed prefix and re-run."
-            exit 1
-          fi
-          echo "staged ${COUNT} seed file(s)."
-
-      # Bin-pack the seed into <10GB layers. HARD GATE (upper): any single file >=10GB is fatal.
-      # HARD GATE (lower): --precision sets the byte floor so an under-staged seed dies here too.
-      - name: Bin-pack seed into <10GB layers
-        run: |
-          set -eu
-          python deploy/bake_layers.py bin --src ./_seed --out deploy/seed-bins --bins 24 --ceiling-gb 9.0 \
-            --precision '${{ steps.cfg.outputs.precision }}'
-          cat deploy/seed-bins/bake-bins.json
-          # Free the pre-bin staging copy; the bins (hardlinked) are what the build context needs.
-          rm -rf ./_seed
+          echo "Building ${WORKER_IMAGE}:${VER} (precision=${PREC}; FROM the pinned runtime base)."
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -172,8 +106,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Build context is the repo ROOT (so COPY src/, COPY deploy/seed-bins/... resolve). Load into the
-      # local docker daemon (not pushed yet) so the per-layer gate + import smoke run before publish.
+      # Build context is the repo ROOT (COPY src/ resolves). deploy/Dockerfile is `FROM the pinned
+      # runtime base` + COPY src, selected by VJ_BAKE_PRECISION -- NO R2 stage, NO bin-pack, NO weight
+      # COPY here. On the snapshot runner the runtime base is pre-cached (assemble+push only); on
+      # vivijure-bake it is a one-time docker pull (SLOW, never WRONG). Load into the local daemon
+      # (not pushed) so the per-layer gate + app import smoke run before publish.
       - name: Build baked worker image
         uses: docker/build-push-action@v6
         with:
@@ -185,7 +122,6 @@ jobs:
           push: false
           build-args: |
             VJ_BAKE_PRECISION=${{ steps.cfg.outputs.precision }}
-            VJ_MODEL_VERSION=${{ env.VJ_MODEL_VERSION }}
           tags: |
             ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WORKER_IMAGE }}:${{ steps.cfg.outputs.version }}
             ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WORKER_IMAGE }}:latest
