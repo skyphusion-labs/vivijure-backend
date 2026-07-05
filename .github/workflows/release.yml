@@ -18,13 +18,15 @@ name: Release worker image to GHCR (baked)
 # runtime-build.yml (from the seed image, which stages R2 once per weight version); see
 # docs/deploy.md for the release contract and docs/weights-base-and-snapshots.md for the chain.
 #
-# Runner: the org GitHub-hosted larger runner "vivijure-bake". vivijure-backend is a PUBLIC repo, so a
-# self-hosted fleet runner is off the table (a fork PR could run untrusted code on a fleet box);
-# GitHub-hosted runners are fork-safe. Once infra onlines the runner SNAPSHOT (runtime base pre-pulled
-# into the runner image's docker cache, runner-snapshot.yml), flip runs-on to that runner's label: the
-# base is cache-warm and the bake is a fast local FROM. A stale/absent snapshot degrades to a one-time
-# docker pull of the base -- SLOW, never WRONG. Tag-push / dispatch only (a fork PR cannot create a
-# backend-v* tag), so it never runs untrusted code; GitHub-hosted means zero fleet exposure.
+# Runner: the enterprise SNAPSHOT runner, label "vivijure-bake-snap" (Vivijure Bake enterprise group,
+# org-scoped to skyphusion-labs, allow-public). vivijure-backend is a PUBLIC repo, so a self-hosted
+# FLEET runner is off the table (a fork PR could run untrusted code on a fleet box); this is a dedicated
+# enterprise runner, NOT a fleet box, and access is gated by the label + the backend-v* tag ruleset
+# (backend-release-tags, id 18524678) -- a fork PR cannot create a backend-v* tag, so untrusted code
+# never reaches it. The custom runner image (vivijure-bake-snapshot) ships the runtime base pre-pulled
+# into the docker daemon store (runner-snapshot.yml), so the FROM is a fast local cache hit and the bake
+# is assemble+push only. A stale or absent snapshot degrades to a one-time docker pull of the base --
+# SLOW, never WRONG. (Tag-push / dispatch only; a fork PR cannot create a backend-v* tag.)
 
 on:
   push:
@@ -58,10 +60,12 @@ env:
 
 jobs:
   build-and-push:
-    # vivijure-bake = the existing 1200 GB larger runner; it pulls the runtime base once (degrade-to-
-    # slow). Flip this label to the snapshot-image runner once infra onlines it (the runtime base is
-    # pre-pulled into that image's docker cache -> assemble+push only). Accelerator only; identical output.
-    runs-on: vivijure-bake
+    # vivijure-bake-snap = the enterprise snapshot runner; the runtime base is pre-pulled into the
+    # runner image docker daemon store, so the FROM is a local cache hit (assemble+push only, no cold
+    # base pull). Access control = this label + the backend-v* tag ruleset (backend-release-tags); a
+    # fork PR cannot create a backend-v* tag. A stale or absent snapshot degrades to a one-time base
+    # pull -- SLOW, never WRONG. Accelerator only; identical output.
+    runs-on: vivijure-bake-snap
     timeout-minutes: 180
     steps:
       - name: Checkout repository
@@ -113,8 +117,8 @@ jobs:
 
       # Build context is the repo ROOT (COPY src/ resolves). deploy/Dockerfile is `FROM the pinned
       # runtime base` + COPY src, selected by VJ_BAKE_PRECISION -- NO R2 stage, NO bin-pack, NO weight
-      # COPY here. On the snapshot runner the runtime base is pre-cached (assemble+push only); on
-      # vivijure-bake it is a one-time docker pull (SLOW, never WRONG). Load into the local daemon
+      # COPY here. On the snapshot runner the runtime base is pre-cached (assemble+push only); on a
+      # cold or stale runner it is a one-time docker pull (SLOW, never WRONG). Load into the local daemon
       # (not pushed) so the per-layer gate + app import smoke run before publish.
       - name: Build baked worker image
         uses: docker/build-push-action@v6
