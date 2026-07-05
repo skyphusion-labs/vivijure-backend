@@ -258,10 +258,28 @@ def test_assert_finish_shas_fails_when_file_missing(tmp_path):
 
 def test_dockerfile_runs_the_finish_sha_gate_before_the_sentinel():
     """assert-finish-shas must run in the same && chain that gates the .vj-baked write, so the sentinel
-    can never be stamped over a corrupted/substituted facexlib weight."""
-    df = (Path(__file__).resolve().parents[1] / "deploy" / "Dockerfile").read_text()
+    can never be stamped over a corrupted/substituted facexlib weight. (#537 Shape Y: the weight bake +
+    its gates live in the RUNTIME base, deploy/runtime.Dockerfile, not the slim consumer Dockerfile.)"""
+    df = (Path(__file__).resolve().parents[1] / "deploy" / "runtime.Dockerfile").read_text()
     assert "assert-finish-shas" in df
     assert df.index("assert-finish-shas") < df.index("/opt/models/.vj-baked")
+    # the union-keyed manifest sha256 gate must ALSO run before the sentinel (#537 byte-identity gate):
+    # a stale/substituted weight layer fails LOUD before .vj-baked is ever trusted.
+    assert "sha256sum -c weights-manifest.sha256" in df
+    assert df.index("sha256sum -c weights-manifest.sha256") < df.index("/opt/models/.vj-baked")
+
+
+def test_consumer_dockerfile_is_from_runtime_with_no_weight_bake():
+    """#537 Shape Y: the consumer deploy/Dockerfile is FROM the pinned runtime base + COPY src only --
+    it must NOT re-bake weights (no seed COPY, no assert chain, no .vj-baked stamp); those belong to
+    the runtime base so a src-only release inherits + dedups them."""
+    df = (Path(__file__).resolve().parents[1] / "deploy" / "Dockerfile").read_text()
+    assert "vivijure-backend-runtime" in df, "consumer must FROM the runtime base"
+    assert "COPY src/vivijure_backend" in df
+    # no weight-bake in the consumer: the assert chain + weight COPY belong to the runtime base, so a
+    # src-only release inherits + dedups them (a mention in a comment is fine; a RUN/COPY is not).
+    assert "assert-weights" not in df, "the consumer must not run the weight-bake gate (the runtime does)"
+    assert "seed-bins" not in df and "COPY --from=seed" not in df, "no weight bake in the consumer"
 
 
 def test_stage_script_asserts_the_manifest_pin_not_a_literal():
