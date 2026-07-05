@@ -34,13 +34,22 @@ on:
         required: true
         default: '1'
         type: string
+  # Monthly CVE-refresh FLOOR (#537 cadence): baked images rot -- CVEs + stale toolchains freeze in at
+  # bake time, and since every release inherits the runtime's layers, runtime age = shipped CVE posture.
+  # The scheduled run rebuilds WHATEVER is currently shipped (reads the pin, no drift) at the SAME tag
+  # with a fresh base/apt/pip-patch layer set, opens a RUNTIME_REF digest-bump PR, and re-triggers the
+  # snapshot. A deliberate toolchain bump still goes through the workflow_dispatch inputs above.
+  schedule:
+    - cron: '0 6 1 * *'   # 06:00 UTC, 1st of each month
 
 permissions:
-  contents: read
-  packages: write   # push the runtime image; pull the seed
+  contents: write         # push the auto-repin branch
+  packages: write         # push the runtime image; pull the seed
+  pull-requests: write    # open the RUNTIME_REF repin PR
+  actions: write          # re-trigger runner-snapshot (event-couple)
 
 concurrency:
-  group: runtime-build-${{ github.event.inputs.precision }}
+  group: runtime-build-${{ github.event.inputs.precision || 'scheduled' }}
   cancel-in-progress: false
 
 env:
@@ -60,9 +69,21 @@ jobs:
         id: cfg
         run: |
           set -eu
-          PREC='${{ github.event.inputs.precision }}'
-          MVER='${{ github.event.inputs.model_version }}'
-          TVER='${{ github.event.inputs.toolchain_version }}'
+          if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+            # CVE-refresh floor: rebuild WHATEVER is currently shipped -- read the bf16 pin from
+            # deploy/Dockerfile so a frozen cron input can never refresh a config nobody ships.
+            REF="$(grep -oE 'vivijure-backend-runtime:[0-9]+-(bf16|fp8)-t[0-9]+' deploy/Dockerfile | head -1)"
+            [ -n "${REF}" ] || { echo "::error::could not read a RUNTIME_REF pin from deploy/Dockerfile"; exit 1; }
+            TAG="${REF#*:}"                                  # e.g. 1-bf16-t1
+            MVER="${TAG%%-*}"                                # 1
+            PREC="$(printf '%s' "${TAG}" | cut -d- -f2)"     # bf16
+            TVER="${TAG##*-t}"                               # 1
+            echo "Scheduled CVE-refresh re-bake of the shipped runtime: ${TAG} (same tag, fresh layers)."
+          else
+            PREC='${{ github.event.inputs.precision }}'
+            MVER='${{ github.event.inputs.model_version }}'
+            TVER='${{ github.event.inputs.toolchain_version }}'
+          fi
           case "${PREC}" in fp8|bf16) ;; *) echo "::error::precision must be fp8 or bf16"; exit 1;; esac
           case "${MVER}" in ''|*[!0-9]*) echo "::error::model_version must be a positive integer"; exit 1;; esac
           case "${TVER}" in ''|*[!0-9]*) echo "::error::toolchain_version must be a positive integer"; exit 1;; esac
@@ -153,3 +174,47 @@ jobs:
             echo "ARG ${ARGNAME}=${IMG}:${{ steps.cfg.outputs.tag }}@${{ steps.push.outputs.digest }}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Auto-open (or update) the RUNTIME_REF repin PR so the new digest reaches deploy/Dockerfile with
+      # a human merge through the gate (#537 cadence). Uses GITHUB_TOKEN on a fixed, force-updated branch
+      # so re-bakes never pile up PRs. Graceful degrade: if the org "Actions can create PRs" setting is
+      # ever off, the branch is still pushed and we log a warning -- never a hard fail. The consumer pins
+      # by DIGEST; the snapshot below refreshes by TAG, so the two stay coherent.
+      - name: Open/update the RUNTIME_REF repin PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          PREC='${{ steps.cfg.outputs.precision }}'
+          ARGNAME="RUNTIME_REF_$(echo "$PREC" | tr '[:lower:]' '[:upper:]')"
+          NEWREF="${REGISTRY}/${OWNER}/${RUNTIME_IMAGE}:${{ steps.cfg.outputs.tag }}@${{ steps.push.outputs.digest }}"
+          BRANCH="auto/runtime-repin-${PREC}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout -B "${BRANCH}" origin/main
+          sed -i "s|ARG ${ARGNAME}=.*|ARG ${ARGNAME}=${NEWREF}|" deploy/Dockerfile
+          if git diff --quiet -- deploy/Dockerfile; then
+            echo "deploy/Dockerfile already pins ${NEWREF}; nothing to repin."
+            exit 0
+          fi
+          git add deploy/Dockerfile
+          git commit -m "build(bake): repin ${ARGNAME} to the re-baked runtime (#537 cadence)"
+          git push -f origin "${BRANCH}"
+          gh pr create --base main --head "${BRANCH}" \
+            --title "build(bake): repin ${ARGNAME} to the re-baked runtime (#537 cadence)" \
+            --body "Automated RUNTIME_REF digest bump from a runtime re-bake (${{ github.event_name }}). New base: ${NEWREF}. Merge through the gate to refresh the shipped CVE posture; the next backend release inherits it. Fixed branch (force-updated), so re-bakes do not pile up PRs." \
+            || echo "::warning::PR not auto-created (branch ${BRANCH} pushed; open it manually -- check the org Actions-create-PR setting)."
+
+      # Event-couple the runner snapshot (#537 cadence): its whole job is pre-pulling this runtime, so a
+      # new runtime digest should refresh the snapshot. Dispatches by TAG (now pointing at the new
+      # digest). Non-fatal if it cannot dispatch (the monthly snapshot cron is the backstop).
+      - name: Re-trigger the runner snapshot (event-couple)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          REF="${REGISTRY}/${OWNER}/${RUNTIME_IMAGE}:${{ steps.cfg.outputs.tag }}"
+          gh workflow run runner-snapshot.yml -f runtime_refs="${REF}" \
+            && echo "Dispatched runner-snapshot to pre-pull ${REF}." \
+            || echo "::warning::could not dispatch runner-snapshot (the monthly snapshot cron is the backstop)."

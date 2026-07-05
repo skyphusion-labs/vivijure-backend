@@ -30,6 +30,13 @@ everything). Full architecture: `docs/weights-base-and-snapshots.md`. The base b
 `workflow_dispatch` only on `vivijure-bake` (never fork-reachable). Promotion to prod is still the
 separate pod-staging verify gate (`docs/release-gate.md`) -- unchanged.
 
+**Re-bake cadence (CVE freshness):** the RUNTIME base is rebuilt monthly (a `runtime-build.yml` cron
+floor) plus on demand, because every release inherits its layers so runtime age = shipped CVE posture.
+The scheduled re-bake reads the currently shipped pin, rebuilds at the same tag with fresh layers, and
+auto-opens a `RUNTIME_REF` repin PR (a human merges). The runner snapshot is event-coupled to each
+re-bake (+ a monthly backstop). The SEED is exempt (content-addressed weight data, not software). Full
+policy: `docs/weights-base-and-snapshots.md`.
+
 | git tag | GHCR image | source commit | built | notes |
 |---|---|---|---|---|
 | backend-v0.4.1 | 0.4.1 | f3a0d41 | 2026-07-02 (GHA) | fix(verify): the pod-staging gate renders end to end -- #183 register the GPU pipeline for the verify render (route _pod_draft_render through worker.handler, the production entrypoint that registers the per-job pipeline; fixes the "no GPU Pipeline registered" the H200 watched pod hit in ~3s), #180+#182 loud verify_fatal {stage,missing} instead of a silent pre-emitter death, #181 cold-pull TTL 3000s + pod-state timing log. Emitter + R2 channel proven healthy on the pod (gpu_probe real H200 values, summary.json + events.ndjson in ~3s). Fixes on top of :0.4.0. |

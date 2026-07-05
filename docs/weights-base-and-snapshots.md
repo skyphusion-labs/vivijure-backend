@@ -109,3 +109,21 @@ consuming runner) is tracked in fleet-chezmoi #377.
 - Dedup: a 2nd consecutive src-only release build shows "layer already exists" on the inherited
   runtime + weight blobs.
 - Timed: a release bake on the snapshot runner vs the pre-split R2-stage bake.
+
+## Re-bake cadence (CVE freshness)
+
+Baked images rot: CVEs and stale toolchains freeze in at bake time. Post-Shape-Y this matters most for
+the RUNTIME base, because every released image inherits its layers, so **runtime age = shipped CVE
+posture**. The cadence policy (wired as `cron` triggers alongside `workflow_dispatch` on the existing
+dispatch workflows, no new machinery):
+
+| Artifact | Cadence | Mechanism |
+|---|---|---|
+| **RUNTIME base** | monthly floor + on-demand | `runtime-build.yml` cron (`0 6 1 * *`) reads the currently shipped `RUNTIME_REF_BF16` tag from `deploy/Dockerfile` and rebuilds at the SAME tag (fresh base/apt/pip-patch layers, new digest -- NO R2, weights come from the seed). It then auto-opens a `RUNTIME_REF` digest-bump PR (`auto/runtime-repin-<prec>`, force-updated, human merges through the gate) and re-triggers the snapshot. Deliberate toolchain bumps use the `workflow_dispatch` inputs (bump `-t<N>`). |
+| **RUNNER snapshot** | event-coupled + monthly backstop | `runtime-build.yml` dispatches `runner-snapshot.yml` on every successful re-bake (its whole job is pre-pulling the runtime). `runner-snapshot.yml` also has a monthly cron (`0 7 1 * *`) that reads the exact shipped pin as a safety net. Snapshot age as a health signal is infra's half (fleet-chezmoi #370). |
+| **SEED** | EXEMPT | The seed is content-addressed weight DATA, not software -- no CVE surface, rebuilt ONLY on a weight-set change. Do NOT add a periodic 87 GB restage. |
+
+Drift guard: the scheduled paths READ the current pin rather than carrying a frozen input, so a cron can
+never refresh a config nobody ships (that would LOOK like hygiene while doing nothing). The auto-repin
+PR degrades gracefully: if the org "Actions can create/approve PRs" setting is ever off, the branch is
+still pushed and the run logs a warning -- never a hard fail.
