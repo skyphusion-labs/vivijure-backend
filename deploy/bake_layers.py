@@ -51,6 +51,7 @@ SUBCOMMANDS
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -344,6 +345,46 @@ def reconstruct_symlinks(root: Path, log=print) -> int:
     return n
 
 
+def _sha256_file(path: Path) -> str:
+    """Stream-hash a file with sha256 (constant memory; handles multi-GB shards)."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write_manifest(bins_root: Path, out: Path, log=print) -> int:
+    """Emit a `sha256sum -c`-compatible manifest of every weight file across the bins, keyed by the
+    UNION path (the bin-NN/ prefix stripped), so the CONSUMING image can verify after its per-bin
+    COPY --from lands them all under one root:
+
+        cd /opt/models && sha256sum -c weights-manifest.sha256
+
+    Each bin-NN/ mirrors the file path relative to VJ_MODELS_ROOT (bin_pack invariant) and bin_pack
+    PARTITIONS the seed, so a union path appears in exactly one bin -- stripping the leading bin-NN/
+    yields a unique, deterministic key. Regular files only: symlinks are structure, not content, and
+    `sha256sum -c` would follow them to a blob already covered by its own entry. Sorted for a stable,
+    reviewable diff. This is the source-of-truth checksum the weights-base image carries; a byte
+    mismatch in a consumer build fails LOUD. Returns the number of files recorded."""
+    entries = []
+    for bin_dir in sorted(bins_root.glob("bin-*")):
+        if not bin_dir.is_dir():
+            continue
+        for rel, _sz in _walk_regular_files(bin_dir):
+            union = rel.as_posix()  # path relative to the bin == path relative to VJ_MODELS_ROOT
+            if union == out.name:
+                continue
+            entries.append((union, _sha256_file(bin_dir / rel)))
+    entries.sort(key=lambda e: e[0])
+    # sha256sum -c format: "<hex>  <path>" (two spaces); relative paths resolve against the
+    # verifier cwd (VJ_MODELS_ROOT).
+    out.write_text("".join(f"{sha}  {path}\n" for path, sha in entries))
+    log(f"bake_layers: wrote {len(entries)} weight file checksum(s) to {out} "
+        f"(union-keyed sha256; verify with `sha256sum -c` under VJ_MODELS_ROOT).")
+    return len(entries)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Bake-image layer bin-packer + per-layer GHCR gate.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -391,6 +432,12 @@ def main() -> None:
     p_n.add_argument("--src", required=True, type=Path)
     p_n.add_argument("--ceiling-gb", type=float, default=9.0)
 
+    p_m = sub.add_parser("manifest",
+                         help="write a union-keyed sha256sum -c manifest of the bins (weights-base gate)")
+    p_m.add_argument("--bins-root", required=True, type=Path,
+                     help="the bins dir (deploy/seed-bins) holding bin-NN/ subtrees")
+    p_m.add_argument("--out", required=True, type=Path, help="manifest output path")
+
     args = ap.parse_args()
     if args.cmd == "reconstruct-symlinks":
         reconstruct_symlinks(args.root)
@@ -412,6 +459,8 @@ def main() -> None:
         floor = -(-total // ceiling)
         print(f"total {total/1024**3:.1f} GB; >= {floor} bins at ceiling {args.ceiling_gb} GB "
               f"(add headroom; the Dockerfile fixes a generous bin count, empty bins are free).")
+    elif args.cmd == "manifest":
+        write_manifest(args.bins_root, args.out)
 
 
 if __name__ == "__main__":
