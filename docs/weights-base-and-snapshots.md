@@ -127,3 +127,9 @@ Drift guard: the scheduled paths READ the current pin rather than carrying a fro
 never refresh a config nobody ships (that would LOOK like hygiene while doing nothing). The auto-repin
 PR degrades gracefully: if the org "Actions can create/approve PRs" setting is ever off, the branch is
 still pushed and the run logs a warning -- never a hard fail.
+
+## Same-package runtime topology + digest retention (#537, dedup fix)
+
+The runtime base is published as a TAG in the CONSUMER's package -- `ghcr.io/skyphusion-labs/vivijure-backend:runtime-<modelver>-<precision>-t<toolchainver>` -- NOT a separate `vivijure-backend-runtime` package. Reason (proven by acceptance): GHCR FROM-inheritance dedup only works SAME-repo; a cross-package `FROM` re-uploads the runtime's ~87 GB of weight layers on every release push (buildx + GITHUB_TOKEN do not auto cross-repo layer-mount, even for public packages -- measured: 0 "Mounted from", 41 re-uploaded). With the runtime as a `runtime-*` tag in `vivijure-backend`, a release `FROM ghcr.io/.../vivijure-backend:runtime-...` is same-repo, so the runtime layers dedup as "Layer already exists" and only the app layer uploads. The runtime tag uploads the weights ONCE; every release after is app-only. The SEED stays its own package (`vivijure-backend-seed`) -- it is `COPY --from`'d (fresh layers), never inherited, so no mount is needed.
+
+**Digest retention (GC safety):** a pinned runtime digest MUST stay TAGGED in the package -- an untagged digest is garbage-collection bait, and GC-ing a runtime whose layers a released image depends on would break re-pulls. So: keep every `runtime-*` tag that any `deploy/Dockerfile` RUNTIME_REF still pins; the cadence auto-repin flow overwrites the SAME immutable content at the SAME tag (same-tag-new-digest for a CVE refresh) and must never delete a previous runtime tag until no release Dockerfile pins it.

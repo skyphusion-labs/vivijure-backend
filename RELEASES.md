@@ -26,7 +26,7 @@ Why: the weights + full runtime live in `vivijure-backend-runtime`, pinned by di
 (`vivijure-backend-seed`) is the only image that stages from R2, and only on a weight change. This
 makes a src-only release an assemble-and-push, stages R2 once per weight version, and keeps a
 toolchain/CUDA bump a deliberate, revalidated base build (repin, not a tag silently rebuilding
-everything). Full architecture: `docs/weights-base-and-snapshots.md`. The base builds are
+everything). Full architecture: `docs/weights-base-and-snapshots.md`. NOTE (#537 dedup fix): the runtime is a `runtime-*` TAG in the `vivijure-backend` package (not a separate package), so a release `FROM` it dedups same-repo; pinned runtime tags must be retained (untagged digests are GC-bait). The base builds are
 `workflow_dispatch` only on `vivijure-bake` (never fork-reachable). Promotion to prod is still the
 separate pod-staging verify gate (`docs/release-gate.md`) -- unchanged.
 

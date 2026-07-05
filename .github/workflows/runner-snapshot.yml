@@ -31,7 +31,7 @@ on:
       runtime_refs:
         description: 'Space-separated RUNTIME base refs to pre-pull (tag or tag@digest). bf16 is prod.'
         required: true
-        default: 'ghcr.io/skyphusion-labs/vivijure-backend-runtime:1-bf16-t1'
+        default: 'ghcr.io/skyphusion-labs/vivijure-backend:runtime-1-bf16-t1'
   # Monthly BACKSTOP (#537 cadence): the snapshot is normally refreshed by runtime-build.yml's
   # event-couple whenever a new runtime digest lands. This cron is the safety net (snapshot age is a
   # health signal -- infra's half, fleet-chezmoi #370). On a scheduled run it reads the exact shipped

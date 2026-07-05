@@ -5,7 +5,7 @@ name: Build runtime base image to GHCR (#537)
 # pinned, immutable SEED image. The consuming backend release (release.yml) is then just
 # `FROM this@digest` + COPY src, so a src-only release re-pushes ONLY the app layers.
 #
-#   ghcr.io/skyphusion-labs/vivijure-backend-runtime:<model_version>-<precision>-t<toolchain_version>
+#   ghcr.io/skyphusion-labs/vivijure-backend:runtime-<model_version>-<precision>-t<toolchain_version>  (a TAG in the vivijure-backend package)
 #
 # NO R2 here: the weights come from the seed image (seed-build.yml stages R2 exactly once per weight
 # version). A toolchain/CUDA rebuild of this image pulls the seed and the deterministic COPY --from
@@ -55,7 +55,8 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   OWNER: skyphusion-labs
-  RUNTIME_IMAGE: vivijure-backend-runtime
+  RUNTIME_IMAGE: vivijure-backend   # runtime is a `runtime-*` TAG in the CONSUMER's package
+                                    # so FROM-inheritance dedups same-repo (#537 fix)
 
 jobs:
   build-and-push:
@@ -72,12 +73,13 @@ jobs:
           if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
             # CVE-refresh floor: rebuild WHATEVER is currently shipped -- read the bf16 pin from
             # deploy/Dockerfile so a frozen cron input can never refresh a config nobody ships.
-            REF="$(grep -oE 'vivijure-backend-runtime:[0-9]+-(bf16|fp8)-t[0-9]+' deploy/Dockerfile | head -1)"
+            REF="$(grep -oE 'vivijure-backend:runtime-[0-9]+-(bf16|fp8)-t[0-9]+' deploy/Dockerfile | head -1)"
             [ -n "${REF}" ] || { echo "::error::could not read a RUNTIME_REF pin from deploy/Dockerfile"; exit 1; }
-            TAG="${REF#*:}"                                  # e.g. 1-bf16-t1
-            MVER="${TAG%%-*}"                                # 1
-            PREC="$(printf '%s' "${TAG}" | cut -d- -f2)"     # bf16
-            TVER="${TAG##*-t}"                               # 1
+            TAG="${REF#*:}"                                  # e.g. runtime-1-bf16-t1
+            CORE="${TAG#runtime-}"                           # 1-bf16-t1
+            MVER="${CORE%%-*}"                               # 1
+            PREC="$(printf '%s' "${CORE}" | cut -d- -f2)"    # bf16
+            TVER="${CORE##*-t}"                              # 1
             echo "Scheduled CVE-refresh re-bake of the shipped runtime: ${TAG} (same tag, fresh layers)."
           else
             PREC='${{ github.event.inputs.precision }}'
@@ -87,7 +89,7 @@ jobs:
           case "${PREC}" in fp8|bf16) ;; *) echo "::error::precision must be fp8 or bf16"; exit 1;; esac
           case "${MVER}" in ''|*[!0-9]*) echo "::error::model_version must be a positive integer"; exit 1;; esac
           case "${TVER}" in ''|*[!0-9]*) echo "::error::toolchain_version must be a positive integer"; exit 1;; esac
-          TAG="${MVER}-${PREC}-t${TVER}"
+          TAG="runtime-${MVER}-${PREC}-t${TVER}"
           echo "precision=${PREC}"                     >> "$GITHUB_OUTPUT"
           echo "model_version=${MVER}"                 >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}"                            >> "$GITHUB_OUTPUT"
