@@ -11,6 +11,37 @@ GitHub Actions in backend-v0.2.25 (#107) when Jenkins was decommissioned.
 > gap below -- those tags were cut on mindcrimes local clone, never pushed, and lost when
 > the box was released.
 
+## Cutting a release tag: check GHCR first (tags may trail GHCR, never collide)
+
+The GHCR image semver can run AHEAD of the git release tags, and a GHCR tag in our setup is
+immutable. Before cutting any `backend-v<X.Y.Z>` release tag, check GHCR for the next FREE semver
+and cut the tag there. A git tag MAY trail the GHCR semver; it must NEVER reuse one.
+
+**Why the drift exists.** `release.yml` also runs on `workflow_dispatch` with an explicit `version`
+input (see the header of that workflow). The runtime / snapshot bakes (the S19/S20 runner work)
+dispatch it against a tagless commit to publish an image at a chosen semver, so GHCR gains
+`ghcr.io/skyphusion-labs/vivijure-backend:<X.Y.Z>` tags that have no matching git tag. The GHCR
+package semver therefore advances past the `backend-v*` git tags.
+
+**Why a collision is not OK.** A tag push derives `<X.Y.Z>` from the tag name and pushes
+`vivijure-backend:<X.Y.Z>` (+ `:latest`). Pushing an `<X.Y.Z>` that already exists on GHCR collides
+with / overwrites the published image at that tag. So cutting `backend-v<X.Y.Z>` for a semver already
+on GHCR clobbers an existing image. Never do it.
+
+**The check (do this BEFORE `git tag`):**
+
+```bash
+gh api "/orgs/skyphusion-labs/packages/container/vivijure-backend/versions" \
+  --jq ".[].metadata.container.tags[]" | grep -E "^[0-9]+\.[0-9]+\.[0-9]+$" | sort -V | tail
+```
+
+(or the GHCR Packages UI.) Take the highest published semver, pick the next FREE one above it, and
+cut `backend-v<that>`. Do NOT assume the next number after the latest git tag is free.
+
+**Snapshot (2026-07-05):** git tags trail at `backend-v0.4.4`; GHCR is published through `0.4.7`. The
+next release tag is `backend-v0.4.8`, NOT `backend-v0.4.5` (0.4.5 / 0.4.6 / 0.4.7 are taken).
+
+
 ## Release contract (#537: the seed -> runtime -> backend chain)
 
 Since #537 the backend image is the top of a three-image chain, so a release does NOT rebuild the
