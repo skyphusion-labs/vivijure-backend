@@ -5,6 +5,7 @@ no docker. Shard sizes are faked with sparse files (truncate) so the suite stays
 bake_layers.py lives in deploy/ (standalone, off the src/ pythonpath), so it is imported by path."""
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 
@@ -129,3 +130,59 @@ def test_assert_no_tree_cache_survivor_fails(tmp_path):
     _tree_listing(hub, "models--SG161222--RealVisXL_V5.0", "ac93e0dd")
     with pytest.raises(SystemExit):
         bake_layers.assert_no_tree_cache(tmp_path)
+
+
+# --------------------------------------------------------------------------- write_manifest
+
+
+def _bins_with(tmp_path, files):
+    """Build a bins-root (bin-00.. ) holding {relpath: bytes}, via the real bin_pack."""
+    src = tmp_path / "_seed"
+    for rel, data in files.items():
+        pth = src / rel
+        pth.parent.mkdir(parents=True, exist_ok=True)
+        pth.write_bytes(data)
+    out = tmp_path / "bins"
+    bake_layers.bin_pack(src, out, bins=4, ceiling=int(9.0 * GB), min_gb=0.0)
+    return out
+
+
+def test_write_manifest_roundtrip(tmp_path):
+    files = {
+        "hf-cache/hub/models--X/blobs/aaa": b"first-shard-bytes",
+        "facexlib/detection.pth": b"finish-weight-bytes",
+    }
+    bins = _bins_with(tmp_path, files)
+    out = bins / "weights-manifest.sha256"
+    n = bake_layers.write_manifest(bins, out)
+    assert n == len(files)
+    lines = out.read_text().splitlines()
+    got = {path: sha for sha, _sep, path in (ln.partition("  ") for ln in lines)}
+    # union-keyed: the bin-NN/ prefix is stripped, keyed by the runtime (VJ_MODELS_ROOT) path
+    assert set(got) == set(files)
+    for rel, data in files.items():
+        assert got[rel] == hashlib.sha256(data).hexdigest()
+    # sha256sum -c wire format: 64 hex chars then exactly two spaces then the path
+    for ln in lines:
+        assert ln[64:66] == "  "
+    # sorted for a stable, reviewable diff
+    paths = [ln.partition("  ")[2] for ln in lines]
+    assert paths == sorted(paths)
+
+
+def test_write_manifest_excludes_symlinks_and_self(tmp_path):
+    src = tmp_path / "_seed"
+    blob = src / "hf-cache/hub/models--X/blobs/aaa"
+    blob.parent.mkdir(parents=True, exist_ok=True)
+    blob.write_bytes(b"real-shard")
+    snap = src / "hf-cache/hub/models--X/snapshots/rev"
+    snap.mkdir(parents=True, exist_ok=True)
+    (snap / "model.safetensors").symlink_to("../../blobs/aaa")
+    bins = tmp_path / "bins"
+    bake_layers.bin_pack(src, bins, bins=4, ceiling=int(9.0 * GB), min_gb=0.0)
+    out = bins / "weights-manifest.sha256"
+    n = bake_layers.write_manifest(bins, out)
+    # exactly one regular file; the symlink is structure (not content), and the manifest skips itself
+    assert n == 1
+    paths = [ln.partition("  ")[2] for ln in out.read_text().splitlines()]
+    assert paths == ["hf-cache/hub/models--X/blobs/aaa"]

@@ -1,0 +1,215 @@
+name: Build weights base image to GHCR (#537)
+
+# Build + push the WEIGHTS BASE image -- the versioned, source-of-truth carrier for the curated model
+# seed. This is the EXPENSIVE, RARE half of the bake, split out of release.yml so a backend-v* release
+# no longer re-stages ~87 GB from R2 every tag:
+#
+#   ghcr.io/skyphusion-labs/vivijure-weights-backend:<model_version>-<precision>   (+ an immutable
+#                                                                                    -<run> tag)
+#
+# This runs ONLY on workflow_dispatch (a weights bump is a deliberate, one-button act, not a per-commit
+# or per-tag event) -- so it is never fork-reachable and never runs untrusted code on the larger runner
+# (design law #5: snapshot/large-runner jobs are dispatch-gated only, larger runners bill).
+#
+# Runner: the org GitHub-hosted larger runner "vivijure-bake" (32-core / 128 GB / 1200 GB SSD) -- the
+# SAME lane release.yml uses. This build stages the seed from R2, reconstructs HF-cache symlinks,
+# bin-packs into <10 GB layers, WRITES THE UNION-KEYED SHA-256 MANIFEST, asserts a real (non-hollow)
+# weight set, builds the debian-slim carrier with the bins baked, per-layer-gates it, and pushes.
+# CPU-only, no GPU. The consuming backend Dockerfile pins the pushed tag+digest and verifies the
+# manifest. The runner snapshot (.github/workflows/runner-snapshot.yml) pre-pulls the pushed image.
+
+on:
+  workflow_dispatch:
+    inputs:
+      precision:
+        description: 'Baked weight precision (selects the R2 bake-seed prefix).'
+        required: true
+        default: bf16
+        type: choice
+        options: [bf16, fp8]
+      model_version:
+        description: 'Model set version -> the image tag prefix (bump on a weight-set change).'
+        required: true
+        default: '1'
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: weights-base-${{ github.event.inputs.precision }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: skyphusion-labs
+  WEIGHTS_IMAGE: vivijure-weights-backend
+  R2_BUCKET: vivijure
+
+jobs:
+  build-and-push:
+    runs-on: vivijure-bake
+    timeout-minutes: 180
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve config
+        id: cfg
+        run: |
+          set -eu
+          PREC='${{ github.event.inputs.precision }}'
+          MVER='${{ github.event.inputs.model_version }}'
+          case "${PREC}" in fp8|bf16) ;; *) echo "::error::precision must be fp8 or bf16"; exit 1;; esac
+          case "${MVER}" in ''|*[!0-9]*) echo "::error::model_version must be a positive integer"; exit 1;; esac
+          TAG="${MVER}-${PREC}"
+          echo "precision=${PREC}"                >> "$GITHUB_OUTPUT"
+          echo "model_version=${MVER}"            >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}"                       >> "$GITHUB_OUTPUT"
+          echo "immutable_tag=${TAG}-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "seed_prefix=bake-seed-${PREC}/"   >> "$GITHUB_OUTPUT"
+          echo "Building ${WEIGHTS_IMAGE}:${TAG} (precision=${PREC}, seed=bake-seed-${PREC}/)."
+
+      - name: Install rclone
+        run: curl -fsSL https://rclone.org/install.sh | sudo bash
+
+      # A read-only, per-CI R2 token scoped to the vivijure bucket (per-function key). Set
+      # R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT as repo or org Actions secrets -- NEVER
+      # a tracked file. Same credential release.yml uses.
+      - name: Configure rclone for R2
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        run: |
+          set -eu
+          : "${R2_ACCESS_KEY_ID:?missing R2_ACCESS_KEY_ID secret}"
+          : "${R2_SECRET_ACCESS_KEY:?missing R2_SECRET_ACCESS_KEY secret}"
+          : "${R2_ENDPOINT:?missing R2_ENDPOINT secret}"
+          mkdir -p "$HOME/.config/rclone"
+          umask 077
+          {
+            printf '[r2]\n'
+            printf 'type = s3\n'
+            printf 'provider = Cloudflare\n'
+            printf 'access_key_id = %s\n' "$R2_ACCESS_KEY_ID"
+            printf 'secret_access_key = %s\n' "$R2_SECRET_ACCESS_KEY"
+            printf 'endpoint = %s\n' "$R2_ENDPOINT"
+            printf 'acl = private\nno_check_bucket = true\n'
+          } > "$HOME/.config/rclone/rclone.conf"
+          echo "rclone configured (R2 creds present)."
+
+      - name: Stage bake seed from R2
+        run: |
+          set -eu
+          PREFIX='${{ steps.cfg.outputs.seed_prefix }}'
+          echo "Staging r2:${R2_BUCKET}/${PREFIX} -> ./_seed ..."
+          rclone copy "r2:${R2_BUCKET}/${PREFIX}" ./_seed \
+            --links --transfers 16 --checkers 16 \
+            --multi-thread-streams 8 --multi-thread-cutoff 100M \
+            --timeout 120s --contimeout 30s \
+            --stats 30s --stats-one-line
+          python deploy/bake_layers.py reconstruct-symlinks --root ./_seed
+          du -sh ./_seed || true
+          COUNT="$(find ./_seed -type f ! -name '*.rclonelink' | wc -l)"
+          if [ "${COUNT}" -eq 0 ]; then
+            echo "::error::staged bake seed is EMPTY (r2:${R2_BUCKET}/${PREFIX} has no files). Refusing"
+            echo "::error::to build a hollow weights base (#4). Populate the R2 seed prefix and re-run."
+            exit 1
+          fi
+          echo "staged ${COUNT} seed file(s)."
+
+      # Independent, host-side non-hollow gate (two signals: byte floor + a real shard) over the staged
+      # seed, BEFORE bin-pack. bin-pack's --precision floor is the first guard; this is the second.
+      - name: Assert a real (non-hollow) weight set
+        run: |
+          set -eu
+          python deploy/bake_layers.py assert-weights --root ./_seed \
+            --precision '${{ steps.cfg.outputs.precision }}'
+
+      - name: Bin-pack seed into <10GB layers
+        run: |
+          set -eu
+          python deploy/bake_layers.py bin --src ./_seed --out deploy/seed-bins --bins 24 --ceiling-gb 9.0 \
+            --precision '${{ steps.cfg.outputs.precision }}'
+          cat deploy/seed-bins/bake-bins.json
+
+      # The union-keyed sha256 manifest the consuming image verifies with `sha256sum -c`. Generated
+      # over the bins (post-pack) so it hashes the EXACT bytes that get baked.
+      - name: Write weights checksum manifest
+        run: |
+          set -eu
+          python deploy/bake_layers.py manifest --bins-root deploy/seed-bins \
+            --out deploy/seed-bins/weights-manifest.sha256
+          echo "manifest: $(wc -l < deploy/seed-bins/weights-manifest.sha256) file(s)."
+          # Free the pre-bin staging copy; the bins (hardlinked) are the build context.
+          rm -rf ./_seed
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build context is the repo ROOT (COPY deploy/seed-bins/... resolves). Load into the local daemon
+      # (not pushed yet) so the per-layer gate runs before publish.
+      - name: Build weights base image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/weights.Dockerfile
+          platforms: linux/amd64
+          pull: true
+          load: true
+          push: false
+          build-args: |
+            VJ_BAKE_PRECISION=${{ steps.cfg.outputs.precision }}
+            VJ_MODEL_VERSION=${{ steps.cfg.outputs.model_version }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WEIGHTS_IMAGE }}:${{ steps.cfg.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WEIGHTS_IMAGE }}:${{ steps.cfg.outputs.immutable_tag }}
+
+      # Authoritative per-layer gate: assert no image layer is >=10GB so GHCR will accept the push.
+      - name: Verify image layers under the 10GB GHCR ceiling
+        run: |
+          set -eu
+          IMG="${REGISTRY}/${OWNER}/${WEIGHTS_IMAGE}:${{ steps.cfg.outputs.tag }}"
+          python deploy/bake_layers.py verify-image --image "${IMG}" --ceiling-gb 10.0
+
+      - name: Push tags to GHCR
+        id: push
+        run: |
+          set -eu
+          IMG="${REGISTRY}/${OWNER}/${WEIGHTS_IMAGE}"
+          docker push "${IMG}:${{ steps.cfg.outputs.tag }}"
+          docker push "${IMG}:${{ steps.cfg.outputs.immutable_tag }}"
+          # The registry digest -- what the consuming Dockerfile pins after the tag (design law #2).
+          DIGEST="$(docker inspect --format '{{ index .RepoDigests 0 }}' "${IMG}:${{ steps.cfg.outputs.tag }}" | sed 's/.*@//')"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Pushed ${WEIGHTS_IMAGE}:${{ steps.cfg.outputs.tag }} (+ :${{ steps.cfg.outputs.immutable_tag }}) -- ${DIGEST}"
+
+      - name: Summary (pin these in deploy/Dockerfile)
+        run: |
+          IMG="${REGISTRY}/${OWNER}/${WEIGHTS_IMAGE}"
+          {
+            echo "## Weights base published"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| tag | \`${IMG}:${{ steps.cfg.outputs.tag }}\` |"
+            echo "| immutable tag | \`${IMG}:${{ steps.cfg.outputs.immutable_tag }}\` |"
+            echo "| digest | \`${{ steps.push.outputs.digest }}\` |"
+            echo "| precision | ${{ steps.cfg.outputs.precision }} |"
+            echo "| model_version | ${{ steps.cfg.outputs.model_version }} |"
+            echo ""
+            echo "Pin in \`deploy/Dockerfile\`:"
+            echo ""
+            echo '```dockerfile'
+            echo "ARG WEIGHTS_REF=${IMG}:${{ steps.cfg.outputs.tag }}@${{ steps.push.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
