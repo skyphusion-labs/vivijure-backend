@@ -93,8 +93,13 @@ jobs:
           echo "precision=${PREC}" >> "$GITHUB_OUTPUT"
           echo "Building ${WORKER_IMAGE}:${VER} (precision=${PREC}; FROM the pinned runtime base)."
 
+      # Use the DOCKER driver (not the default docker-container driver): its build cache IS the daemon
+      # image store, so a warm runtime base (from the runtime build / snapshot runner) is a local hit
+      # instead of a re-pull. Single-platform amd64 needs no docker-container features (#537 pull win).
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
 
       # GHCR auth uses the workflow's built-in GITHUB_TOKEN (packages:write above), not a long-lived
       # PAT. The package is linked to THIS repo, so GITHUB_TOKEN can push it -- least-privilege, blast
@@ -117,7 +122,9 @@ jobs:
           context: .
           file: deploy/Dockerfile
           platforms: linux/amd64
-          pull: true
+          # NO pull: true -- the FROM runtime base is digest-pinned (immutable), so pull-if-absent is
+          # as correct as pull-always and a local-store hit when the daemon is warm (#537 pull win).
+          pull: false
           load: true
           push: false
           build-args: |

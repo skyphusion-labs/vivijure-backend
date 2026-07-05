@@ -133,3 +133,14 @@ still pushed and the run logs a warning -- never a hard fail.
 The runtime base is published as a TAG in the CONSUMER's package -- `ghcr.io/skyphusion-labs/vivijure-backend:runtime-<modelver>-<precision>-t<toolchainver>` -- NOT a separate `vivijure-backend-runtime` package. Reason (proven by acceptance): GHCR FROM-inheritance dedup only works SAME-repo; a cross-package `FROM` re-uploads the runtime's ~87 GB of weight layers on every release push (buildx + GITHUB_TOKEN do not auto cross-repo layer-mount, even for public packages -- measured: 0 "Mounted from", 41 re-uploaded). With the runtime as a `runtime-*` tag in `vivijure-backend`, a release `FROM ghcr.io/.../vivijure-backend:runtime-...` is same-repo, so the runtime layers dedup as "Layer already exists" and only the app layer uploads. The runtime tag uploads the weights ONCE; every release after is app-only. The SEED stays its own package (`vivijure-backend-seed`) -- it is `COPY --from`'d (fresh layers), never inherited, so no mount is needed.
 
 **Digest retention (GC safety):** a pinned runtime digest MUST stay TAGGED in the package -- an untagged digest is garbage-collection bait, and GC-ing a runtime whose layers a released image depends on would break re-pulls. So: keep every `runtime-*` tag that any `deploy/Dockerfile` RUNTIME_REF still pins; the cadence auto-repin flow overwrites the SAME immutable content at the SAME tag (same-tag-new-digest for a CVE refresh) and must never delete a previous runtime tag until no release Dockerfile pins it.
+
+### The pull half (consuming the warm store)
+
+The upload win (same-package) is only half. The runner snapshot warms the DOCKER DAEMON image store,
+but `release.yml` built with the default buildx **docker-container** driver (whose cache is separate
+from the daemon store) AND `pull: true` (which re-pulls the FROM base every run) -- either alone
+defeats the warm cache. So `release.yml` uses the **docker driver** (its cache IS the daemon store)
+and drops `pull: true` (the FROM runtime is digest-pinned/immutable, so pull-if-absent is exactly as
+correct as pull-always and free when warm). Acceptance for a warmed build: the push log shows ZERO
+runtime-layer uploads (upload half, same-package) AND no re-pull of the FROM base (pull half, docker
+driver + local store hit).
