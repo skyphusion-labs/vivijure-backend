@@ -414,6 +414,16 @@ def run_finish_job(
     # never scatters its clips across two slug spellings ("My  Film" -> My_Film everywhere).
     clip_key_out = keys.finished_clip_key(project, shot_id)
     store.put_file(local_out, clip_key_out)
+    # #583 provenance: stamp the core-computed param-hash to `<clip_key_out>.hash` AFTER the artifact
+    # (artifact first, sidecar last -- the only safe order; studio CONTRACT.md 3.3.1). Opaque: write
+    # `output_hash` verbatim, never recompute it. Best-effort -- a failed sidecar only disables reuse (the
+    # core re-runs), it must NEVER fail a good render. Absent output_hash (legacy core) -> no sidecar.
+    output_hash = job.get("output_hash")
+    if output_hash:
+        try:
+            store.put_bytes(str(output_hash).encode("utf-8"), f"{clip_key_out}.hash", content_type="text/plain")
+        except Exception:  # noqa: BLE001 -- best-effort provenance; a miss = safe re-run, never a failed render
+            pass
 
     applied: list[str] = []
     if result.interpolated:

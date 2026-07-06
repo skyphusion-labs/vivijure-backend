@@ -18,8 +18,10 @@ class KFStore:
     """Serves a stand-in keyframe for any get; records puts (key, content_type)."""
     def __init__(self):
         self.gets: list[str] = []
-        self.puts: list[str] = []
+        self.puts: list[str] = []          # artifact (put_file) keys only
         self.cts: dict[str, str | None] = {}
+        self.order: list[tuple[str, str]] = []  # ("artifact"|"sidecar", key) -- write ordering
+        self.bodies: dict[str, bytes] = {}      # put_bytes payloads (the .hash sidecar)
 
     def get_file(self, key, dest):
         self.gets.append(key)
@@ -30,6 +32,12 @@ class KFStore:
         assert Path(path).exists(), f"uploading a nonexistent file: {path}"
         self.puts.append(key)
         self.cts[key] = content_type
+        self.order.append(("artifact", key))
+        return key
+
+    def put_bytes(self, data, key, *, content_type=None, metadata=None):
+        self.bodies[key] = data
+        self.order.append(("sidecar", key))
         return key
 
 
@@ -164,3 +172,55 @@ def test_finish_clip_key_outside_renders_is_rejected(tmp_path):
     with pytest.raises(HarnessError, match="clip_key"):
         h.run_finish_job(job, store=store, workdir=tmp_path)
     assert store.gets == []                            # rejected BEFORE any fetch
+
+
+# --- #583 provenance sidecar (run_finish_job) --------------------------------------------------
+
+@pytest.fixture
+def fake_finish(monkeypatch):
+    """Replace the GPU finish body + ModelServer so run_finish_job runs on CPU. finish_clip writes a
+    stub mp4 and returns a result with the fields the harness reads."""
+    import types as _t
+    from vivijure_backend import finish as _finish_mod
+
+    def _fake_finish_clip(shot_id, in_path, out_path, server, params=None):
+        Path(out_path).write_bytes(b"MP4")
+        return _t.SimpleNamespace(interpolated=True, face_restored=False, out_fps=32, frames_out=160)
+
+    monkeypatch.setattr(_finish_mod, "finish_clip", _fake_finish_clip)
+    monkeypatch.setattr("vivijure_backend.models.ModelServer", lambda *a, **k: object())
+
+
+def _finish_job(**over):
+    return {"action": "finish_clip", "project": "neon", "shot_id": "shot_01",
+            "clip_key": "renders/neon/clips/shot_01_i2v.mp4", "config": {"interpolation_factor": 2}, **over}
+
+
+def test_run_finish_job_stamps_sidecar_after_artifact_with_output_hash(tmp_path, fake_finish):
+    store = KFStore()
+    out = h.run_finish_job(_finish_job(output_hash="deadbeef"), store=store, workdir=tmp_path)
+    art = "renders/neon/clips/shot_01_finished.mp4"
+    hkey = f"{art}.hash"
+    assert out["clip_key"] == art
+    # the sidecar value is the hash VERBATIM, at <artifact>.hash (the progress channel also uses
+    # put_bytes, so assert on the .hash key specifically, not the whole bodies map)
+    assert store.bodies.get(hkey) == b"deadbeef"
+    # artifact FIRST, sidecar LAST (filter out the progress writes)
+    assert [x for x in store.order if x[1] in (art, hkey)] == [("artifact", art), ("sidecar", hkey)]
+
+
+def test_run_finish_job_writes_no_sidecar_without_output_hash(tmp_path, fake_finish):
+    store = KFStore()
+    h.run_finish_job(_finish_job(), store=store, workdir=tmp_path)
+    assert not any(k.endswith(".hash") for k in store.bodies)  # legacy core -> no sidecar, safe re-run
+
+
+def test_run_finish_job_sidecar_failure_never_fails_the_render(tmp_path, fake_finish):
+    class BoomStore(KFStore):
+        def put_bytes(self, data, key, *, content_type=None, metadata=None):
+            if key.endswith(".hash"):
+                raise RuntimeError("r2 down")  # only the sidecar fails, not the progress channel
+            return super().put_bytes(data, key, content_type=content_type, metadata=metadata)
+    store = BoomStore()
+    out = h.run_finish_job(_finish_job(output_hash="deadbeef"), store=store, workdir=tmp_path)
+    assert out["clip_key"].endswith("_finished.mp4")  # artifact up; sidecar miss is best-effort, no raise

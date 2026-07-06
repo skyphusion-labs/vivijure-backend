@@ -247,6 +247,7 @@ same RunPod endpoint.
 | `shot_id` | str | `"shot"` | Identifies the clip; part of the output key. |
 | `clip_key` | str | (required) | R2 key of the clip to finish. |
 | `config` | object | `{}` | The finishing knobs (below). |
+| `output_hash` | str | (optional) | The studio's #583 param-hash of this step's inputs. When present, the handler writes it VERBATIM to `<clip_key_out>.hash` AFTER the finished clip (artifact first, sidecar last) as the reuse-provenance stamp. Opaque here (never parsed/recomputed); absent -> no sidecar. A sidecar write is best-effort (a failure never fails the render). |
 
 `config` fields (a flat subset of [`FinishConfig`](configuration.md#finishconfig)):
 
