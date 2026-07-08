@@ -97,7 +97,7 @@ jobs:
           echo "Building ${RUNTIME_IMAGE}:${TAG} (precision=${PREC}; weights from the pinned seed)."
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # GHCR auth: pull the (public) seed image + push the runtime image. GITHUB_TOKEN, least-privilege.
       - name: Log in to GHCR
