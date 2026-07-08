@@ -76,7 +76,7 @@ jobs:
       # constant. A dispatch passes runtime_refs directly and skips this.
       - name: Checkout (scheduled pin read)
         if: github.event_name == 'schedule'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Resolve refs to pre-pull
         id: refs
