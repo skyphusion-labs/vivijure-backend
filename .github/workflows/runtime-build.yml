@@ -112,7 +112,7 @@ jobs:
       # sha256 manifest gate + assert-weights/finish-shas/no-tree-cache run before .vj-baked is stamped.
       # Load into the local daemon (not pushed yet) so the per-layer gate runs before publish.
       - name: Build runtime base image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/runtime.Dockerfile
