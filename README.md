@@ -155,6 +155,12 @@ prohibited; CSAM is also a crime (18 U.S.C. 1466A / 2252A). That bright line is 
 spine. The full policy is the
 [Vivijure Acceptable Use Policy](https://github.com/skyphusion-labs/vivijure/blob/main/docs/legal/ACCEPTABLE-USE.md).
 
+## Who this is for
+
+RunPod operators and Vivijure self-hosters who want datacenter GPU rendering (SDXL keyframes, image-to-video, LoRA training, film assembly) from a release-gated image.
+
+**Vivijure Studio:** https://vivijure.com · **Welcome demo:** https://vivijure.skyphusion.org/welcome · **Skyphusion Labs:** https://skyphusion.org
+
 ## Support
 
 Questions, bugs, or ideas? Start with this repo's [GitHub Issues](../../issues); see
