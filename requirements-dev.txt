@@ -1,5 +1,5 @@
 -r requirements.txt
-pytest>=8.0
+pytest>=9.1.1
 # Pillow renders the OpenPose pose-skeleton (keyframe._pose_skeleton, deferred-
 # imported) which test_keyframe exercises on CPU. The GPU image gets it via
 # deploy/requirements.txt; the test env needs it explicitly.
