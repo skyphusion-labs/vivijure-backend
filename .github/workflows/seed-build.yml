@@ -159,7 +159,7 @@ jobs:
       # Build context is the repo ROOT (COPY deploy/seed-bins/... resolves). Load into the local daemon
       # (not pushed yet) so the per-layer gate runs before publish.
       - name: Build seed image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/seed.Dockerfile

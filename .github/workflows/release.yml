@@ -121,7 +121,7 @@ jobs:
       # cold or stale runner it is a one-time docker pull (SLOW, never WRONG). Load into the local daemon
       # (not pushed) so the per-layer gate + app import smoke run before publish.
       - name: Build baked worker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/Dockerfile
