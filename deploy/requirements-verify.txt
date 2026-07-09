@@ -3,4 +3,4 @@
 # asserts on the pod's structured @event channel over SSH/HTTP; the GPU work happens ON the pod.
 runpod>=1.7.0
 requests>=2.32.0
-boto3>=1.34.0  # S1 live gate: read the run-scoped R2 verify summary.json + pass R2 creds to the pod
+boto3>=1.43.42  # S1 live gate: read the run-scoped R2 verify summary.json + pass R2 creds to the pod
