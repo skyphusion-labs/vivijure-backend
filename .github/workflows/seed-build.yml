@@ -53,7 +53,7 @@ jobs:
     timeout-minutes: 180
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Resolve config
         id: cfg
@@ -147,7 +147,7 @@ jobs:
           rm -rf ./_seed
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -159,7 +159,7 @@ jobs:
       # Build context is the repo ROOT (COPY deploy/seed-bins/... resolves). Load into the local daemon
       # (not pushed yet) so the per-layer gate runs before publish.
       - name: Build seed image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/seed.Dockerfile

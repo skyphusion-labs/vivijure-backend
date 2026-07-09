@@ -24,10 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Python environment
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: pip
@@ -41,9 +41,18 @@ jobs:
         run: pytest --cov=. --cov-report=xml:coverage.xml --cov-report=term
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: coverage.xml
           if-no-files-found: warn
           retention-days: 14
+
+  ci:
+    name: ci
+    needs: [coverage]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require coverage
+        run: test "${{ needs.coverage.result }}" = "success"
