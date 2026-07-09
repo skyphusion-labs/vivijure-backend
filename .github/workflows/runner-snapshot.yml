@@ -69,14 +69,14 @@ jobs:
 
       # buildx into the snapshot: the backend bake uses docker/build-push-action (BuildKit).
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # A scheduled backstop run has no inputs, so read the exact shipped runtime pin (tag@digest) from
       # deploy/Dockerfile -- the snapshot always pre-pulls whatever is actually released, never a drifted
       # constant. A dispatch passes runtime_refs directly and skips this.
       - name: Checkout (scheduled pin read)
         if: github.event_name == 'schedule'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Resolve refs to pre-pull
         id: refs
