@@ -5,6 +5,21 @@ pre-1.0: PATCH for fixes and backend-only tweaks, MINOR for new features). Entri
 newest-first. History before this file was introduced lives in the git tags; the recent
 releases are summarized below from that history.
 
+## [0.4.8] -- 2026-07-06
+
+**feat(finish): stamp the #583 param-hash sidecar after the finished clip (#224)**
+
+Ships the producer-side leg of the #583 provenance contract on the GPU backend: after a finished clip
+is written to R2, the worker writes an opaque `<outputKey>.hash` sidecar (artifact FIRST, sidecar LAST,
+best-effort) carrying the param hash the core passes in `output_hash`. Inert until the core sends
+`output_hash` (post the S25 core tag), so deploying this before the core is safe: no `output_hash` in the
+input means the worker skips stamping. Rolls up two intervening main commits: docs of the GHCR-vs-git-tag
+semver drift rule (#222) and the skyphusion-search corpus-sync notify on push (#223).
+
+Version note: image tags `0.4.5`/`0.4.6`/`0.4.7` were consumed on GHCR by 2026-07-05 snapshot-runner test
+dispatch builds (fc#377) and were never git-tagged or promoted; per the #222 drift rule this release takes
+the next FREE GHCR semver, `0.4.8`. Prod was on `:0.4.4` before this promote.
+
 ## [0.4.5] -- 2026-07-05
 
 **ci(release): point release.yml at the snapshot runner vivijure-bake-snap (fc#377)**

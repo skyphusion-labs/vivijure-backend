@@ -10,7 +10,7 @@
 
 # --- render engines (SDXL keyframe + Wan 2.2 i2v) : exact, pod-validated ---
 diffusers==0.38.0
-transformers==5.10.2
+transformers==5.13.0
 # huggingface_hub: PINNED (#206). Was unpinned (transitive via transformers/diffusers) and
 # drifted up to 1.x, which added an offline snapshot-completeness check
 # (_raise_if_incomplete_snapshot): it hard-fails when a baked tree listing names a curated-out
@@ -19,7 +19,7 @@ transformers==5.10.2
 # tested-with-pin doctrine). In-bounds for the stack: transformers 5.10.2 needs <2.0,>=1.5.0,
 # diffusers 0.38.0 needs >=0.34.0. Bump deliberately + re-validate on the pod, never by drift.
 huggingface_hub==1.22.0
-tokenizers==0.22.2
+tokenizers==0.23.1
 accelerate==1.13.0
 peft==0.19.1
 safetensors==0.8.0rc1
@@ -52,7 +52,7 @@ onnxruntime-gpu>=1.20
 
 # --- serverless SDK + R2 object I/O : floors (import-validated, not render-exercised) ---
 runpod>=1.6
-boto3>=1.34
+boto3>=1.43.42
 
 # --- finishing stage (RIFE interpolation + face restore) ---
 # av / PyAV: the imageio pyav plugin that finish_clip uses to decode/encode video clips.
