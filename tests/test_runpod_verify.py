@@ -1117,3 +1117,32 @@ def test_promote_image_skips_flush_and_smoke_when_disabled():
     assert out["imageName"] == "ghcr.io/x:2" and "flush" not in out and "smoke" not in out
     assert fake.endpoint_patches == []
     assert not any(c[0] == "POST" for c in fake.calls)
+
+
+def test_promote_smoke_uses_a_train_free_bundle_not_the_verify_render_bundle():
+    # #243: the post-promote smoke submits an action:preview job (train -> keyframes) and polls to
+    # terminal INSIDE smoke_timeout_s (1800s). Packet_Chase, the full verify render bundle, trains an
+    # 8800-step LoRA first (~131 min), so reusing it here can NEVER finish in the window -> every promote
+    # false-reds on a clean fresh worker. The smoke must default to a TRAIN-FREE bundle (no cast) whose
+    # preview fits the window.
+    assert rv.SMOKE_BUNDLE_KEY != "bundles/Packet_Chase.tar.gz"
+    fake = _PromoteFake("ghcr.io/x:2")
+    out = rv.promote_image("ghcr.io/x:2", api_key="k-1", transport=fake, clock=_mk_clock(),
+                           poll_sleep=lambda _s: None)
+    run_calls = [c for c in fake.calls if c[0] == "POST" and c[1].endswith("/run")]
+    assert run_calls, "smoke never submitted a /run job"
+    submitted = run_calls[0][2]["input"]
+    assert submitted["bundle_key"] == rv.SMOKE_BUNDLE_KEY == "bundles/Verify_Smoke.tar.gz"
+    assert submitted["project"] == rv.SMOKE_PROJECT == "verify-smoke"  # isolated from the verify render
+    assert submitted["action"] == "preview" and submitted["quality_tier"] == "draft"
+    assert out["smoke"]["status"] == "COMPLETED"
+
+
+def test_promote_smoke_bundle_and_project_are_overridable():
+    # An operator can still point the smoke elsewhere (a scratch bundle) without editing the prod default.
+    fake = _PromoteFake("ghcr.io/x:2")
+    rv.promote_image("ghcr.io/x:2", api_key="k-1", transport=fake, clock=_mk_clock(),
+                     poll_sleep=lambda _s: None,
+                     smoke_bundle_key="bundles/other_smoke.tar.gz", smoke_project="scratch")
+    submitted = [c for c in fake.calls if c[0] == "POST" and c[1].endswith("/run")][0][2]["input"]
+    assert submitted["bundle_key"] == "bundles/other_smoke.tar.gz" and submitted["project"] == "scratch"

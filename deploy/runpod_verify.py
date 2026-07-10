@@ -964,6 +964,18 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
 
 PROD_ENDPOINT_ID = "t9wcvlxh8rc5la"  # the production serverless endpoint (docs/release-gate.md)
 
+# The post-promote fresh-worker smoke MUST use a TRAIN-FREE bundle. `smoke_fresh_worker` submits an
+# action:preview job (the plan is train -> keyframes) and polls /status to terminal INSIDE
+# `smoke_timeout_s` (1800s). A bundle carrying cast characters trains a LoRA first -- Packet_Chase is
+# 8800 steps, ~131 min -- which can NEVER finish in that window, so the smoke reports FAILED even when a
+# fresh worker cold-provisioned and served the image cleanly: every promote false-reds (#243). This
+# bundle ships a storyboard.yaml with scenes and NO characters/registry.json, so the plan trains nothing
+# and the preview is a cheap keyframe render that still proves the fresh worker pulls + serves the image.
+# Its own project slug isolates the smoke's R2 state from the full verify render (no keyframe-reuse
+# cross-talk on the shared "verify" project).
+SMOKE_BUNDLE_KEY = "bundles/Verify_Smoke.tar.gz"
+SMOKE_PROJECT = "verify-smoke"
+
 # The image + endpoint config live on the RunPod REST v1 control plane; the run/status/health job API
 # lives on the v2 endpoint host. Both authenticate with the same Bearer RUNPOD_API_KEY.
 RUNPOD_REST_BASE = "https://rest.runpod.io/v1"
@@ -1185,7 +1197,7 @@ def smoke_fresh_worker(endpoint_id: str, *, transport: "Callable[..., Any]", hea
 
 def promote_image(image: str, *, endpoint_id: str = PROD_ENDPOINT_ID, api_key: str | None = None,
                   transport: "Callable[..., Any] | None" = None, flush: bool = True, smoke: bool = True,
-                  bundle_key: str = "bundles/Packet_Chase.tar.gz", project: str = "verify",
+                  smoke_bundle_key: str = SMOKE_BUNDLE_KEY, smoke_project: str = SMOKE_PROJECT,
                   clock: "Callable[[], float] | None" = None,
                   poll_sleep: "Callable[[float], None] | None" = None,
                   flush_timeout_s: float = 900.0, smoke_timeout_s: float = 1800.0,
@@ -1198,8 +1210,10 @@ def promote_image(image: str, *, endpoint_id: str = PROD_ENDPOINT_ID, api_key: s
     2. **Flush the warm worker pool** (``flush=True``): a repin alone does NOT recycle already-warm
        workers, so a busy endpoint keeps serving the old image (#209). Drain ``workersMax``->0, poll
        ``/health`` to zero, restore in a ``finally``.
-    3. **Smoke a fresh worker** (``smoke=True``): submit a draft-keyframe job and confirm a
-       freshly-provisioned worker serves the new image before reporting success.
+    3. **Smoke a fresh worker** (``smoke=True``): submit a TRAIN-FREE draft-keyframe job
+       (``smoke_bundle_key``, no cast/LoRA -> fits ``smoke_timeout_s``; a training bundle here
+       false-reds every promote, #243) and confirm a freshly-provisioned worker serves the new image
+       before reporting success.
 
     This is the ONLY path an image reaches prod (docs/release-gate.md); the caller gates it behind an
     explicit ``--promote`` go. ``transport``/``clock``/``poll_sleep`` are injected in tests (no network,
@@ -1236,8 +1250,8 @@ def promote_image(image: str, *, endpoint_id: str = PROD_ENDPOINT_ID, api_key: s
     # 3) Prove a freshly-provisioned worker serves the new image before the gate reports success.
     if smoke:
         result["smoke"] = smoke_fresh_worker(endpoint_id, transport=transport, headers=headers,
-                                            clock=clock, poll_sleep=poll_sleep, bundle_key=bundle_key,
-                                            project=project, timeout_s=smoke_timeout_s)
+                                            clock=clock, poll_sleep=poll_sleep, bundle_key=smoke_bundle_key,
+                                            project=smoke_project, timeout_s=smoke_timeout_s)
     return result
 
 
@@ -1316,6 +1330,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bundle-key", default="bundles/Packet_Chase.tar.gz",
                     help="R2 key of the draft project bundle the pod renders (VJ_VERIFY_BUNDLE_KEY)")
     ap.add_argument("--project", default="verify", help="verify project slug (VJ_VERIFY_PROJECT)")
+    ap.add_argument("--smoke-bundle-key", default=SMOKE_BUNDLE_KEY,
+                    help="R2 key of the TRAIN-FREE bundle the post-promote fresh-worker smoke renders "
+                         "(action:preview). MUST have no cast / no LoRA training so it fits "
+                         "smoke_timeout_s; a training bundle here false-reds every promote (#243)")
+    ap.add_argument("--smoke-project", default=SMOKE_PROJECT,
+                    help="project slug for the post-promote smoke render, isolating its R2 state from "
+                         "the full verify render (no keyframe-reuse cross-talk)")
     ap.add_argument("--key-prefix", default="verify",
                     help="R2 verify key prefix (VJ_VERIFY_KEY_PREFIX)")
     ap.add_argument("--sharpness-baseline", type=float, default=100.0,
@@ -1429,7 +1450,7 @@ def main(argv: list[str] | None = None) -> int:
                 report["promote"] = promote_image(
                     cfg.image, endpoint_id=args.promote_endpoint,
                     flush=not args.skip_flush, smoke=not args.skip_smoke,
-                    bundle_key=args.bundle_key, project=args.project,
+                    smoke_bundle_key=args.smoke_bundle_key, smoke_project=args.smoke_project,
                     clock=time.monotonic, poll_sleep=time.sleep)
                 report["promoted"] = True
             except Exception as e:  # noqa: BLE001 -- a promote fault is loud; teardown already ran
