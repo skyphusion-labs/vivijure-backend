@@ -5,6 +5,27 @@ pre-1.0: PATCH for fixes and backend-only tweaks, MINOR for new features). Entri
 newest-first. History before this file was introduced lives in the git tags; the recent
 releases are summarized below from that history.
 
+## [0.4.9] -- 2026-07-10
+
+**fix(finish): mux the source audio back after the RIFE finish (#240)**
+
+The finishing pass re-encodes each clip from a rawvideo rgb24 stdin stream, so its output was
+always video-only: there was no audio input, mapping, or mux in the module. Before core v0.17.0
+this was invisible (audio was laid on later), but since vivijure#595 dialogue shots lipsync FIRST
+(lipsync -> rife -> upscale), so MuseTalk muxes the dialogue audio into the clip that reaches
+finish and the RIFE re-encode silently discarded it. In prod the sound cut off at the musetalk
+shot and stayed dead for the rest of the film, because the silent segment poisons the stream-copy
+concat in assemble. Fix: after the interpolation encode, if the source clip carries an audio
+stream, mux it back onto the finished clip with a stream copy (ffmpeg -map 0:v -map 1:a? -c copy),
+the vivijure-upscale pattern; RIFE keeps wall-clock duration so the audio lines up 1:1. Honest
+failure (#245): a mux that fails FAILS the shot with the real error, never silently shipping a
+video-only clip when audio was present. An audio-less source is unchanged (no audio step, no
+failure).
+
+Version note: this is a src-only release (assemble + push from the pinned runtime base). GHCR is
+published through 0.4.8 and a GHCR tag is immutable, so per the #222 drift rule this release takes
+the next FREE GHCR semver, 0.4.9. Prod was on :0.4.8 before this promote.
+
 ## [0.4.8] -- 2026-07-06
 
 **feat(finish): stamp the #583 param-hash sidecar after the finished clip (#224)**
