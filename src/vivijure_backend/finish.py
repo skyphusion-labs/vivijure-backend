@@ -157,6 +157,12 @@ def finish_clip(
     the off-GPU `assemble` stream-copy concat stays valid across the whole render: a 1-frame or
     interpolation-skipped clip is encoded the SAME way as a fully interpolated one, so they never
     disagree on parameters and force the slow re-encode fallback.
+
+    Audio: the re-encode is fed a rawvideo stream and is therefore video-only, so if the SOURCE
+    clip carries an audio track (dialogue shots lipsync before finish since core v0.17.0, so
+    MuseTalk audio reaches this stage) it is muxed back onto the finished clip with a stream copy.
+    RIFE keeps the wall-clock duration fixed, so the audio lines up 1:1. If that mux fails the shot
+    FAILS loud (#245): it never silently ships a video-only clip when audio was present.
     """
     cfg = params or FinishParams()
     in_path, out_path = Path(in_path), Path(out_path)
@@ -188,7 +194,20 @@ def finish_clip(
 
     out_fps = output_fps(src_fps, cfg) if interpolated else src_fps
     frames_out = interpolated_frame_count(frames_in, cfg.factor) if interpolated else frames_in
-    _encode_uniform(_finished_stream(interp, frames, passes, progress_cb), out_path, out_fps)
+
+    # The re-encode rebuilds the clip from a rawvideo stream, so it is video-only. Dialogue shots
+    # now lipsync BEFORE finish (core v0.17.0 / vivijure#595: lipsync -> rife -> upscale), so
+    # MuseTalk muxes the dialogue audio onto `in_path`; without this step it is silently dropped and
+    # the shot -- plus every clip after it in the stream-copy concat -- plays silent (#240). RIFE
+    # keeps wall-clock duration fixed, so the source audio lines up 1:1 with the finished video.
+    has_audio = _source_has_audio(in_path)
+    encode_target = out_path.with_name(out_path.stem + ".noaudio" + out_path.suffix) if has_audio else out_path
+    _encode_uniform(_finished_stream(interp, frames, passes, progress_cb), encode_target, out_fps)
+    if has_audio:
+        # Honest failure (#245): a mux that fails RAISES; never ship a video-only clip when the
+        # source carried audio (a silent drop is exactly the defect this fixes).
+        _mux_audio(encode_target, in_path, out_path)
+        encode_target.unlink(missing_ok=True)
     return FinishResult(
         shot_id=shot_id, path=out_path, src_fps=src_fps, out_fps=out_fps,
         frames_in=frames_in, frames_out=frames_out,
@@ -342,6 +361,36 @@ def _encode_uniform(frames, out_path: Path, fps: int) -> None:
         rc = proc.wait()
     if rc != 0:
         raise RuntimeError(f"finish encode failed (encoder={encoder}, rc={rc})")
+
+
+def _source_has_audio(path: Path) -> bool:
+    """Whether the source clip carries an audio stream that must survive the finish re-encode.
+    Reuses the `assemble` probe so audio detection is defined once for the whole backend; the
+    deferred import keeps this module CPU-importable."""
+    from .assemble import probe_has_audio  # deferred: keep this module CPU-importable
+    return probe_has_audio(path)
+
+
+def _mux_audio_argv(video_path: Path, audio_src: Path, out_path: Path) -> list[str]:
+    """ffmpeg argv to remux the finished (video-only) clip with the audio track from `audio_src`,
+    copying both streams with NO re-encode. `-map 0:v` takes the finished video, `-map 1:a?` takes
+    the source audio (the optional `?` so a source that unexpectedly lost its audio still yields a
+    valid video-only file instead of a hard failure). Pure (no I/O) so it is unit-testable, the
+    upscale satellite's audio-copy pattern."""
+    return ["ffmpeg", "-v", "error", "-y",
+            "-i", str(video_path), "-i", str(audio_src),
+            "-map", "0:v", "-map", "1:a?", "-c", "copy", str(out_path)]
+
+
+def _mux_audio(video_path: Path, audio_src: Path, out_path: Path) -> None:
+    """Remux the finished video-only clip with `audio_src`'s audio (`-c copy`) into `out_path`.
+    Honest failure (#245): a mux that fails RAISES rather than silently shipping a video-only clip
+    when the source carried audio -- the exact silent drop this fixes."""
+    import subprocess  # deferred: keep this module CPU-importable
+    proc = subprocess.run(_mux_audio_argv(video_path, audio_src, out_path),
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"finish audio mux failed (rc={proc.returncode}): {proc.stderr.strip()[-500:]}")
 
 
 def _tick(progress_cb, stage: str, done: int, total: int) -> None:

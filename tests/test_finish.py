@@ -20,6 +20,7 @@ from vivijure_backend.config import FaceRestore, FinishConfig, RenderConfig
 from vivijure_backend.finish import (
     FinishParams,
     _encoder_argv,
+    _mux_audio_argv,
     interpolated_fps,
     interpolated_frame_count,
     interpolation_passes,
@@ -278,11 +279,13 @@ class _EncodeRecorder:
         self.frames = None
         self.fps = None
         self.was_generator = None
+        self.out_path = None
 
     def __call__(self, frames, out_path, fps):
         self.was_generator = isinstance(frames, types.GeneratorType)
         self.frames = list(frames)
         self.fps = fps
+        self.out_path = out_path
 
 
 class _patched_modules:
@@ -344,6 +347,7 @@ def test_encoder_argv_falls_back_to_libx264():
 def test_finish_clip_restores_then_interpolates_and_encodes_uniformly(tmp_path, monkeypatch):
     rec = _EncodeRecorder()
     monkeypatch.setattr(finish, "_encode_uniform", rec)
+    monkeypatch.setattr(finish, "_source_has_audio", lambda p: False)  # audio-less source path
     restorer = _RecordingRestorer()
     server = _FakeServer(interp=_FakeInterp(), restorer=restorer)
     params = FinishParams(interpolate=True, factor=2, face_restore=True,
@@ -368,6 +372,7 @@ def test_finish_clip_encodes_uniformly_even_with_no_passes_run(tmp_path, monkeyp
     # to the uniform form so the stream-copy concat survives it next to multi-frame finished clips.
     rec = _EncodeRecorder()
     monkeypatch.setattr(finish, "_encode_uniform", rec)
+    monkeypatch.setattr(finish, "_source_has_audio", lambda p: False)  # audio-less source path
     server = _FakeServer(interp=_FakeInterp())
     params = FinishParams(interpolate=True, factor=4)        # interpolation requested...
     with _patched_modules(_fake_imageio(_frames(1))):
@@ -396,5 +401,85 @@ def test_finish_clip_fails_loud_when_a_configured_restorer_cannot_load(tmp_path)
     params = FinishParams(face_restore=True, face_restore_backend="gfpgan")
     with _patched_modules(_fake_imageio(_frames(3))):
         with pytest.raises(RuntimeError, match="GFPGAN weights missing"):
+            finish.finish_clip("shot_01", tmp_path / "in.mp4", tmp_path / "out.mp4",
+                               server, params=params)
+
+
+# --------------------------------------------------- audio preservation (#240: RIFE dropped audio)
+
+class _MuxRecorder:
+    """Stands in for finish._mux_audio: records the (video, source, out) triple it is asked to mux,
+    so a test can assert the finished clip is remuxed with the SOURCE clip audio, without ffmpeg."""
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, video_path, audio_src, out_path):
+        self.calls.append((video_path, audio_src, out_path))
+
+
+def test_mux_audio_argv_copies_video_and_optional_source_audio():
+    # The finished (video-only) clip is input 0 (video), the source clip is input 1 (audio); both
+    # streams are copied (no re-encode), and `-map 1:a?` is optional so a silent source never fails.
+    argv = _mux_audio_argv("/tmp/fin.noaudio.mp4", "/tmp/src.mp4", "/tmp/out.mp4")
+    assert "/tmp/fin.noaudio.mp4" in argv and "/tmp/src.mp4" in argv
+    assert argv[-1] == "/tmp/out.mp4"
+    assert argv[argv.index("-c") + 1] == "copy"               # stream copy, no re-encode
+    maps = [argv[i + 1] for i, a in enumerate(argv) if a == "-map"]
+    assert maps == ["0:v", "1:a?"]                            # video from the clip, audio from source
+
+
+def test_finish_clip_muxes_source_audio_back_when_present(tmp_path, monkeypatch):
+    # #240: the rawvideo re-encode is video-only, so when the source clip carries audio (a dialogue
+    # shot lipsynced before finish) the finished clip must get that audio muxed back in.
+    rec = _EncodeRecorder()
+    mux = _MuxRecorder()
+    monkeypatch.setattr(finish, "_encode_uniform", rec)
+    monkeypatch.setattr(finish, "_source_has_audio", lambda p: True)
+    monkeypatch.setattr(finish, "_mux_audio", mux)
+    server = _FakeServer(interp=_FakeInterp())
+    params = FinishParams(interpolate=True, factor=2)
+    out = tmp_path / "out.mp4"
+    with _patched_modules(_fake_imageio(_frames(3))):
+        res = finish.finish_clip("shot_01", tmp_path / "in.mp4", out, server, params=params)
+    # the video was encoded to a video-only temp target, NOT straight to the delivered path
+    assert rec.out_path != out and rec.out_path.name == "out.noaudio.mp4"
+    # then the source clip audio was muxed onto that temp, landing at the delivered path
+    assert len(mux.calls) == 1
+    video_path, audio_src, out_path = mux.calls[0]
+    assert video_path == rec.out_path                         # the video-only temp
+    assert audio_src == tmp_path / "in.mp4"                   # audio comes from the SOURCE clip
+    assert out_path == out
+    assert res.path == out
+
+
+def test_finish_clip_skips_audio_step_when_source_is_silent(tmp_path, monkeypatch):
+    # An audio-less source keeps the old behavior exactly: encode straight to the output, no mux.
+    rec = _EncodeRecorder()
+    mux = _MuxRecorder()
+    monkeypatch.setattr(finish, "_encode_uniform", rec)
+    monkeypatch.setattr(finish, "_source_has_audio", lambda p: False)
+    monkeypatch.setattr(finish, "_mux_audio", mux)
+    server = _FakeServer(interp=_FakeInterp())
+    params = FinishParams(interpolate=True, factor=2)
+    out = tmp_path / "out.mp4"
+    with _patched_modules(_fake_imageio(_frames(3))):
+        res = finish.finish_clip("shot_01", tmp_path / "in.mp4", out, server, params=params)
+    assert rec.out_path == out                                # encoded straight to the delivered path
+    assert mux.calls == []                                    # no audio step
+    assert res.path == out
+
+
+def test_finish_clip_fails_loud_when_the_audio_mux_fails(tmp_path, monkeypatch):
+    # Honest failure (#245): if the source had audio and the mux fails, FAIL the shot -- never
+    # silently ship a video-only clip when audio was present.
+    def _boom(video_path, audio_src, out_path):
+        raise RuntimeError("finish audio mux failed (rc=1): moov atom not found")
+    monkeypatch.setattr(finish, "_encode_uniform", _EncodeRecorder())
+    monkeypatch.setattr(finish, "_source_has_audio", lambda p: True)
+    monkeypatch.setattr(finish, "_mux_audio", _boom)
+    server = _FakeServer(interp=_FakeInterp())
+    params = FinishParams(interpolate=True, factor=2)
+    with _patched_modules(_fake_imageio(_frames(3))):
+        with pytest.raises(RuntimeError, match="finish audio mux failed"):
             finish.finish_clip("shot_01", tmp_path / "in.mp4", tmp_path / "out.mp4",
                                server, params=params)
