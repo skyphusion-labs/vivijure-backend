@@ -120,6 +120,16 @@ pass, then rebuild.
   suspect the account quota and read the v1 error body, not the v2 500. (Seen S32, 2026-07-11:
   the account sat at 30/30, so the musetalk verify-rig endpoint create 500d until a slot was freed.)
 
+- **Direct `update-endpoint` mutations 500 on the v2 REST/MCP path (image AND scaling), and this is
+  NOT quota-masked.** Seen S32 (2026-07-11): repointing the prod musetalk endpoint image, and
+  separately raising its `workersMax` while inside quota (29 -> 30), BOTH returned bare 500s. Two
+  working paths instead: (a) **repoint the IMAGE by updating the endpoint's bound TEMPLATE**
+  (`update-template imageName`, digest-pin OK as `:<ver>@sha256:...`) -- it propagates to the running
+  endpoint, and that is how the prod pin actually lands; (b) **worker-count / scaling changes have no
+  template escape hatch** and must go through the **v1 REST API** (`RUNPOD_REST_VERSION=v1`), same as
+  the create path. Diagnostic tell: `update-template` on the same image SUCCEEDS while `update-endpoint`
+  500s -> it is the v2 endpoint-mutation fault, not your payload and not quota.
+
 ## See also
 
 The operator's view of the running system -- the cold-start model mirror, the R2 object-key map,
