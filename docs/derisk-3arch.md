@@ -214,7 +214,7 @@ export DERISK_DRIVER_B64="$(gzip -c deploy/vj_derisk.py | base64 -w0)"  # inject
 WRAP_B64="$(base64 -w0 deploy/derisk_read_wrapper.sh)"               # boto3->R2 read-path outer
 
 # --env is a JSON OBJECT (the fix): build it without echoing the secret.
-ENVJSON="$(python3 -c 'import os,json;print(json.dumps({k:os.environ[k] for k in ["DERISK_LABEL","DERISK_FIRE_TS","DERISK_INNER_B64","DERISK_DRIVER_B64","R2_S3_ENDPOINT","R2_S3_ACCESS_KEY_ID","R2_S3_SECRET_ACCESS_KEY","R2_S3_BUCKET"]}))')"
+ENVJSON="$(python3 -c 'import os,json;K=["DERISK_LABEL","DERISK_FIRE_TS","DERISK_INNER_B64","DERISK_DRIVER_B64","R2_S3_ENDPOINT","R2_S3_ACCESS_KEY_ID","R2_S3_SECRET_ACCESS_KEY","R2_S3_BUCKET"];d={k:os.environ[k] for k in K};L=os.environ.get("DERISK_EGRESS_LOCK");d.update({"DERISK_EGRESS_LOCK":L}) if L else None;print(json.dumps(d))')"
 TERM_AFTER="$(date -u -d '+60 minutes' +%Y-%m-%dT%H:%M:%SZ)"         # native hard TTL
 DC=US-KS-2   # probe DCs until one places; see the placement note above
 
@@ -296,3 +296,38 @@ To resume the #15 3-arch de-risk:
 5. Teardown: `runpodctl remove pod` each pod (output suppressed; NEVER `stop`/`get` -- they leak the
    env/secret to stdout) and REVOKE the throwaway exfil token.
    #5 serverless prod promote remains gated on Conrad.
+
+## Egress-locked render (#245): prove the userspace guard end-to-end
+
+The egress guard in `deploy/vj_derisk.py` is dormant unless `DERISK_EGRESS_LOCK` is set. To fire an
+egress-locked render that PROVES the guard end-to-end, `export DERISK_EGRESS_LOCK=1` in the fire shell
+BEFORE building `ENVJSON` (the builder above appends it to the pod `--env` ONLY when set, so a baseline
+run stays byte-identical). Then assert on the structured channel, never prose:
+
+- `@event derisk_meta ... "egress_lock": 1` -- the read-path outer stamps it, so the watcher confirms the
+  lock was active on THIS run (a baseline run stamps `"egress_lock": 0`).
+- `@event egress_guard_installed {"mode": "full_block", "allow": ["af_unix", "loopback"]}` at the top of
+  the render, before any model import or load.
+- `@event egress_guard_proven {"hf_blocked": true, "github_blocked": true, "ok": true}` (negative control)
+  and `@event egress_guard_sane {"loopback_ok": true, "ok": true}` (positive control).
+- a clean terminal `@event render_done` with `film_bytes > 0` AND `@event rclone_tripwire ... "fired":
+  false` under the lock: the render completed doing ZERO phone-home, ENFORCED at the socket layer, not
+  merely asserted from the baked architecture.
+
+A `$0` CPU-only pre-check of the guard alone (no GPU, no render) is `vj_derisk.py guard-probe`: it installs
+the guard and runs the same negative + positive controls, exit 0 iff proven, and emits
+`@event guard_probe {"proven": true}`. Run it with REAL network reachable so a blocked
+huggingface.co/github.com connect can only be the guard (with the guard OFF the same controls report the
+hosts reachable, the discriminator). Under `docker --network=none` it still passes but proves less (every
+connect fails regardless), so real-network is the meaningful mode.
+
+### Container disk floor (>= 500GB for the :0.4.x image)
+
+`--container-disk-in-gb` MUST be >= 500 for `ghcr.io/skyphusion-labs/vivijure-backend:0.4.x` (prod uses
+500). During image extract RunPod holds the ~110GiB downloaded layers AND the ~300GiB extracted rootfs on
+the container disk SIMULTANEOUSLY, so the peak is ~410GiB. A 400GB pod runs out of disk mid-extract and
+NEVER starts the container: it sits at `uptimeSeconds`=0 with an empty read path indefinitely, and NO
+error is surfaced (RunPod still shows `desiredStatus: RUNNING`, not a failure), so the only symptom is an
+eternally-pending pod. That invisible failure cost one wasted ~$1 fire on #245. Do NOT lower the disk to
+ease placement; raise it or do not fire. (The `--container-disk-in-gb 220` in the older per-card deploy
+section above was sized for `:0.3.1` and is too small for `:0.4.x`.)
