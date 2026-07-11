@@ -320,3 +320,14 @@ the guard and runs the same negative + positive controls, exit 0 iff proven, and
 huggingface.co/github.com connect can only be the guard (with the guard OFF the same controls report the
 hosts reachable, the discriminator). Under `docker --network=none` it still passes but proves less (every
 connect fails regardless), so real-network is the meaningful mode.
+
+### Container disk floor (>= 500GB for the :0.4.x image)
+
+`--container-disk-in-gb` MUST be >= 500 for `ghcr.io/skyphusion-labs/vivijure-backend:0.4.x` (prod uses
+500). During image extract RunPod holds the ~110GiB downloaded layers AND the ~300GiB extracted rootfs on
+the container disk SIMULTANEOUSLY, so the peak is ~410GiB. A 400GB pod runs out of disk mid-extract and
+NEVER starts the container: it sits at `uptimeSeconds`=0 with an empty read path indefinitely, and NO
+error is surfaced (RunPod still shows `desiredStatus: RUNNING`, not a failure), so the only symptom is an
+eternally-pending pod. That invisible failure cost one wasted ~$1 fire on #245. Do NOT lower the disk to
+ease placement; raise it or do not fire. (The `--container-disk-in-gb 220` in the older per-card deploy
+section above was sized for `:0.3.1` and is too small for `:0.4.x`.)
