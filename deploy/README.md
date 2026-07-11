@@ -107,6 +107,19 @@ hardware (H200 fp8 + fused 4-step i2v, H100 bf16 + CPU-offload, A6000 SDXL keyfr
 of that file records the last validation date. Change a pin only with a fresh GPU-validation
 pass, then rebuild.
 
+## RunPod account gotchas
+
+- **The serverless worker quota is ACCOUNT-WIDE (currently 30).** Every endpoint's `workersMax`
+  sums against the one account cap across ALL endpoints (backend + every satellite). At cap,
+  creating ANY new endpoint fails; free a slot first (temporarily lower an idle endpoint's
+  `workersMax` in a zero-traffic window), create, then RESTORE the borrowed slot.
+- **RunPod v2 create-endpoint masks a quota overage as an opaque `500 Internal Server Error`.**
+  The v2 REST/MCP path returns a bare 500 with no cause; the **v1 REST error body names the real
+  reason** (e.g. "Max workers across all endpoints must not exceed your workers quota (30)"). If an
+  endpoint create 500s while `create-template` on the same image SUCCEEDS (so the API is up),
+  suspect the account quota and read the v1 error body, not the v2 500. (Seen S32, 2026-07-11:
+  the account sat at 30/30, so the musetalk verify-rig endpoint create 500d until a slot was freed.)
+
 ## See also
 
 The operator's view of the running system -- the cold-start model mirror, the R2 object-key map,
