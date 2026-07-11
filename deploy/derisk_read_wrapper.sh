@@ -42,13 +42,19 @@ mkdir -p /workspace/out
 LOG=/workspace/out/derisk.log
 POD_ID="${RUNPOD_POD_ID:-unknown}"
 FIRE_TS="${DERISK_FIRE_TS:-unset}"
+# #245: stamp whether the userspace egress lock was requested, so a watcher can assert it was active
+# on this run. Normalized to 0/1 over the guard truthy set (1/true/yes/on), matching vj_derisk _flag_on.
+case "${DERISK_EGRESS_LOCK:-}" in
+  1|true|TRUE|yes|YES|on|ON) LOCK=1 ;;
+  *) LOCK=0 ;;
+esac
 BOOT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # Seed the persistent log with the identity stamp + the read-path self-proof. Both are written INTO the
 # log file (not PUT as a one-shot object body), so they survive every ~15s re-PUT instead of being
 # clobbered. A reader matches pod_id + fire_ts against the fire they recorded.
 {
-  printf '@event derisk_meta {"pod_id": "%s", "fire_ts": "%s", "boot_utc": "%s", "label": "%s"}\n' "$POD_ID" "$FIRE_TS" "$BOOT_UTC" "$DERISK_LABEL"
+  printf '@event derisk_meta {"pod_id": "%s", "fire_ts": "%s", "boot_utc": "%s", "label": "%s", "egress_lock": %d}\n' "$POD_ID" "$FIRE_TS" "$BOOT_UTC" "$DERISK_LABEL" "$LOCK"
   printf '@event derisk_boot {"label": "%s", "pod_id": "%s", "boot_utc": "%s"}\n' "$DERISK_LABEL" "$POD_ID" "$BOOT_UTC"
 } > "$LOG"
 

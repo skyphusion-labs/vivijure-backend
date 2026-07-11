@@ -211,6 +211,25 @@ def _maybe_lock_egress() -> int:
 
 # --------------------------------------------------------------------------- probe
 
+def guard_probe() -> int:
+    """CPU-only, $0 self-check of the egress guard (#245 Layer-1). Installs the userspace full-block
+    guard, then runs the negative (huggingface.co + github.com blocked) + positive (loopback still up)
+    controls, and returns 0 iff the guard is proven live. No GPU, no model load, no render: the guard is
+    thus independently fireable + assertable without a full render, so it can never silently regress to
+    dormant (that dormancy WAS #245). Emits @event egress_guard_installed / egress_guard_proven /
+    egress_guard_sane, then @event guard_probe {proven}.
+
+    Fire it with REAL network reachable: a blocked huggingface.co/github.com connect can then only be
+    the guard (not an absent network), and the same controls with the guard OFF report reachable (the
+    discriminator). Under docker --network=none it still passes but proves less (every connect fails
+    regardless), so real-network is the meaningful mode."""
+    _install_egress_guard()
+    proven = _egress_controls()
+    ev("guard_probe", proven=proven)
+    _check_tripwire("guard-probe")
+    return 0 if proven else 1
+
+
 def probe() -> int:
     """gpu_probe + baked-sentinel inspection. No render, no weight load past a tiny CUDA kernel."""
     models_root = os.environ.get("VJ_MODELS_ROOT", "/opt/models")
@@ -561,6 +580,7 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("arch-gate")
     sub.add_parser("probe")
+    sub.add_parser("guard-probe")
     r = sub.add_parser("render")
     r.add_argument("--aspect", choices=list(ASPECTS), required=True)
     r.add_argument("--tier", default="final")
@@ -574,6 +594,8 @@ def main() -> int:
         return arch_gate()
     if args.cmd == "probe":
         return probe()
+    if args.cmd == "guard-probe":
+        return guard_probe()
     return render(args.aspect, args.tier, args.out, args.frames, args.i2v_steps, args.kf_steps)
 
 
