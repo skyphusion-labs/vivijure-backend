@@ -35,8 +35,8 @@ stack), and the raw-fp32 contingency (~440 GB) needs the 1200 GB headroom.
 
 ```bash
 git push origin main
-git tag backend-v0.2.30 && git push origin backend-v0.2.30
-#   -> ghcr.io/skyphusion-labs/vivijure-backend:0.2.30 (+ :latest)
+git tag backend-v0.4.9 && git push origin backend-v0.4.9
+#   -> ghcr.io/skyphusion-labs/vivijure-backend:0.4.9 (+ :latest)
 ```
 
 Precision: a tag build reads `vars.VJ_BAKE_PRECISION` (default `fp8`); set it to `bf16` to cut a
