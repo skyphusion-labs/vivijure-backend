@@ -238,6 +238,13 @@ does not use the `RenderRequest` / `RenderResult` shapes above. The harness rout
 finishes it, and uploads the result. The studio's `finish-rife` module dispatches this action to the
 same RunPod endpoint.
 
+**Audio is preserved (#240).** The interpolation re-encode is video-only (it is fed a rawvideo stream),
+so if the SOURCE clip carries an audio track (e.g. a dialogue shot lip-synced before finish, so the
+MuseTalk audio reaches this stage), the finished clip muxes that track back with a stream copy; RIFE
+keeps wall-clock duration fixed, so the audio lines up 1:1. A mux that fails FAILS the shot with the
+real error (#245), never silently shipping a video-only clip when audio was present; a source with no
+audio track is returned unchanged (no audio step, no failure).
+
 **Input** (the job `input` dict):
 
 | Field | Type | Default | Notes |
