@@ -107,7 +107,7 @@ why it exists, and an example.
 | `R2_BUCKET` | The name of your R2 bucket. | The shared drop box. Must match the Studio's bucket. | `vivijure` |
 | `R2_ENDPOINT` | The web address of your R2 storage. | Tells the GPU where your bucket lives. Leave blank to build it from your account id. | `https://<accountid>.r2.cloudflarestorage.com` |
 | `CLOUDFLARE_ACCOUNT_ID` | Your Cloudflare account id. | Only used to build `R2_ENDPOINT` for you when you leave that blank. Not a secret. | `0123456789abcdef...` |
-| `BACKEND_IMAGE` | The published render image to run. | This is the ready-made image with models baked in. Leave as-is unless you forked the code. | `ghcr.io/skyphusion-labs/vivijure-backend:0.3.3` |
+| `BACKEND_IMAGE` | The published render image to run. | This is the ready-made image with models baked in. Leave as-is unless you forked the code. | `ghcr.io/skyphusion-labs/vivijure-backend:0.4.9` |
 | `GPU_TYPE_IDS` | The GPU card(s) allowed, comma-separated. | Lets the scheduler pick whichever big card has stock. See [Picking a GPU](#picking-a-gpu). | `NVIDIA H200,NVIDIA B200` |
 | `ENDPOINT_NAME` | The name shown in your RunPod dashboard. | Lets the script find and update the same endpoint on a re-run. | `vivijure-backend` |
 | `WORKERS_MAX` | The most workers that can run at once. | Each render holds one worker until it finishes; this caps how many renders run in parallel. | `3` |
