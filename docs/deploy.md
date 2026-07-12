@@ -135,7 +135,7 @@ the image. You normally never touch them. They are listed so the contract is com
 
 ### Advanced runtime toggles (leave alone unless you know why)
 
-The published `:0.3.3` image is self-contained, so you should never need these. They exist for
+The published image is self-contained, so you should never need these. They exist for
 people who build a custom image or want to tune the model path.
 
 | Variable | Default | What it does |

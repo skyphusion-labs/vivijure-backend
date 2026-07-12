@@ -7,11 +7,19 @@ page is the operator's view of the running system.
 
 ## The worker image
 
-A thin GPU runtime: CUDA 12.8 + torch cu128 (Blackwell-safe), the render stack, and the
-`vivijure_backend` package. It carries **no model weights** (those are hundreds of GB and
-arrive at job time from R2), so the image is ~1-2 GB after dependencies.
+A GPU runtime: CUDA 12.8 + torch cu128 (Blackwell-safe), the render stack, the `vivijure_backend`
+package, AND the curated model weights **baked into the image** (~87 GB bf16 for the datacenter image;
+#537). A baked worker carries its own weights, so it is datacenter-agnostic and pays no R2 cold-pull:
+it renders from the local cache, gated by the `.vj-baked` marker. The image chain (seed -> runtime ->
+backend) and why the weights are baked are in
+[weights-base-and-snapshots.md](weights-base-and-snapshots.md) and
+[cold-start-design.md](cold-start-design.md).
 
-What is baked in (and why it is not weights):
+> **Legacy / non-baked path.** An image WITHOUT the `.vj-baked` marker mirrors the weights from R2 at
+> job time (the mirror section below). That path is the fallback, kept for correctness; the shipped
+> image is baked and never touches it.
+
+Also baked in, alongside the weights:
 
 - **HuggingFace repo configs** (metadata only, no tensors) for the SDXL / ControlNet /
   IP-Adapter / Wan repos, plus `.no_exist` negative-cache stubs, so diffusers loads offline
@@ -30,42 +38,27 @@ delegates to `harness.handler` (mirror, R2 in, plan, GPU stages, off-GPU finish,
 
 Build and deploy are deliberately separate steps: a build does not touch the live endpoint.
 
-```mermaid
-flowchart LR
-    TAG["git tag<br/>backend-vX.Y.Z"] --> GHA["GitHub Actions<br/>(release.yml, tag trigger)"]
-    GHA --> BUILD["docker build<br/>deploy/Dockerfile"]
-    BUILD --> SMOKE["import smoke<br/>(CPU, in-image)"]
-    SMOKE --> PUSH["docker push<br/>GHCR :X.Y.Z + :latest"]
-    PUSH -. "manual, deliberate" .-> PIN["pin-runpod-template.py"]
-    PIN --> POD["RunPod endpoint<br/>(pulls on next cold start)"]
-```
-
 **Build (GitHub Actions, on a git tag).** A pushed `backend-vX.Y.Z` tag triggers
-`.github/workflows/release.yml`; a plain commit is a no-op. It builds `deploy/Dockerfile`, runs an in-image CPU import smoke test
-(`deploy/smoke_imports.py`, which catches a missing finishing-stage dep in seconds rather than
-after a 30-minute GPU render), and on success pushes
-`ghcr.io/skyphusion-labs/vivijure-backend:X.Y.Z` and `:latest` (the image tag drops the
-`backend-v` prefix).
+`.github/workflows/release.yml`; a plain commit is a no-op. The image is a chain (#537): a src-only
+release is **assemble + push only** (`FROM` the pinned runtime base + `COPY src`, on the
+`vivijure-bake-snap` snapshot runner), so it re-pushes ONLY the app layers while the runtime + baked
+weight layers dedup on GHCR. The runtime base (CUDA/torch + deps + the baked weights) is built
+separately by `runtime-build.yml` from an immutable seed image that stages R2 once per weight version.
+An in-image CPU import smoke (`deploy/smoke_imports.py`) catches a missing dep in seconds; on success
+the build pushes `ghcr.io/skyphusion-labs/vivijure-backend:X.Y.Z` + `:latest` (the tag drops the
+`backend-v` prefix). The full chain, the per-layer GHCR gate, and the re-bake cadence are in
+[weights-base-and-snapshots.md](weights-base-and-snapshots.md).
 
-```bash
-git push origin main
-git tag backend-v0.2.17 && git push origin backend-v0.2.17
-#   -> ghcr.io/skyphusion-labs/vivijure-backend:0.2.17 (+ :latest)
-```
+> Release lesson (see [RELEASES.md](../RELEASES.md)): the release step MUST push the tag to origin.
+> Tags cut on a local clone and never pushed are lost when the box goes away.
 
-> Release lesson (see [RELEASES.md](../RELEASES.md)): the release step MUST push the tag to
-> origin. Tags cut on a local clone and never pushed are lost when the box goes away.
-
-**Deploy (pin the RunPod template; separate + deliberate).** Pinning points the live endpoint
-at a built image; new workers pull it on their next cold start.
-
-```bash
-RUNPOD_API_KEY=... RUNPOD_TEMPLATE_ID=... \
-  python3 scripts/pin-runpod-template.py ghcr.io/skyphusion-labs/vivijure-backend:0.2.17
-```
-
-The pin script preserves the template's `containerRegistryAuthId` (the GHCR pull credential);
-dropping it would make RunPod fail the image pull even for a public image.
+**Deploy to production = the release-gate promote, not a manual pin.** An image reaches the production
+serverless endpoint ONLY by passing the automated pod-staging verify: `runpod-verify.yml` spins a GPU
+POD on the candidate image, runs the `@event` verify, and on PASS promotes it (repins the endpoint
+TEMPLATE, flushes + restores the warm worker pool, smokes a fresh worker). There is no manual
+"pin it and see" path to prod; the doctrine and the exact promote sequence are in
+[release-gate.md](release-gate.md). (`scripts/pin-runpod-template.py` still exists as a manual tool for
+your OWN or a staging endpoint; it is not the production promote path.)
 
 A CPU test gate (`pytest`) runs on every push / PR via GitHub Actions (`tests.yml`), independent of the
 tag-triggered release image build (`release.yml`). See [development.md](development.md).
@@ -97,8 +90,12 @@ The R2 token does double duty: the cold-start model mirror (`r2:<bucket>/models`
 
 ## The cold-start model mirror
 
-A cold worker has no weights; it mirrors them from R2 into the local HF cache, then renders
-offline. A warm worker reuses the on-disk cache and skips the mirror.
+> **This is the FALLBACK path (a non-baked image).** The shipped image bakes its weights (see "The
+> worker image" above), so a baked worker skips the mirror entirely via the `.vj-baked` marker. The
+> mirror below runs only for a legacy / non-baked image; it is kept for correctness.
+
+On a non-baked image a cold worker has no weights; it mirrors them from R2 into the local HF cache,
+then renders offline. A warm worker reuses the on-disk cache and skips the mirror.
 
 ```mermaid
 sequenceDiagram

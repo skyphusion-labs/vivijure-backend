@@ -151,7 +151,7 @@ skips the mirror entirely (**0 s staging**) and the first job lands instantly.
   network volume that covers an entire datacenter (see D). A single warm worker could be kept as a
   latency cushion later, but it is not the structural answer.
 
-### D. Preloaded per-datacenter network volumes  *(recommended)*
+### D. Preloaded per-datacenter network volumes  *(NOT taken -- superseded by the bake, Option A; analysis kept for the record)*
 
 Mount a RunPod network volume, preloaded with the weight set, on the serverless endpoint. A worker
 reads weights from the local volume at `/runpod-volume` instead of copying 223 GB from R2 -- so the
@@ -241,6 +241,11 @@ baked image the hot common path -- on every host, in every datacenter, with no R
 > run the structured-`@event` verify, promote only a passing image); the live gate is NOT built yet
 > and the workflow runs the harness dry-run only -- see `docs/release-gate.md` (status banner).
 > Pod = staging/debug; serverless = production.
+
+> **SUPERSEDED (kept for the record).** The two sections below -- "Open questions to settle before
+> building" and "Decision needed" -- pertain to Option D (network volumes), which was NOT taken. The
+> shipped path is the bake (Option A; see the status banner + "Recommendation (sequenced)"). They are
+> the abandoned volume plan, not live pending work.
 
 ## Open questions to settle before building
 
