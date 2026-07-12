@@ -4,11 +4,12 @@ How the backend bake stopped re-downloading ~87 GB of weights from R2 on every r
 custom runner snapshot makes a release bake assemble-and-push only. ICD-grade: reproducible from this
 doc alone.
 
-> **Status (2026-07-05, S19, Shape Y):** the SEED image + its build (`seed-build.yml`) and the RUNTIME
-> base + its build (`runtime-build.yml`) land first; the backend `deploy/Dockerfile` + `release.yml`
-> slim to `FROM runtime` + `COPY src` (follow-up PR, with the release-contract doc). The runner
-> snapshot pre-pulls the RUNTIME image. The image-generation runner is real
-> (`ubuntu-latest-32c-128gb-1200-gen`); enterprise scoping items are tracked in fleet-chezmoi #377.
+> **Status (updated S39, Shape Y SHIPPED):** the full chain is live. The SEED image (`seed-build.yml`)
+> and the RUNTIME base (`runtime-build.yml`) build separately, and the backend `deploy/Dockerfile` +
+> `release.yml` are slimmed to `FROM runtime@digest` + `COPY src` (shipped in #213). The release runs
+> on the `vivijure-bake-snap` snapshot runner (assemble + push only). The runner snapshot pre-pulls the
+> RUNTIME image; the image-generation runner is `ubuntu-latest-32c-128gb-1200-gen`. Enterprise scoping
+> items are tracked in fleet-chezmoi #377.
 
 ## Why (the problem)
 
@@ -67,7 +68,7 @@ bin layers) + the `sha256sum -c` manifest gate + `assert-weights`/`assert-finish
 `FROM runtime@digest` + `WORKDIR` + `COPY src` + `COPY smoke_imports.py` + `CMD`. Built by
 `release.yml` on a `backend-v*` tag. Every layer below `COPY src` is inherited from the runtime base
 by blob identity, so a src-only release **re-pushes only the app layers** ("layer already exists" on
-the runtime + weight blobs). Lands in the follow-up PR with the release-contract doc.
+the runtime + weight blobs). Shipped in #213 (`deploy/Dockerfile` is `FROM runtime@digest` + `COPY src`).
 
 ## Why this shape (Shape Y), not the alternatives
 
