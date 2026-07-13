@@ -5,6 +5,20 @@ pre-1.0: PATCH for fixes and backend-only tweaks, MINOR for new features). Entri
 newest-first. History before this file was introduced lives in the git tags; the recent
 releases are summarized below from that history.
 
+## [1.0.0] -- 2026-07-13
+
+**First stable release of the GPU render backend.** The clean-room RunPod serverless render engine
+(SDXL keyframes -> i2v -> assemble, plus LoRA training) that powers Vivijure Studio v1.0.0. The core
+render contract (`docs/CONTRACT.md`: bundle in, artifacts out) and the baked-image deploy path are
+stable. Ships on top of 0.4.9:
+
+- **fix(verify): promote smoke uses a TRAIN-FREE bundle (#243)** -- the promote self-check no longer
+  reuses the verify render bundle, so a promote can't be gated on a training path.
+- **docs(deploy):** RunPod v2 `update-endpoint` 500 + template-repoint trick and the account-quota /
+  v2-500-masking gotchas are banked in the deploy notes (#246, #247).
+
+Cut as part of the constellation-wide v1.0.0 milestone.
+
 ## [0.4.9] -- 2026-07-10
 
 **fix(finish): mux the source audio back after the RIFE finish (#240)**
