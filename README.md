@@ -1,5 +1,7 @@
 # vivijure-backend
 
+[![Runpod](https://api.runpod.io/badge/skyphusion-labs/vivijure-backend)](https://console.runpod.io/hub/skyphusion-labs/vivijure-backend)
+
 **The GPU render engine for Vivijure.** It rents a graphics card by the second on RunPod, and it
 does the heavy work of making a film: it trains a small face model for each character (a LoRA),
 draws a still picture for each shot (an SDXL keyframe), turns each still into motion

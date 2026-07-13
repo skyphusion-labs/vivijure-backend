@@ -1,0 +1,11 @@
+{
+  "tests": [
+    { "name": "health_probe", "input": { "action": "health" }, "timeout": 300000 }
+  ],
+  "config": {
+    "gpuTypeId": "NVIDIA H200",
+    "gpuCount": 1,
+    "env": [],
+    "allowedCudaVersions": ["12.8"]
+  }
+}

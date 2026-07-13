@@ -112,7 +112,7 @@ why it exists, and an example.
 | `ENDPOINT_NAME` | The name shown in your RunPod dashboard. | Lets the script find and update the same endpoint on a re-run. | `vivijure-backend` |
 | `WORKERS_MAX` | The most workers that can run at once. | Each render holds one worker until it finishes; this caps how many renders run in parallel. | `3` |
 | `WORKERS_MIN` | The fewest workers kept always-on. | Keep it `0` so an idle endpoint costs nothing. | `0` |
-| `CONTAINER_DISK_GB` | Scratch disk per worker, in GB. | The image is large, so the worker needs room. `100` is a safe floor. | `100` |
+| `CONTAINER_DISK_GB` | Scratch disk per worker, in GB. | The image is large, so the worker needs room. `500` is a safe floor. | `500` |
 | `IDLE_TIMEOUT` | Seconds a warm worker waits for the next job before shutting down. | A small buffer so back-to-back renders reuse a warm worker. | `5` |
 | `EXECUTION_TIMEOUT_MS` | Optional hard stop for a single job, in milliseconds. | A stuck job would otherwise hold a paid worker forever; this kills it. Leave blank for no limit. | `1800000` (30 min) |
 
