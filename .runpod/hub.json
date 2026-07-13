@@ -1,0 +1,23 @@
+{
+  "title": "Vivijure Backend",
+  "description": "The GPU render engine for Vivijure. It rents a high-VRAM GPU by the second to train a per-character face model (LoRA), draw an SDXL keyframe for each shot, turn each still into motion (image-to-video), and finish the result, then hands the video back to the Vivijure Studio control plane. Every model is baked into the image, so there is no build step and no model download. Requires a Cloudflare R2 bucket shared with your Studio.",
+  "type": "serverless",
+  "category": "video",
+  "iconUrl": "https://vivijure.skyphusion.org/favicon.svg",
+  "config": {
+    "runsOn": "GPU",
+    "gpuCount": 1,
+    "gpuIds": "BLACKWELL_180,HOPPER_141,-NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition,-NVIDIA RTX PRO 6000 Blackwell Server Edition,-NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    "containerDiskInGb": 500,
+    "allowedCudaVersions": ["12.8"],
+    "presets": [
+      { "name": "Standard (shared Studio bucket)", "defaults": { "R2_BUCKET": "vivijure" } }
+    ],
+    "env": [
+      { "key": "R2_ENDPOINT", "input": { "name": "R2 S3 endpoint", "type": "string", "description": "Your Cloudflare R2 S3 endpoint, e.g. https://<account-id>.r2.cloudflarestorage.com", "default": "" } },
+      { "key": "R2_ACCESS_KEY_ID", "input": { "name": "R2 access key ID", "type": "string", "description": "The public half of your R2 storage key.", "default": "" } },
+      { "key": "R2_SECRET_ACCESS_KEY", "input": { "name": "R2 secret access key", "type": "string", "description": "The secret half of your R2 storage key. Keep it private.", "default": "" } },
+      { "key": "R2_BUCKET", "input": { "name": "R2 bucket", "type": "string", "description": "The R2 bucket shared with your Vivijure Studio.", "default": "vivijure" } }
+    ]
+  }
+}
