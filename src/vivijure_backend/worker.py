@@ -116,10 +116,26 @@ def handler(job: dict) -> dict:
     finish_clip and i2v_clip actions skip pipeline registration: they use the ModelServer
     directly (RIFE/face-restore for finish, the Wan i2v pipeline for i2v_clip), so there is no
     render pipeline to register. i2v_clip still needs the Wan models, so it keeps the cold-start
-    i2v prefetch (gated only against finish_clip in harness.handler)."""
-    from .harness.handler import handler as harness_handler
+    i2v prefetch (gated only against finish_clip in harness.handler).
 
+    The `health` action is a lightweight readiness probe: it confirms this baked worker booted
+    with a live GPU, the cu128 kernel actually launches on THIS card, and the baked weights +
+    `.vj-baked` sentinel are on disk -- with NO R2, NO model load, and NO render. The RunPod Hub
+    build test (`.runpod/tests.json`) and any endpoint liveness check hit it. It short-circuits
+    BEFORE the harness import so a health job never fetches a bundle or registers a pipeline."""
     payload = job.get("input", job)
+
+    if str(payload.get("action", "render")) == "health":
+        from .verify import collect_gpu_facts, gpu_probe_payload
+        probe = gpu_probe_payload(collect_gpu_facts())
+        return {
+            "ok": bool(probe["torch_cuda"] and probe["kernel_ok"]
+                       and probe["vj_baked"] and probe["weights_on_disk"]),
+            "action": "health",
+            **probe,
+        }
+
+    from .harness.handler import handler as harness_handler
     if str(payload.get("action", "render")) not in ("finish_clip", "i2v_clip"):
         register_pipeline(build_pipeline(RenderRequest.from_dict(payload)))
     return harness_handler(job)
