@@ -30,7 +30,7 @@ flowchart TD
     slate[slate<br/>Discord screenwriter bot]
 
     subgraph core[The control plane]
-        studio[vivijure Studio<br/>projects, storyboard, cast,<br/>render orchestration + module registry]
+        studio[Vivijure Studio<br/>vivijure-cf or vivijure-local<br/>on vivijure-core]
     end
 
     subgraph modules[Modules: one job each, opt-in]
