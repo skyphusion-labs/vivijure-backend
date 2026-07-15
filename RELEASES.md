@@ -38,9 +38,13 @@ gh api "/orgs/skyphusion-labs/packages/container/vivijure-backend/versions" \
 (or the GHCR Packages UI.) Take the highest published semver, pick the next FREE one above it, and
 cut `backend-v<that>`. Do NOT assume the next number after the latest git tag is free.
 
+**Snapshot (2026-07-15):** git + GHCR both at **`1.0.1`** (`backend-v1.0.1`). Next free
+semver after that is `1.0.2` (always re-check GHCR before tagging; dispatch timing runs can
+still advance GHCR ahead of git).
+
 **Snapshot (2026-07-05):** git tags trail at `backend-v0.4.4`; GHCR is published through `0.4.7`. The
 next release tag is `backend-v0.4.8`, NOT `backend-v0.4.5` (0.4.5 / 0.4.6 / 0.4.7 are taken).
-
+(Historical; superseded by the 2026-07-15 line above.)
 
 ## Release contract (#537: the seed -> runtime -> backend chain)
 
@@ -69,6 +73,8 @@ re-bake (+ a monthly backstop). The SEED is exempt (content-addressed weight dat
 policy: `docs/weights-base-and-snapshots.md`.
 
 | git tag | GHCR image | source commit | built | notes |
+|---|---|---|---|---|
+| backend-v1.0.1 | 1.0.1 | 22cadfe | 2026-07-15 (GHA) | Runtime toolchain **t2** after Dependabot deps (#262: `safetensors==0.8.0`, `tokenizers==0.22.2`) + dual-warm bake lane (#263). `RUNTIME_REF_BF16` -> `runtime-1-bf16-t2@sha256:484e4627...`. Release run 29451414951: push shows Layer already exists on inherited runtime/weight layers. Digest `sha256:da037184...`. Conrad RunPod pin next (image tag only). |
 |---|---|---|---|---|
 | backend-v0.4.1 | 0.4.1 | f3a0d41 | 2026-07-02 (GHA) | fix(verify): the pod-staging gate renders end to end -- #183 register the GPU pipeline for the verify render (route _pod_draft_render through worker.handler, the production entrypoint that registers the per-job pipeline; fixes the "no GPU Pipeline registered" the H200 watched pod hit in ~3s), #180+#182 loud verify_fatal {stage,missing} instead of a silent pre-emitter death, #181 cold-pull TTL 3000s + pod-state timing log. Emitter + R2 channel proven healthy on the pod (gpu_probe real H200 values, summary.json + events.ndjson in ~3s). Fixes on top of :0.4.0. |
 |---|---|---|---|---|
