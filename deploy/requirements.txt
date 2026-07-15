@@ -34,7 +34,7 @@ torchao==0.17.0           # fp8 quant for the keyframe + i2v paths. NOTE: torcha
                           # fp8 cuda kernels as a speed follow-up (not a correctness blocker).
 imageio==2.37.3
 imageio-ffmpeg==0.6.0     # Wan frame export (diffusers.utils.export_to_video)
-av==13.1.0                # PyAV: the imageio plugin="pyav" backend finish.py uses for frame-
+av==18.0.0                # PyAV: the imageio plugin="pyav" backend finish.py uses for frame-
                           # accurate clip read/write (immeta/imiter/imwrite). Without it the
                           # finishing stage imports fine (imageio is present) but raises at
                           # runtime: "The `pyav` plugin is not installed". ships manylinux wheels
@@ -60,7 +60,7 @@ boto3>=1.43.42
 
 # --- finishing stage (RIFE interpolation + face restore) ---
 # av / PyAV: the imageio pyav plugin that finish_clip uses to decode/encode video clips.
-av==13.1.0
+av==18.0.0
 # gfpgan: blind face restorer (GFPGAN path, the default). Pulls basicsr + facexlib as transitive deps.
 gfpgan==1.3.8
 # facexlib: face detection for gfpgan (and the optional codeformer path). Pinned explicitly
