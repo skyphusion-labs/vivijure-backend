@@ -9,7 +9,7 @@
 # torch 2.7.1+cu128.
 
 # --- render engines (SDXL keyframe + Wan 2.2 i2v) : exact, pod-validated ---
-diffusers==0.38.0
+diffusers==0.39.0
 transformers==5.13.1
 # huggingface_hub: PINNED (#206). Was unpinned (transitive via transformers/diffusers) and
 # drifted up to 1.x, which added an offline snapshot-completeness check
