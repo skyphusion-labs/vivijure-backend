@@ -102,8 +102,14 @@ jobs:
           echo "immutable_tag=${TAG}-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
           echo "Building ${RUNTIME_IMAGE}:${TAG} (precision=${PREC}; weights from the pinned seed)."
 
+      # Use the DOCKER driver (not the default docker-container driver): its build cache IS the daemon
+      # image store, so the seed pre-pulled by the snapshot runner is a warm local hit for `FROM seed`
+      # instead of a re-pull. Same pull-half fix release.yml uses. Single-platform amd64 needs no
+      # docker-container features (#537 pull win).
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker
 
       # GHCR auth: pull the (public) seed image + push the runtime image. GITHUB_TOKEN, least-privilege.
       - name: Log in to GHCR
@@ -113,17 +119,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Build the runtime image. VJ_BAKE_PRECISION selects the pinned seed stage; the seed is pulled
-      # (cache-warm on the snapshot runner) and its 24 bin layers COPY --from into /opt/models, then the
-      # sha256 manifest gate + assert-weights/finish-shas/no-tree-cache run before .vj-baked is stamped.
-      # Load into the local daemon (not pushed yet) so the per-layer gate runs before publish.
+      # Build the runtime image. VJ_BAKE_PRECISION selects the pinned seed stage; the seed's 24 bin
+      # layers COPY --from into /opt/models, then the sha256 manifest gate + assert-weights/finish-shas/
+      # no-tree-cache run before .vj-baked is stamped. Load into the local daemon (not pushed yet) so the
+      # per-layer gate runs before publish.
       - name: Build runtime base image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/runtime.Dockerfile
           platforms: linux/amd64
-          pull: true
+          # NO pull: true -- the seed FROM is digest-pinned (immutable), so pull-if-absent is as correct
+          # as pull-always and a local-store hit when the snap runner's daemon is warm (#537 pull win).
+          # The nvidia/cuda base is absent on a fresh ephemeral runner, so it still pulls fresh (CVE
+          # refresh preserved); only the ~87 GB seed is served warm.
+          pull: false
           load: true
           push: false
           build-args: |

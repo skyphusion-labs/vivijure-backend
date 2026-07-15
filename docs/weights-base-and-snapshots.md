@@ -6,10 +6,11 @@ doc alone.
 
 > **Status (updated S39, Shape Y SHIPPED):** the full chain is live. The SEED image (`seed-build.yml`)
 > and the RUNTIME base (`runtime-build.yml`) build separately, and the backend `deploy/Dockerfile` +
-> `release.yml` are slimmed to `FROM runtime@digest` + `COPY src` (shipped in #213). The release runs
-> on the `vivijure-bake-snap` snapshot runner (assemble + push only). The runner snapshot pre-pulls the
-> RUNTIME image; the image-generation runner is `ubuntu-latest-32c-128gb-1200-gen`. Enterprise scoping
-> items are tracked in fleet-chezmoi #377.
+> `release.yml` are slimmed to `FROM runtime@digest` + `COPY src` (shipped in #213). Both heavy bakes
+> run on the `vivijure-bake-snap` snapshot runner: `release.yml` reads the warm RUNTIME base, and
+> `runtime-build.yml` reads the warm SEED (both `FROM`-warm, assemble + push only). The runner snapshot
+> pre-pulls BOTH the RUNTIME image and the SEED image; the image-generation runner is
+> `ubuntu-latest-32c-128gb-1200-gen`. Enterprise scoping items are tracked in fleet-chezmoi #377.
 
 ## Why (the problem)
 
@@ -86,13 +87,19 @@ the runtime + weight blobs). Shipped in #213 (`deploy/Dockerfile` is `FROM runti
 
 ## Runner snapshot (`runner-snapshot.yml`)
 
-Pre-pulls the pinned RUNTIME image + buildx + HF CLI into a larger-runner image via GitHub's
-job-level `snapshot:` keyword (custom images for larger runners, GA 2026-03), on the image-generation
-runner `ubuntu-latest-32c-128gb-1200-gen`. A release bake on a runner built from that image reads the
-runtime base cache-warm (a fast local `FROM`) instead of pulling it. **ACCELERATOR ONLY** (design law
-#3): the consumer pins the runtime by digest, so a stale snapshot degrades to a slow pull, never to a
-wrong image. Enterprise scoping (group grant + tag/workflow allowlist + the second, image-gen-OFF
-consuming runner) is tracked in fleet-chezmoi #377.
+Pre-pulls the pinned RUNTIME image **and the pinned SEED image** + buildx + HF CLI into a larger-runner
+image via GitHub's job-level `snapshot:` keyword (custom images for larger runners, GA 2026-03), on the
+image-generation runner `ubuntu-latest-32c-128gb-1200-gen`. Both heavy bakes run on a runner built from
+that image and read their `FROM` cache-warm instead of pulling ~87 GB:
+- `release.yml` (`FROM runtime@digest`) reads the warm RUNTIME base.
+- `runtime-build.yml` (`FROM seed` + 24x `COPY --from=seed`) reads the warm SEED.
+
+**ACCELERATOR ONLY** (design law #3): both consumers pin by digest, so a stale/absent snapshot degrades
+to a one-time slow pull, never to a wrong image (the `sha256sum -c` weights gate still fails a tampered
+layer loud). The dispatch input lists both refs; the scheduled backstop reads the shipped RUNTIME pin
+from `deploy/Dockerfile` and the SEED pin from `deploy/runtime.Dockerfile`. Enterprise scoping (group
+grant + tag/workflow allowlist + the second, image-gen-OFF consuming runner) is tracked in
+fleet-chezmoi #377.
 
 ## Rebuild triggers (summary; the full release contract lands with `release.yml`)
 
@@ -138,10 +145,17 @@ The runtime base is published as a TAG in the CONSUMER's package -- `ghcr.io/sky
 ### The pull half (consuming the warm store)
 
 The upload win (same-package) is only half. The runner snapshot warms the DOCKER DAEMON image store,
-but `release.yml` built with the default buildx **docker-container** driver (whose cache is separate
-from the daemon store) AND `pull: true` (which re-pulls the FROM base every run) -- either alone
-defeats the warm cache. So `release.yml` uses the **docker driver** (its cache IS the daemon store)
-and drops `pull: true` (the FROM runtime is digest-pinned/immutable, so pull-if-absent is exactly as
-correct as pull-always and free when warm). Acceptance for a warmed build: the push log shows ZERO
-runtime-layer uploads (upload half, same-package) AND no re-pull of the FROM base (pull half, docker
-driver + local store hit).
+but a build with the default buildx **docker-container** driver (whose cache is separate from the
+daemon store) AND `pull: true` (which re-pulls the FROM base every run) -- either alone defeats the
+warm cache. So **both** heavy bakes use the **docker driver** (its cache IS the daemon store) and drop
+`pull: true` (the FROM base is digest-pinned/immutable, so pull-if-absent is exactly as correct as
+pull-always and free when warm):
+- `release.yml`: warm `FROM runtime@digest`.
+- `runtime-build.yml`: warm `FROM seed` (the ~87 GB weights). On a fresh ephemeral snap runner the
+  `nvidia/cuda` base is still absent, so it pulls fresh each run -- CVE refresh of the OS base is
+  preserved; only the seed is served warm.
+
+Acceptance for a warmed release build: the push log shows ZERO runtime-layer uploads (upload half,
+same-package) AND no re-pull of the FROM base (pull half, docker driver + local store hit). For a warmed
+runtime build: the `FROM seed` step is a local-store hit (no ~87 GB pull) and the 24 weight layers
+dedup on the GHCR push ("layer already exists").
