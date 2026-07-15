@@ -22,7 +22,9 @@ huggingface_hub==1.22.0
 tokenizers==0.23.1
 accelerate==1.14.0
 peft==0.19.1
-safetensors==0.8.0rc1
+# diffusers 0.39.0 requires the stable safetensors 0.8.0 release; its 0.8.0rc1
+# predecessor does not satisfy >=0.8.0 and makes the runtime image unbuildable.
+safetensors==0.8.0
 torchao==0.17.0           # fp8 quant for the keyframe + i2v paths. NOTE: torchao 0.17 logs
                           # "skipping cpp extensions (needs torch>=2.11)" on the cu128/torch-2.7
                           # line; the fp8 quant still runs correctly (validated sharp on H200) via
