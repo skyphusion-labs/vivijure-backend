@@ -61,7 +61,7 @@ jobs:
     steps:
       # GHCR auth to pull the runtime base (public today, but least-privilege + private-safe).
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
