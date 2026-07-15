@@ -19,10 +19,14 @@ transformers==5.13.1
 # tested-with-pin doctrine). In-bounds for the stack: transformers 5.10.2 needs <2.0,>=1.5.0,
 # diffusers 0.38.0 needs >=0.34.0. Bump deliberately + re-validate on the pod, never by drift.
 huggingface_hub==1.22.0
-tokenizers==0.23.1
+# transformers 5.13.1 requires tokenizers<=0.23.0; PyPI never shipped 0.23.0 stable,
+# so 0.22.2 is the newest installable pin that satisfies the constraint.
+tokenizers==0.22.2
 accelerate==1.14.0
 peft==0.19.1
-safetensors==0.8.0rc1
+# diffusers 0.39.0 requires the stable safetensors 0.8.0 release; its 0.8.0rc1
+# predecessor does not satisfy >=0.8.0 and makes the runtime image unbuildable.
+safetensors==0.8.0
 torchao==0.17.0           # fp8 quant for the keyframe + i2v paths. NOTE: torchao 0.17 logs
                           # "skipping cpp extensions (needs torch>=2.11)" on the cu128/torch-2.7
                           # line; the fp8 quant still runs correctly (validated sharp on H200) via
