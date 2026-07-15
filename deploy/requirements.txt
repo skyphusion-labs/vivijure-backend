@@ -20,7 +20,7 @@ transformers==5.13.0
 # diffusers 0.38.0 needs >=0.34.0. Bump deliberately + re-validate on the pod, never by drift.
 huggingface_hub==1.22.0
 tokenizers==0.23.1
-accelerate==1.13.0
+accelerate==1.14.0
 peft==0.19.1
 safetensors==0.8.0rc1
 torchao==0.17.0           # fp8 quant for the keyframe + i2v paths. NOTE: torchao 0.17 logs
