@@ -1,11 +1,15 @@
 name: Build runner snapshot image (#537)
 
-# Bake a CUSTOM RUNNER IMAGE that pre-stages what a backend release bake needs, so the bake becomes
-# assemble + push only. This is the ACCELERATOR half of #537: it pre-pulls the pinned WEIGHTS BASE
-# image(s) + the build toolchain (buildx, Hugging Face CLI) into the runner image's docker cache /
+# Bake a CUSTOM RUNNER IMAGE that pre-stages what the backend bakes need, so they become
+# assemble + push only. This is the ACCELERATOR half of #537: it pre-pulls the pinned base image(s)
+# + the build toolchain (buildx, Hugging Face CLI) into the runner image's docker cache /
 # filesystem, then GitHub snapshots the runner into a reusable image (the `snapshot:` keyword, GA
-# 2026-03 for larger runners). A backend release then runs on a larger runner built from THIS image
-# and skips the ~87 GB base pull.
+# 2026-03 for larger runners). Both consuming bakes run on a larger runner built from THIS image:
+#   - release.yml   (FROM the RUNTIME base@digest)  -> the runtime image must be pre-pulled.
+#   - runtime-build.yml (FROM the SEED image + 24x COPY --from=seed) -> the SEED image must be
+#     pre-pulled, or a runtime rebuild cold-pulls the ~87 GB seed on every deps/CVE bump.
+# So the snapshot carries BOTH the runtime base AND the seed; each bake reads its FROM cache-warm and
+# skips the ~87 GB pull.
 #
 # ACCELERATOR ONLY (design law #3): the consuming backend Dockerfile pins the RUNTIME base by DIGEST
 # and verifies its sha256 manifest. If this snapshot's cached base is older than the pinned digest,
@@ -29,13 +33,13 @@ on:
   workflow_dispatch:
     inputs:
       runtime_refs:
-        description: 'Space-separated RUNTIME base refs to pre-pull (tag or tag@digest). bf16 is prod.'
+        description: 'Space-separated base refs to pre-pull (tag or tag@digest). Include BOTH the runtime base (release.yml FROM) AND the seed (runtime-build.yml FROM). bf16 is prod.'
         required: true
-        default: 'ghcr.io/skyphusion-labs/vivijure-backend:runtime-1-bf16-t1'
+        default: 'ghcr.io/skyphusion-labs/vivijure-backend:runtime-1-bf16-t1 ghcr.io/skyphusion-labs/vivijure-backend-seed:1-bf16@sha256:6c96ac5163d679786946a7f034ab446314dbde0c9f1a7c4b0f65403425aae971'
   # Monthly BACKSTOP (#537 cadence): the snapshot is normally refreshed by runtime-build.yml's
   # event-couple whenever a new runtime digest lands. This cron is the safety net (snapshot age is a
   # health signal -- infra's half, fleet-chezmoi #370). On a scheduled run it reads the exact shipped
-  # runtime pin from deploy/Dockerfile (no drift).
+  # runtime pin from deploy/Dockerfile AND the seed pin from deploy/runtime.Dockerfile (no drift).
   schedule:
     - cron: '0 7 1 * *'   # 07:00 UTC, 1st of each month (1h after the runtime re-bake floor)
 
@@ -71,9 +75,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      # A scheduled backstop run has no inputs, so read the exact shipped runtime pin (tag@digest) from
-      # deploy/Dockerfile -- the snapshot always pre-pulls whatever is actually released, never a drifted
-      # constant. A dispatch passes runtime_refs directly and skips this.
+      # A scheduled backstop run has no inputs, so read the exact shipped pins (tag@digest) from the
+      # committed Dockerfiles -- the snapshot always pre-pulls whatever is actually shipped, never a
+      # drifted constant: the RUNTIME base from deploy/Dockerfile (release.yml FROM) and the SEED from
+      # deploy/runtime.Dockerfile (runtime-build.yml FROM). A dispatch passes runtime_refs and skips this.
       - name: Checkout (scheduled pin read)
         if: github.event_name == 'schedule'
         uses: actions/checkout@v7
@@ -84,16 +89,19 @@ jobs:
           set -eu
           REFS="${{ github.event.inputs.runtime_refs }}"
           if [ -z "${REFS}" ]; then
-            REFS="$(grep '^ARG RUNTIME_REF_BF16=' deploy/Dockerfile | sed 's/^ARG RUNTIME_REF_BF16=//')"
-            [ -n "${REFS}" ] || { echo "::error::no runtime_refs input and no RUNTIME_REF_BF16 pin found"; exit 1; }
-            echo "Scheduled backstop: pre-pulling the shipped pin ${REFS}"
+            RT="$(grep '^ARG RUNTIME_REF_BF16=' deploy/Dockerfile | sed 's/^ARG RUNTIME_REF_BF16=//')"
+            SEED="$(grep '^ARG SEED_REF_BF16=' deploy/runtime.Dockerfile | sed 's/^ARG SEED_REF_BF16=//')"
+            [ -n "${RT}" ]   || { echo "::error::no runtime_refs input and no RUNTIME_REF_BF16 pin found"; exit 1; }
+            [ -n "${SEED}" ] || { echo "::error::no SEED_REF_BF16 pin found in deploy/runtime.Dockerfile"; exit 1; }
+            REFS="${RT} ${SEED}"
+            echo "Scheduled backstop: pre-pulling the shipped pins ${REFS}"
           fi
           echo "refs=${REFS}" >> "$GITHUB_OUTPUT"
 
-      # THE POINT: pull the pinned runtime base(s) so the ~100 GB image (toolchain + weights) lives in
-      # the runner's docker image store BEFORE the snapshot. A backend bake on the resulting runner
-      # then reads the base cache-warm (a fast local COPY --from) instead of pulling it.
-      - name: Pre-pull runtime base image(s) into the docker cache
+      # THE POINT: pull the pinned base image(s) -- the runtime base (release FROM) AND the seed
+      # (runtime-build FROM) -- so they live in the runner's docker image store BEFORE the snapshot.
+      # A backend bake on the resulting runner then reads its FROM cache-warm instead of pulling ~87 GB.
+      - name: Pre-pull base image(s) into the docker cache
         run: |
           set -eu
           for ref in ${{ steps.refs.outputs.refs }}; do
@@ -117,7 +125,7 @@ jobs:
       - name: Report cached state (what the snapshot will carry)
         run: |
           set -eu
-          echo "== docker images (runtime base should be present) =="
+          echo "== docker images (runtime base + seed should both be present) =="
           docker images --format '{{.Repository}}:{{.Tag}}  {{.Size}}' | sed -n '1,20p'
           echo "== buildx =="
           docker buildx version || true
