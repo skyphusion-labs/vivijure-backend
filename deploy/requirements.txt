@@ -19,7 +19,8 @@ transformers==5.13.1
 # tested-with-pin doctrine). In-bounds for the stack: transformers 5.10.2 needs <2.0,>=1.5.0,
 # diffusers 0.38.0 needs >=0.34.0. Bump deliberately + re-validate on the pod, never by drift.
 huggingface_hub==1.22.0
-tokenizers==0.23.1
+# transformers 5.13.1 requires tokenizers<=0.23.0; 0.23.1 makes the runtime image unbuildable.
+tokenizers==0.23.0
 accelerate==1.14.0
 peft==0.19.1
 # diffusers 0.39.0 requires the stable safetensors 0.8.0 release; its 0.8.0rc1
