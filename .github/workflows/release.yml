@@ -109,7 +109,7 @@ jobs:
       # PAT. The package is linked to THIS repo, so GITHUB_TOKEN can push it -- least-privilege, blast
       # radius of one workflow run.
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
