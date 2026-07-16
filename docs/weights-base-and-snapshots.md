@@ -60,9 +60,16 @@ bin layers) + the `sha256sum -c` manifest gate + `assert-weights`/`assert-finish
   (hf-configs runs BEFORE the weight `COPY --from`, both inside this image).
 - Two precisions from one Dockerfile via `FROM seed-${VJ_BAKE_PRECISION}` selection; both seed pins
   are authoritative in `runtime.Dockerfile` (tag + `@sha256`).
-- `COPY --from=seed@digest` is **deterministic** (fixed source bytes + metadata), so the 24 weight
-  layers reuse identical blobs across runtime rebuilds -> they dedup on GHCR. A toolchain/CUDA bump
-  rebuilds this image but pulls the seed (no R2) and re-pushes only the changed toolchain layers.
+- `COPY --from=seed` alone does **NOT** guarantee stable weight-layer digests across rebuilds.
+  BuildKit re-emitted ~101 GB of near-identical weight blobs under new digests on
+  `runtime-1-bf16-t2` (2026-07-15), which broke RunPod cold pulls (`unexpected EOF`) while
+  `:1.0.0` / t1 still loaded from host cache. **Deps-only toolchain bumps MUST use**
+  `deploy/runtime-overlay.Dockerfile` via `runtime-build.yml` input `overlay_from=<prior
+  runtime@digest>` so weight layers inherit by blob identity. Full `runtime.Dockerfile` rebuilds
+  stay for CUDA/torch/apt/seed changes; the overlay path runs
+  `bake_layers.py assert-shared-diff-ids` before push.
+- A toolchain/CUDA bump that is **deps-only** therefore re-pushes only the pip/patch layers on
+  GHCR and RunPod only pulls those (hundreds of MB), not another 100 GB weight set.
 
 ### 3. BACKEND (consumer) -- `ghcr.io/skyphusion-labs/vivijure-backend:<X.Y.Z>`
 

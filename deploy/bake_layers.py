@@ -44,6 +44,11 @@ SUBCOMMANDS
         layer is >= the ceiling. This is the authoritative check (the bin step is the prediction;
         this confirms the registry will accept the push). Run AFTER build, BEFORE push.
 
+  assert-shared-diff-ids  --image <ref> --base <ref> [--min-shared-gb 90]
+        Post-build gate for deps-overlay (and optional full-rebuild regression): fail unless
+        <image> shares most RootFS layer digests with <base>. Catches the t2 failure mode where
+        `COPY --from=seed` re-emitted ~101 GB of near-identical weight layers under new digests.
+
   bins-needed  --src <staged-seed> [--ceiling-gb 9.0]
         Print the minimum bin count for the staged seed (capacity planning; the Dockerfile fixes a
         generous bin count and empty bins are harmless zero-byte layers).
@@ -305,6 +310,61 @@ def verify_image(image: str, ceiling: int, log=print) -> int:
     return 0
 
 
+def _rootfs_diff_ids(image: str) -> list[str]:
+    """Uncompressed layer digests from a local docker image (RootFS.Layers)."""
+    out = subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{json .RootFS.Layers}}", image],
+        check=True, capture_output=True, text=True).stdout.strip()
+    ids = json.loads(out)
+    if not isinstance(ids, list) or not ids:
+        raise SystemExit(f"bake_layers: no RootFS.Layers on image {image}")
+    return ids
+
+
+def assert_shared_diff_ids(
+    image: str,
+    base: str,
+    min_shared_gb: float,
+    log=print,
+) -> int:
+    """Fail unless `image` shares enough RootFS layer digests with `base`.
+
+    Deps-overlay runtimes MUST inherit the base's weight layers by blob identity. A full
+    FROM-cuda rebuild that re-COPY --from=seed can emit NEW weight digests for near-identical
+    bytes (t2 vs t1, 2026-07-15: ~101 GB miss) and break RunPod cold pulls. This gate catches
+    that before push when an overlay/base ref is supplied.
+    """
+    a = set(_rootfs_diff_ids(image))
+    b = set(_rootfs_diff_ids(base))
+    shared = a & b
+    # docker history sizes are human; approximate shared mass via inspect Size is too coarse.
+    # Require a high shared *count* of layers AND that shared is most of the base's layers.
+    if not b:
+        log(f"FATAL: base image {base} has no RootFS layers")
+        return 1
+    shared_frac = len(shared) / len(b)
+    # Weight-heavy images: base has ~50+ layers; overlay should share nearly all of them.
+    # min_shared_gb is documented for operators; we enforce via fraction + absolute count
+    # because uncompressed size per diff_id is not in `docker image inspect` without history.
+    min_count = max(20, int(0.7 * len(b)))
+    if len(shared) < min_count or shared_frac < 0.7:
+        log(
+            f"FATAL: {image} shares only {len(shared)}/{len(b)} RootFS layers with {base} "
+            f"({shared_frac:.0%}; need >= {min_count} and >= 70%). "
+            f"Weight layers were likely re-emitted -- use deploy/runtime-overlay.Dockerfile "
+            f"for deps-only bumps, or fix COPY determinism before a full rebuild. "
+            f"(operator floor was {min_shared_gb} GB shared compressed blobs on GHCR.)"
+        )
+        only_new = len(a - b)
+        log(f"bake_layers: new-only layers={only_new} base-only={len(b - a)}")
+        return 1
+    log(
+        f"bake_layers: assert-shared-diff-ids OK -- {image} shares {len(shared)}/{len(b)} "
+        f"RootFS layers with {base} ({shared_frac:.0%}; new-only={len(a - b)})."
+    )
+    return 0
+
+
 def _human_to_bytes(s: str) -> float:
     """Parse a docker-history size like '9.31GB', '512MB', '0B' into bytes."""
     s = s.strip()
@@ -428,6 +488,19 @@ def main() -> None:
     p_v.add_argument("--image", required=True)
     p_v.add_argument("--ceiling-gb", type=float, default=10.0)
 
+    p_s = sub.add_parser(
+        "assert-shared-diff-ids",
+        help="assert image shares most RootFS layers with a base (deps-overlay / weight-dedup gate)",
+    )
+    p_s.add_argument("--image", required=True)
+    p_s.add_argument("--base", required=True, help="known-good runtime (e.g. runtime-1-bf16-t1@digest)")
+    p_s.add_argument(
+        "--min-shared-gb",
+        type=float,
+        default=90.0,
+        help="operator floor (documented); gate enforces shared RootFS layer count/fraction",
+    )
+
     p_n = sub.add_parser("bins-needed", help="print min bin count for a staged seed")
     p_n.add_argument("--src", required=True, type=Path)
     p_n.add_argument("--ceiling-gb", type=float, default=9.0)
@@ -453,6 +526,8 @@ def main() -> None:
         assert_no_tree_cache(args.root)
     elif args.cmd == "verify-image":
         sys.exit(verify_image(args.image, int(args.ceiling_gb * 1024**3)))
+    elif args.cmd == "assert-shared-diff-ids":
+        sys.exit(assert_shared_diff_ids(args.image, args.base, args.min_shared_gb))
     elif args.cmd == "bins-needed":
         ceiling = int(args.ceiling_gb * 1024**3)
         total = sum(sz for _, sz in _walk_regular_files(args.src))

@@ -143,11 +143,12 @@ RUN HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 HF_DATASETS_OFFLINE=0 \
 # and their union is the full HF-cache (hf-cache/hub/...) + finish-model tree (antelopev2/, rife/,
 # GFPGANv1.4/) the loaders read offline.
 #
-# COPY --from=seed@digest is DETERMINISTIC (fixed source bytes + metadata), so these 24 layers reuse
-# identical blobs across runtime rebuilds -> they dedup on GHCR even when a toolchain bump rebuilds
-# this image (no R2 re-stage: the seed already holds the bytes). And because the weights live in this
-# RUNTIME BASE, the consuming image's `COPY src` never busts them. CHANGING THE MODEL SET / PRECISION
-# = rebuild the SEED image + repin SEED_REF (tag+digest) above + bump VJ_MODEL_VERSION (below).
+# COPY --from=seed was documented as digest-stable across toolchain rebuilds. In practice BuildKit
+# re-emits those layers under NEW digests for near-identical bytes (runtime-1-bf16-t2 vs t1,
+# 2026-07-15: ~101 GB RunPod cold-pull miss + "unexpected EOF"). For deps-only bumps use
+# deploy/runtime-overlay.Dockerfile (FROM a known-good runtime) via runtime-build.yml
+# overlay_from=… so weight layers inherit by blob identity. Full rebuilds here remain required for
+# CUDA/torch/apt/seed changes; treat weight-layer digests as NOT guaranteed across rebuilds.
 COPY --from=seed /seed-bins/bin-00/ /opt/models/
 COPY --from=seed /seed-bins/bin-01/ /opt/models/
 COPY --from=seed /seed-bins/bin-02/ /opt/models/
