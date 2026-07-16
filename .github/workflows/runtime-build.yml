@@ -7,10 +7,17 @@ name: Build runtime base image to GHCR (#537)
 #
 #   ghcr.io/skyphusion-labs/vivijure-backend:runtime-<model_version>-<precision>-t<toolchain_version>  (a TAG in the vivijure-backend package)
 #
+# TWO BUILD MODES (workflow_dispatch input `overlay_from`):
+#   * empty (default) -- full `deploy/runtime.Dockerfile` FROM nvidia/cuda + COPY --from=seed.
+#     Required for CUDA/torch/apt/seed changes. WARNING: BuildKit may re-emit weight layers under
+#     NEW digests even when the seed pin is unchanged (t2 vs t1, 2026-07-15: ~101 GB RunPod miss).
+#   * set to a prior runtime ref (tag@digest) -- `deploy/runtime-overlay.Dockerfile` FROMs that
+#     runtime and only refreshes pip deps. Weight layers inherit by blob identity. USE THIS for
+#     deps-only toolchain bumps (safetensors/tokenizers/transformers/…).
+#
 # NO R2 here: the weights come from the seed image (seed-build.yml stages R2 exactly once per weight
-# version). A toolchain/CUDA rebuild of this image pulls the seed and the deterministic COPY --from
-# weight layers dedup on GHCR. Rebuild triggers: a toolchain/deps/CUDA bump (bump toolchain_version) OR
-# a weight bump (rebuild the seed, repin SEED_REF in deploy/runtime.Dockerfile, bump model_version).
+# version). Rebuild triggers: a toolchain/deps/CUDA bump (bump toolchain_version) OR a weight bump
+# (rebuild the seed, repin SEED_REF in deploy/runtime.Dockerfile, bump model_version).
 #
 # workflow_dispatch ONLY (never fork-reachable; larger runners bill -- design law #5). Runs on the
 # SNAPSHOT runner vivijure-bake-snap, which pre-pulls the pinned SEED image (runner-snapshot.yml), so
@@ -37,11 +44,20 @@ on:
         required: true
         default: '1'
         type: string
+      overlay_from:
+        description: >-
+          Optional prior runtime ref (e.g. ghcr.io/skyphusion-labs/vivijure-backend:runtime-1-bf16-t1@sha256:…).
+          When set, build via deploy/runtime-overlay.Dockerfile (deps-only; inherits weight layers).
+          Leave empty for a full FROM-cuda + COPY --from=seed rebuild.
+        required: false
+        default: ''
+        type: string
   # Monthly CVE-refresh FLOOR (#537 cadence): baked images rot -- CVEs + stale toolchains freeze in at
   # bake time, and since every release inherits the runtime's layers, runtime age = shipped CVE posture.
   # The scheduled run rebuilds WHATEVER is currently shipped (reads the pin, no drift) at the SAME tag
   # with a fresh base/apt/pip-patch layer set, opens a RUNTIME_REF digest-bump PR, and re-triggers the
   # snapshot. A deliberate toolchain bump still goes through the workflow_dispatch inputs above.
+  # NOTE: the schedule still does a FULL rebuild today; prefer overlay_from for deps-only dispatch.
   schedule:
     - cron: '0 6 1 * *'   # 06:00 UTC, 1st of each month
 
@@ -86,21 +102,36 @@ jobs:
             MVER="${CORE%%-*}"                               # 1
             PREC="$(printf '%s' "${CORE}" | cut -d- -f2)"    # bf16
             TVER="${CORE##*-t}"                              # 1
+            OVERLAY=""
             echo "Scheduled CVE-refresh re-bake of the shipped runtime: ${TAG} (same tag, fresh layers)."
           else
             PREC='${{ github.event.inputs.precision }}'
             MVER='${{ github.event.inputs.model_version }}'
             TVER='${{ github.event.inputs.toolchain_version }}'
+            OVERLAY='${{ github.event.inputs.overlay_from }}'
           fi
           case "${PREC}" in fp8|bf16) ;; *) echo "::error::precision must be fp8 or bf16"; exit 1;; esac
           case "${MVER}" in ''|*[!0-9]*) echo "::error::model_version must be a positive integer"; exit 1;; esac
           case "${TVER}" in ''|*[!0-9]*) echo "::error::toolchain_version must be a positive integer"; exit 1;; esac
           TAG="runtime-${MVER}-${PREC}-t${TVER}"
+          if [ -n "${OVERLAY}" ]; then
+            FILE="deploy/runtime-overlay.Dockerfile"
+            MODE="overlay"
+            echo "Deps-overlay build FROM ${OVERLAY} -> ${TAG}"
+          else
+            FILE="deploy/runtime.Dockerfile"
+            MODE="full"
+            echo "Full FROM-cuda + COPY --from=seed build -> ${TAG}"
+            echo "::warning::Full rebuild may re-emit weight layer digests (t2 RunPod miss). Prefer overlay_from for deps-only bumps."
+          fi
           echo "precision=${PREC}"                     >> "$GITHUB_OUTPUT"
           echo "model_version=${MVER}"                 >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}"                            >> "$GITHUB_OUTPUT"
           echo "immutable_tag=${TAG}-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
-          echo "Building ${RUNTIME_IMAGE}:${TAG} (precision=${PREC}; weights from the pinned seed)."
+          echo "dockerfile=${FILE}"                    >> "$GITHUB_OUTPUT"
+          echo "mode=${MODE}"                          >> "$GITHUB_OUTPUT"
+          echo "overlay_from=${OVERLAY}"               >> "$GITHUB_OUTPUT"
+          echo "Building ${RUNTIME_IMAGE}:${TAG} (mode=${MODE})."
 
       # Use the DOCKER driver (not the default docker-container driver): its build cache IS the daemon
       # image store, so the seed pre-pulled by the snapshot runner is a warm local hit for `FROM seed`
@@ -111,7 +142,7 @@ jobs:
         with:
           driver: docker
 
-      # GHCR auth: pull the (public) seed image + push the runtime image. GITHUB_TOKEN, least-privilege.
+      # GHCR auth: pull the (public) seed / base runtime + push the runtime image. GITHUB_TOKEN, least-privilege.
       - name: Log in to GHCR
         uses: docker/login-action@v4
         with:
@@ -119,26 +150,33 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Build the runtime image. VJ_BAKE_PRECISION selects the pinned seed stage; the seed's 24 bin
-      # layers COPY --from into /opt/models, then the sha256 manifest gate + assert-weights/finish-shas/
-      # no-tree-cache run before .vj-baked is stamped. Load into the local daemon (not pushed yet) so the
-      # per-layer gate runs before publish.
+      # Overlay mode: ensure the base runtime is in the local daemon so FROM hits warm + shared
+      # RootFS digests are inspectable for the weight-dedup gate.
+      - name: Pull overlay base runtime
+        if: steps.cfg.outputs.mode == 'overlay'
+        run: |
+          set -eu
+          BASE='${{ steps.cfg.outputs.overlay_from }}'
+          echo "Pulling overlay base ${BASE}"
+          docker pull "${BASE}"
+
+      # Build the runtime image. Overlay: FROM prior runtime + pip refresh. Full: seed bins COPY
+      # --from into /opt/models, then sha256 + assert gates. Load into the local daemon (not pushed
+      # yet) so the per-layer + shared-diff-id gates run before publish.
       - name: Build runtime base image
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: deploy/runtime.Dockerfile
+          file: ${{ steps.cfg.outputs.dockerfile }}
           platforms: linux/amd64
-          # NO pull: true -- the seed FROM is digest-pinned (immutable), so pull-if-absent is as correct
-          # as pull-always and a local-store hit when the snap runner's daemon is warm (#537 pull win).
-          # The nvidia/cuda base is absent on a fresh ephemeral runner, so it still pulls fresh (CVE
-          # refresh preserved); only the ~87 GB seed is served warm.
+          # NO pull: true -- digest-pinned FROMs; local-store hit when snap/base is warm.
           pull: false
           load: true
           push: false
           build-args: |
             VJ_BAKE_PRECISION=${{ steps.cfg.outputs.precision }}
             VJ_MODEL_VERSION=${{ steps.cfg.outputs.model_version }}
+            BASE_RUNTIME_REF=${{ steps.cfg.outputs.overlay_from }}
           tags: |
             ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.RUNTIME_IMAGE }}:${{ steps.cfg.outputs.tag }}
             ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.RUNTIME_IMAGE }}:${{ steps.cfg.outputs.immutable_tag }}
@@ -149,6 +187,15 @@ jobs:
           set -eu
           IMG="${REGISTRY}/${OWNER}/${RUNTIME_IMAGE}:${{ steps.cfg.outputs.tag }}"
           python deploy/bake_layers.py verify-image --image "${IMG}" --ceiling-gb 10.0
+
+      # Weight-dedup gate (overlay required; catches the t2 ~101 GB digest rewrite).
+      - name: Assert weight layers shared with overlay base
+        if: steps.cfg.outputs.mode == 'overlay'
+        run: |
+          set -eu
+          IMG="${REGISTRY}/${OWNER}/${RUNTIME_IMAGE}:${{ steps.cfg.outputs.tag }}"
+          BASE='${{ steps.cfg.outputs.overlay_from }}'
+          python deploy/bake_layers.py assert-shared-diff-ids --image "${IMG}" --base "${BASE}" --min-shared-gb 90
 
       # Toolchain import smoke (CPU, no GPU, no app): catch a torch/CUDA ABI break in the runtime here,
       # in seconds, rather than at the end of a 33-min GPU render. The APP import smoke runs in the

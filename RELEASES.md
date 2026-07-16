@@ -53,6 +53,8 @@ world. What you do depends on WHAT changed:
 
 | What changed | Steps |
 |---|---|
+| **Toolchain / pip deps only** (safetensors, tokenizers, transformers, …; CUDA/torch/seed unchanged) | Dispatch `runtime-build.yml` with `overlay_from=<prior runtime@digest>` and bump `-t<N>`. Uses `deploy/runtime-overlay.Dockerfile` so weight layers inherit. Then merge the RUNTIME_REF repin PR + tag `backend-v<semver>`. Do **not** full-rebuild for deps-only (t2 lesson: ~101 GB new weight digests broke RunPod). |
+| **CUDA / torch / apt / seed change** | Full `runtime-build.yml` (empty `overlay_from`), bump `-t<N>` or model version as appropriate, repin, tag. |
 | **App code only** (`src/vivijure_backend`) -- the common case | Push the tag `backend-v<semver>`. `release.yml` builds `deploy/Dockerfile` (`FROM the pinned runtime base` + `COPY src`) and pushes. Only the app layers upload; the runtime + weight layers dedup on GHCR. Fast. |
 | **Model weights** (new/changed curated set) | 1. Dispatch `seed-build.yml` (stages R2, rebuilds `vivijure-backend-seed`, bump `model_version`). 2. Repin `SEED_REF_<PREC>` (tag + `@sha256`) in `deploy/runtime.Dockerfile`. 3. Dispatch `runtime-build.yml`. 4. Repin `RUNTIME_REF_<PREC>` in `deploy/Dockerfile`. 5. Push the tag. |
 | **Toolchain / deps / CUDA / torch / hf-configs** | 1. Dispatch `runtime-build.yml` (bump `toolchain_version` -> the `-t<N>` tag; NO R2, weights come from the existing seed). 2. Repin `RUNTIME_REF_<PREC>` in `deploy/Dockerfile`. 3. Push the tag. |

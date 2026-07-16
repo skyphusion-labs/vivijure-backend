@@ -15,7 +15,9 @@
 #   * src-only change      -> tag backend-vX.Y.Z (this build; fast).
 #   * weight-set change     -> rebuild seed -> repin SEED_REF in runtime.Dockerfile -> rebuild runtime
 #                              -> repin RUNTIME_REF below -> tag.
-#   * toolchain/deps/CUDA   -> rebuild runtime (bump -t<N>, no R2) -> repin RUNTIME_REF below -> tag.
+#   * toolchain/deps/CUDA   -> prefer overlay FROM prior runtime (bump -t<N>, runtime-build.yml
+#                              overlay_from=…) for deps-only; full FROM-cuda rebuild only when
+#                              CUDA/torch/apt/seed change -> repin RUNTIME_REF below -> tag.
 
 # ------------------------------------------------------------------ RUNTIME BASE (pinned by digest)
 # The full validated runtime + weights, pinned by TAG AND DIGEST (design law #2). Two precisions from
