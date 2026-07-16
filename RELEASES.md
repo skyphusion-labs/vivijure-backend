@@ -38,8 +38,8 @@ gh api "/orgs/skyphusion-labs/packages/container/vivijure-backend/versions" \
 (or the GHCR Packages UI.) Take the highest published semver, pick the next FREE one above it, and
 cut `backend-v<that>`. Do NOT assume the next number after the latest git tag is free.
 
-**Snapshot (2026-07-15):** git + GHCR both at **`1.0.1`** (`backend-v1.0.1`). Next free
-semver after that is `1.0.2` (always re-check GHCR before tagging; dispatch timing runs can
+**Snapshot (2026-07-15):** GHCR has broken-pull `1.0.1` (t2 weight digests). Next free
+semver is `1.0.2` on overlay runtime `runtime-1-bf16-t3` (shares ~104 GB with `1.0.0`) (always re-check GHCR before tagging; dispatch timing runs can
 still advance GHCR ahead of git).
 
 **Snapshot (2026-07-05):** git tags trail at `backend-v0.4.4`; GHCR is published through `0.4.7`. The
