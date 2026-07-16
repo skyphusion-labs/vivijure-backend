@@ -15,6 +15,10 @@ backend) and why the weights are baked are in
 [weights-base-and-snapshots.md](weights-base-and-snapshots.md) and
 [cold-start-design.md](cold-start-design.md).
 
+**RunPod pin lesson (2026-07-15):** do not pin `:1.0.1` (t2 rewrote ~101 GB of weight
+digests; cold pull `unexpected EOF`). Use `:1.0.2+` from the deps-overlay path. Full
+write-up: [runpod-1.0.1-weight-digest-eof.md](runpod-1.0.1-weight-digest-eof.md).
+
 > **Legacy / non-baked path.** An image WITHOUT the `.vj-baked` marker mirrors the weights from R2 at
 > job time (the mirror section below). That path is the fallback, kept for correctness; the shipped
 > image is baked and never touches it.
