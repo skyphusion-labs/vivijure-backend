@@ -8,6 +8,12 @@ constraints (version-tag pinning, the 10-worker account cap).
 See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 `docs/operations.md` (build/deploy/pin mechanics).
 
+**Current backend pin (2026-07-15):** `:1.0.2` (or later). **Never pin `:1.0.1`**
+(t2 weight-digest rewrite; RunPod `unexpected EOF`). Incident:
+[`runpod-1.0.1-weight-digest-eof.md`](runpod-1.0.1-weight-digest-eof.md). Conrad's
+local-panel backend endpoint is a **separate** ID (`uf4iwoen5r48zx`); pin both on
+every backend release (fleet map: `fleet-chezmoi` `docs/runbooks/vivijure-runpod-endpoints.md`).
+
 ## Recommendation
 
 **Run every endpoint on a high-end Blackwell-line GPU. Never the budget

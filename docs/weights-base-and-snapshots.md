@@ -67,9 +67,10 @@ bin layers) + the `sha256sum -c` manifest gate + `assert-weights`/`assert-finish
   `deploy/runtime-overlay.Dockerfile` via `runtime-build.yml` input `overlay_from=<prior
   runtime@digest>` so weight layers inherit by blob identity. Full `runtime.Dockerfile` rebuilds
   stay for CUDA/torch/apt/seed changes; the overlay path runs
-  `bake_layers.py assert-shared-diff-ids` before push.
-- A toolchain/CUDA bump that is **deps-only** therefore re-pushes only the pip/patch layers on
-  GHCR and RunPod only pulls those (hundreds of MB), not another 100 GB weight set.
+  `bake_layers.py assert-shared-diff-ids` before push. Incident write-up:
+  [`runpod-1.0.1-weight-digest-eof.md`](runpod-1.0.1-weight-digest-eof.md).
+  A deps-only bump therefore re-pushes only pip/patch layers on GHCR; RunPod pulls hundreds of
+  MB, not another 100 GB weight set.
 
 ### 3. BACKEND (consumer) -- `ghcr.io/skyphusion-labs/vivijure-backend:<X.Y.Z>`
 
