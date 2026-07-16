@@ -38,9 +38,9 @@ gh api "/orgs/skyphusion-labs/packages/container/vivijure-backend/versions" \
 (or the GHCR Packages UI.) Take the highest published semver, pick the next FREE one above it, and
 cut `backend-v<that>`. Do NOT assume the next number after the latest git tag is free.
 
-**Snapshot (2026-07-15):** GHCR has broken-pull `1.0.1` (t2 weight digests). Next free
-semver is `1.0.2` on overlay runtime `runtime-1-bf16-t3` (shares ~104 GB with `1.0.0`) (always re-check GHCR before tagging; dispatch timing runs can
-still advance GHCR ahead of git).
+**Snapshot (2026-07-15):** git + GHCR at **`1.0.2`** (`backend-v1.0.2`) on overlay runtime
+`runtime-1-bf16-t3` (~104 GB shared with `1.0.0`; ~96 MB new). Do **not** pin `1.0.1` (t2
+weight-digest miss). Next free semver is `1.0.3` (always re-check GHCR before tagging).
 
 **Snapshot (2026-07-05):** git tags trail at `backend-v0.4.4`; GHCR is published through `0.4.7`. The
 next release tag is `backend-v0.4.8`, NOT `backend-v0.4.5` (0.4.5 / 0.4.6 / 0.4.7 are taken).
@@ -76,7 +76,8 @@ policy: `docs/weights-base-and-snapshots.md`.
 
 | git tag | GHCR image | source commit | built | notes |
 |---|---|---|---|---|
-| backend-v1.0.1 | 1.0.1 | 22cadfe | 2026-07-15 (GHA) | Runtime toolchain **t2** after Dependabot deps (#262: `safetensors==0.8.0`, `tokenizers==0.22.2`) + dual-warm bake lane (#263). `RUNTIME_REF_BF16` -> `runtime-1-bf16-t2@sha256:484e4627...`. Release run 29451414951: push shows Layer already exists on inherited runtime/weight layers. Digest `sha256:da037184...`. Conrad RunPod pin next (image tag only). |
+| backend-v1.0.2 | 1.0.2 | d62360e | 2026-07-15 (GHA) | **Fix for broken `1.0.1` RunPod pull.** Deps-overlay runtime `runtime-1-bf16-t3` FROM t1 (run 29466705701); weight layers share ~104 GB with `1.0.0`, ~96 MB new. Restores resolvable t2-era pins (safetensors 0.8.0 / tokenizers 0.22.2) without re-emitting weights. Digest `sha256:ea38bc9d...`. Pin RunPod to `:1.0.2` (not `:1.0.1`). |
+| backend-v1.0.1 | 1.0.1 | 22cadfe | 2026-07-15 (GHA) | **DO NOT PIN on RunPod.** Full t2 rebuild re-emitted ~101 GB weight digests; cold pull dies with unexpected EOF. Superseded by `1.0.2` (t3 overlay). Digest `sha256:da037184...`. |
 |---|---|---|---|---|
 | backend-v0.4.1 | 0.4.1 | f3a0d41 | 2026-07-02 (GHA) | fix(verify): the pod-staging gate renders end to end -- #183 register the GPU pipeline for the verify render (route _pod_draft_render through worker.handler, the production entrypoint that registers the per-job pipeline; fixes the "no GPU Pipeline registered" the H200 watched pod hit in ~3s), #180+#182 loud verify_fatal {stage,missing} instead of a silent pre-emitter death, #181 cold-pull TTL 3000s + pod-state timing log. Emitter + R2 channel proven healthy on the pod (gpu_probe real H200 values, summary.json + events.ndjson in ~3s). Fixes on top of :0.4.0. |
 |---|---|---|---|---|
