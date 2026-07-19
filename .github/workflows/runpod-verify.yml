@@ -31,9 +31,12 @@ on:
         type: boolean
         default: false
       image:
-        description: "Image ref to verify (ghcr.io/...:tag)."
+        description: "Image ref to verify (ghcr.io/...:X.Y.Z -- pinnable SemVer tag only; no :latest)."
         type: string
-        default: "ghcr.io/skyphusion-labs/vivijure-backend:latest"
+        # No default on purpose. :latest is no longer published (release.yml), and a frozen
+        # :latest would silently gate + promote a stale build when promote=true. Caller must
+        # pass an explicit X.Y.Z (or digest) ref.
+
       tier:
         description: "GPU tier (i2v = the datacenter 3-arch pool)."
         type: string
@@ -133,7 +136,10 @@ jobs:
           python deploy/runpod_verify.py --key-shape
 
       - name: Live verify gate (SECURE pod -> @event verify -> delete+confirm-zero; promote gated)
+        env:
+          IMAGE: ${{ inputs.image }}
         run: |
+          test -n "${IMAGE}" || { echo "::error::image input is required (no :latest default); pass an explicit X.Y.Z or digest ref"; exit 1; }
           # SHARPNESS CALIBRATION (option 1, 2026-07-03) -- baseline 75.0, NOT the old 100.0 placeholder.
           # Measured Laplacian 77.5 on the visually-confirmed-good draft-fp8 clip from run 28624514409
           # (2026-07-03; lead eyeballed full.mp4: crisp rack edges, readable panel labels, in focus). So
@@ -145,7 +151,7 @@ jobs:
           # bundle content or the i2v config changes -- NEVER move this number to make a failing run pass.
           python deploy/runpod_verify.py --live \
             --report-file verify-report.json \
-            --image "${{ inputs.image }}" \
+            --image "${IMAGE}" \
             --tier "${{ inputs.tier }}" \
             --bundle-key "${{ inputs.bundle_key }}" \
             --sharpness-baseline 75.0 \
