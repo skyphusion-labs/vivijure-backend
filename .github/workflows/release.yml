@@ -4,9 +4,10 @@ name: Release worker image to GHCR (baked)
 # baked in, so a worker is datacenter-agnostic and pays no R2 cold-pull tax). Image + version come
 # from a git TAG, not a parsed commit subject. One release track:
 #
-#   backend-vX.Y.Z  ->  ghcr.io/skyphusion-labs/vivijure-backend:X.Y.Z (+ :latest)
+#   backend-vX.Y.Z  ->  ghcr.io/skyphusion-labs/vivijure-backend:X.Y.Z
 #
-# A plain commit/branch push is a NO-OP: this workflow only triggers on backend-v* tags (or a manual
+# No :latest (nothing pins it; constellation doctrine is pinnable :X.Y.Z only --
+# vivijure#789). A plain commit/branch push is a NO-OP: this workflow only triggers on backend-v* tags (or a manual
 # workflow_dispatch). This pipeline BUILDS + PUSHES only. SHIPPING TO PROD IS SEPARATE: an image
 # reaches the production serverless endpoint ONLY by passing the pod-staging verify (.github/
 # workflows/runpod-verify.yml) -- see docs/release-gate.md. An iteration tag never re-pins prod.
@@ -135,7 +136,6 @@ jobs:
             VJ_BAKE_PRECISION=${{ steps.cfg.outputs.precision }}
           tags: |
             ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WORKER_IMAGE }}:${{ steps.cfg.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WORKER_IMAGE }}:latest
 
       # Authoritative per-layer gate (post-build): assert no image layer is >=10GB, so GHCR will accept
       # the push. The bin step predicts this; this confirms it on the real image.
@@ -156,12 +156,11 @@ jobs:
             conda run --no-capture-output -n vivijure \
             python /opt/vivijure/smoke_imports.py
 
-      - name: Push :X.Y.Z and :latest to GHCR
+      - name: Push :X.Y.Z to GHCR
         run: |
           set -eu
           IMG="${REGISTRY}/${OWNER}/${WORKER_IMAGE}"
           docker push "${IMG}:${{ steps.cfg.outputs.version }}"
-          docker push "${IMG}:latest"
-          echo "Pushed ${WORKER_IMAGE}:${{ steps.cfg.outputs.version }} and :latest to GHCR."
+          echo "Pushed ${WORKER_IMAGE}:${{ steps.cfg.outputs.version }} to GHCR."
           echo "PROMOTION TO PROD IS SEPARATE: runpod-verify.yml verifies on a GPU pod (staging), then"
           echo "promotes the passing image onto the production serverless endpoint. See docs/release-gate.md."

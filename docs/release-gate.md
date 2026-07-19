@@ -79,7 +79,7 @@ Two workflows, one chain:
 1. **`.github/workflows/release.yml` -- build + push (no GPU).** On a `backend-vX.Y.Z` tag (or a
    manual `workflow_dispatch`), on the `vivijure-bake` larger runner: stage the curated weight seed
    from R2, reconstruct HF-cache symlinks, bin-pack into <10 GB layers, build the baked image,
-   run the per-layer GHCR gate + a CPU import smoke, and push `:X.Y.Z` + `:latest` to GHCR. This
+   run the per-layer GHCR gate + a CPU import smoke, and push `:X.Y.Z` to GHCR. This
    step never touches a GPU and never ships to prod.
 2. **`.github/workflows/runpod-verify.yml` -- the staging gate (GPU pod).** Spins a GPU **pod** on
    the pushed image, runs the verify harness (`deploy/runpod_verify.py`: structured `@event`
