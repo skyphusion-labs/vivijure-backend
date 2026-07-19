@@ -31,9 +31,12 @@ on:
         type: boolean
         default: false
       image:
-        description: "Image ref to verify (ghcr.io/...:tag)."
+        description: "Image ref to verify (ghcr.io/...:X.Y.Z -- pinnable SemVer tag only; no :latest)."
         type: string
-        default: "ghcr.io/skyphusion-labs/vivijure-backend:latest"
+        # No default on purpose. :latest is no longer published (release.yml), and a frozen
+        # :latest would silently gate + promote a stale build when promote=true. Caller must
+        # pass an explicit X.Y.Z (or digest) ref.
+
       tier:
         description: "GPU tier (i2v = the datacenter 3-arch pool)."
         type: string
