@@ -36,7 +36,8 @@ class Outputs:
 
     `clips` are (shot_id, path) the harness orders by the storyboard before merging. A pipeline
     that already merged the film can set `final_video`; otherwise the harness assembles it."""
-    loras: dict[str, Path] = field(default_factory=dict)        # slot -> adapter file
+    loras: dict[str, Path] = field(default_factory=dict)        # slot -> SDXL adapter file
+    wan_loras: dict[str, tuple[Path, Path]] = field(default_factory=dict)  # slot -> (high, low) Wan experts
     keyframes: dict[str, Path] = field(default_factory=dict)    # shot_id -> png
     clips: list[tuple[str, Path]] = field(default_factory=list)  # (shot_id, mp4)
     final_video: Path | None = None
@@ -94,7 +95,8 @@ def run_job(
         # --- prior state from R2's per-artifact objects (#112) ---
         # Derived AFTER the bundle lands so the storyboard names every candidate key, and so
         # bundle-provided keyframes take precedence over restored ones (hybrid lane contract).
-        trained_slots, existing_keyframes = _restore_prior_state(store, req.project, bundle)
+        trained_slots, existing_keyframes = _restore_prior_state(
+            store, req.project, bundle, model_family=req.model_family)
 
         # --- validate + plan (CPU) ---
         errs = validate(req, bundle.storyboard, cast=bundle.cast)
@@ -217,6 +219,13 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
     for slot, path in outputs.loras.items():
         key = store.put_file(Path(path), keys.lora_key(project, slot))
         result.lora[slot] = {"lora_id": key}
+    # Wan 2.2 A14B adapters are TWO experts; upload both and record both keys under the slot. The
+    # existence of BOTH objects is the "trained" record the next job's restore reads (a half-upload
+    # is never treated as trained -- _restore_prior_state checks both keys). #29.
+    for slot, (high, low) in outputs.wan_loras.items():
+        key_high = store.put_file(Path(high), keys.wan_lora_key(project, slot, "high"))
+        key_low = store.put_file(Path(low), keys.wan_lora_key(project, slot, "low"))
+        result.lora[slot] = {"lora_id_high": key_high, "lora_id_low": key_low, "family": "wan"}
     for slot, lora_id in req.pretrained_loras.items():
         result.lora.setdefault(slot, {"lora_id": lora_id})
 
@@ -302,7 +311,7 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
     return result
 
 
-def _restore_prior_state(store, project: str, bundle: Bundle) -> tuple[set[str], dict[str, str | None]]:
+def _restore_prior_state(store, project: str, bundle: Bundle, *, model_family: str = "sdxl") -> tuple[set[str], dict[str, str | None]]:
     """Derive the planner's skip sets straight from R2's per-artifact objects (#112) and stage
     the reusable keyframe PNGs into the bundle tree.
 
@@ -330,9 +339,15 @@ def _restore_prior_state(store, project: str, bundle: Bundle) -> tuple[set[str],
     exists preserves that contract with the extraction order inverted."""
     trained_slots: set[str] = set()
     existing_keyframes: dict[str, str | None] = {}
+    wan_family = str(model_family).strip().lower() == "wan"
     for slot in bundle.storyboard.use_characters:
         try:
-            if store.exists(keys.lora_key(project, slot)):
+            if wan_family:
+                # A Wan slot is trained iff BOTH experts exist; a half-upload is not "trained".
+                if (store.exists(keys.wan_lora_key(project, slot, "high"))
+                        and store.exists(keys.wan_lora_key(project, slot, "low"))):
+                    trained_slots.add(slot)
+            elif store.exists(keys.lora_key(project, slot)):
                 trained_slots.add(slot)
         except Exception:  # noqa: BLE001 -- unknown -> retrain (safe default)
             pass
