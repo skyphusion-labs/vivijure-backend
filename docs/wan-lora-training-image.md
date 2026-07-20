@@ -33,7 +33,21 @@ render pins:
 | torchao      | `0.17.0`                         | `0.10.0`                       |
 | av           | `13.1.0`                         | `16.0.1`                       |
 
-They cannot share one Python env. So the image builds a SECOND conda env, `aitoolkit`, with
+They cannot share one Python env.
+
+**Resolved pin sets (verified on the A100 80GB build, cf#29 D1).** Both envs share the SAME cu128
+`torch==2.9.0` line (torch 2.7.1, the render-validated version, was delisted from the PyTorch cu128
+index -- see the base note below), pinned as the full trio `torch==2.9.0 / torchvision==0.24.0 /
+torchaudio==2.9.0` (unpinned, torchaudio resolves to 2.11.0 and mismatches; ai-toolkit imports
+torchaudio at import time). No ai-toolkit-specific dependency OVERRIDES were needed -- ai-toolkit's own
+pinned set (`deploy/aitoolkit-overrides.txt` is empty) installed cleanly under the held torch trio, incl.
+`torchcodec==0.9.1`, `torchao==0.10.0`, `optimum-quanto==0.2.4`, `bitsandbytes==0.49.2`.
+
+    aitoolkit env:  diffusers 0.39.0.dev0 (git) · transformers 5.5.3 · torchao 0.10.0 · av 16.0.1 · peft 0.18.1
+    vivijure env:   diffusers 0.39.0 (stable) · transformers 5.13.1 · peft 0.19.1
+
+A build-time import smoke gates both envs (worker + seam import in vivijure; torch/torchaudio/diffusers
+in aitoolkit) so a broken isolation or a torch-version regression fails the build in seconds. So the image builds a SECOND conda env, `aitoolkit`, with
 ai-toolkit's deps, and `wan_lora_train.aitoolkit_python()` resolves the subprocess interpreter from
 `VIVIJURE_AITOOLKIT_PYTHON` (set to `/opt/conda/envs/aitoolkit/bin/python` in the image), defaulting
 to `sys.executable` when unset -- so single-env installs and the CPU tests keep the old behavior. The
@@ -49,6 +63,24 @@ aitoolkit env first, held by `deploy/aitoolkit-constraints.txt`) so neither env 
 Pinned at `6e158dd1f1552b73b7aca6d7ddaa46a783538052` (HEAD on 2026-07-20). The Phase-0 spike's exact
 ai-toolkit rev was not recorded anywhere recoverable (repo, memory, search); D1 is plumbing, not the
 identity bind, so HEAD is the deliberate pin. Bump + re-validate on a pod; never float HEAD.
+
+## Base image decision: LEAN, not the render-runtime base
+
+`deploy/train.Dockerfile` builds `FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04` and reproduces
+the worker's validated env (the runtime.Dockerfile recipe: cu128 `torch==2.7.1` + the pinned
+`deploy/requirements.txt` + the basicsr/facexlib/gfpgan compat patches) MINUS the ~87GB baked render
+weight bake. Why lean:
+
+- A training endpoint NEVER loads the render weights (SDXL / Wan-i2v); they were pure dead weight.
+- Carrying 87GB made every cold RunPod pod a ~20min image pull -- the root cause of the D1 bring-up
+  pain (6 pods, no observability, hours lost). Lean -> ~15-20GB image -> fast, reliable pods.
+- It is the correct D2 train-endpoint artifact: a dedicated train endpoint shouldn't carry render
+  weights.
+
+The env is reproduced from the SAME pinned `deploy/requirements.txt` the runtime base uses, so
+worker/harness/orchestrator/pipeline import and run exactly as prod; only the baked WEIGHTS (which the
+train path never loads) are absent. (Earlier this image was FROM the runtime base; the 87GB pull cost
+made that the wrong call for a train-only image -- superseded.)
 
 ## Base model weights
 
