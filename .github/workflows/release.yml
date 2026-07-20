@@ -66,7 +66,7 @@ jobs:
     # base pull). Access control = this label + the backend-v* tag ruleset (backend-release-tags); a
     # fork PR cannot create a backend-v* tag. A stale or absent snapshot degrades to a one-time base
     # pull -- SLOW, never WRONG. Accelerator only; identical output.
-    runs-on: vivijure-bake-snap
+    runs-on: [self-hosted, gpu]
     timeout-minutes: 180
     steps:
       - name: Checkout repository
