@@ -43,6 +43,15 @@ from .contract import Character
 AITOOLKIT_DIR_ENV = "VIVIJURE_AITOOLKIT_DIR"
 DEFAULT_AITOOLKIT_DIR = "/opt/ai-toolkit"
 
+# The interpreter the ai-toolkit `run.py` subprocess runs under. ai-toolkit's dependency set
+# (a diffusers git pin, plus transformers/torchao/av at versions that conflict irreconcilably with
+# the worker "vivijure" env's validated render pins) cannot coexist in the worker's own env, so the
+# training image isolates ai-toolkit in a SEPARATE conda env and points this at that env's python
+# (cf#29 D1). DEFAULT is sys.executable -- the worker's own interpreter -- so a single-env install
+# (and every existing CPU test) keeps the pre-isolation behavior unchanged. The deploy sets this to
+# the aitoolkit env's python; nothing in this module hardcodes an interpreter location.
+AITOOLKIT_PYTHON_ENV = "VIVIJURE_AITOOLKIT_PYTHON"
+
 # The Wan 2.2 A14B base ai-toolkit trains against. The T2V-A14B bf16 diffusers re-host is what the
 # Phase-0 spike validated; the adapters it emits load on the i2v `wan-2-2-t2v-720-lora` endpoint
 # (shared DiT attention layers). See the module docstring for the queued I2V-base experiment.
@@ -96,6 +105,13 @@ class TrainedWanLora:
 def aitoolkit_dir() -> Path:
     """The ai-toolkit checkout to run `run.py` from (env override, else the image default)."""
     return Path(os.environ.get(AITOOLKIT_DIR_ENV) or DEFAULT_AITOOLKIT_DIR)
+
+
+def aitoolkit_python() -> str:
+    """The interpreter to launch ai-toolkit's `run.py` with. Env override (the deploy points it at
+    the isolated aitoolkit conda env), else `sys.executable` -- the worker's own interpreter, the
+    pre-isolation default that keeps single-env installs and the CPU tests unchanged."""
+    return os.environ.get(AITOOLKIT_PYTHON_ENV) or sys.executable
 
 
 def caption_for(char: Character, template: str) -> str:
@@ -227,16 +243,19 @@ def harvest_experts(run_dir: Path, name: str) -> tuple[Path, Path]:
 
 def _run_aitoolkit(config_path: Path, *, cwd: Path, progress_cb=None) -> None:
     """The single un-stubbable seam: run ai-toolkit's `run.py <config>` as a subprocess and raise
-    on a non-zero exit. Streams the child's output to this worker's stdout (so RunPod captures the
-    training log) and forwards coarse progress lines to `progress_cb` when one is wired. Injectable
-    (`runner=` on `train_slot_wan`) so everything else in this module tests without a GPU."""
+    on a non-zero exit. The interpreter comes from `aitoolkit_python()` (the isolated aitoolkit env
+    in the training image, else `sys.executable`), NOT a hardcoded interpreter, so the worker env
+    and ai-toolkit's conflicting deps stay in separate conda envs (cf#29 D1). Streams the child's
+    output to this worker's stdout (so RunPod captures the training log) and forwards coarse
+    progress lines to `progress_cb` when one is wired. Injectable (`runner=` on `train_slot_wan`)
+    so everything else in this module tests without a GPU."""
     run_py = Path(cwd) / "run.py"
     if not run_py.is_file():
         raise FileNotFoundError(
             f"ai-toolkit run.py not found at {run_py} (set {AITOOLKIT_DIR_ENV} to the checkout; "
             "the training image must provide ai-toolkit)")
     proc = subprocess.Popen(
-        [sys.executable, "run.py", str(config_path)],
+        [aitoolkit_python(), "run.py", str(config_path)],
         cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
     )
     assert proc.stdout is not None

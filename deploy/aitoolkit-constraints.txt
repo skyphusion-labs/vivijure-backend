@@ -1,0 +1,10 @@
+# pip CONSTRAINTS for the isolated ai-toolkit conda env (vivijure-cf #29, Phase D1).
+#
+# Purpose: HOLD the validated Blackwell-safe cu128 torch line so no ai-toolkit transitive dep
+# (torchcodec / torchao are torch-coupled) can silently swap it during the requirements install.
+# A constraint only caps a version if that package is pulled; it never forces an install.
+#
+# Verified installable together on an A100 80GB SECURE pod (cf#29 D1).
+torch==2.7.1
+torchvision==0.22.1
+torchaudio==2.7.1
