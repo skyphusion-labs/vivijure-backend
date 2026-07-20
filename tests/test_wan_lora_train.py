@@ -139,7 +139,56 @@ def _fake_runner_writes_experts(config_path, *, cwd, progress_cb=None):
         progress_cb("10/2000 loss=0.1 it/s")
 
 
-def test_train_slot_wan_end_to_end_with_injected_runner(tmp_path):
+def test_resolve_local_hf_snapshot_passthrough_for_dirs(tmp_path):
+    d = tmp_path / "snap"
+    d.mkdir()
+    assert W.resolve_local_hf_snapshot(str(d)) == str(d.resolve())
+
+
+def test_resolve_local_hf_snapshot_missing_hub_id_fails_loud(monkeypatch):
+    import sys
+    import types
+
+    def boom(*a, **k):
+        raise RuntimeError("offline miss")
+
+    hub = types.ModuleType("huggingface_hub")
+    hub.snapshot_download = boom
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    with pytest.raises(FileNotFoundError, match="not in local cache"):
+        W.resolve_local_hf_snapshot("ai-toolkit/does-not-exist")
+
+
+def test_patch_aitoolkit_hub_ids_rewrites_umt5_and_vae(tmp_path, monkeypatch):
+    te = tmp_path / "te"
+    vae = tmp_path / "vae"
+    te.mkdir()
+    vae.mkdir()
+    monkeypatch.setattr(W, "resolve_local_hf_snapshot", lambda s: str(te if "umt5" in s else vae))
+    wan21 = tmp_path / "toolkit/models/wan21"
+    wan22 = tmp_path / "extensions_built_in/diffusion_models/wan22"
+    wan21.mkdir(parents=True)
+    wan22.mkdir(parents=True)
+    (wan21 / "wan21.py").write_text(f'te_path = "{W.AITOOLKIT_UMT5_REPO}"\n')
+    (wan22 / "wan22_14b_model.py").write_text(f'_wan_vae_path = "{W.AITOOLKIT_VAE_REPO}"\n')
+    out = W.patch_aitoolkit_hub_ids_for_offline(tmp_path)
+    assert out["umt5"] == str(te) and out["vae"] == str(vae)
+    assert str(te) in (wan21 / "wan21.py").read_text()
+    assert str(vae) in (wan22 / "wan22_14b_model.py").read_text()
+    # idempotent: second call leaves absolute paths alone
+    W.patch_aitoolkit_hub_ids_for_offline(tmp_path)
+    assert str(te) in (wan21 / "wan21.py").read_text()
+
+
+def test_patch_aitoolkit_hub_ids_noop_on_stub_checkout(tmp_path):
+    # CPU tests use a run.py-only stub; no rewrite targets -> no HF resolve
+    assert W.patch_aitoolkit_hub_ids_for_offline(tmp_path) == {}
+
+
+def test_train_slot_wan_end_to_end_with_injected_runner(tmp_path, monkeypatch):
+    base = tmp_path / "wan-base"
+    base.mkdir()
+    monkeypatch.setattr(W, "resolve_local_hf_snapshot", lambda s: str(base))
     refs = [_png(tmp_path / f"src_{i}.png") for i in range(4)]
     ch = Character(slot="hero", name="chk_detective", prompt="", ref_paths=refs)
     seen = {}
@@ -158,9 +207,14 @@ def test_train_slot_wan_end_to_end_with_injected_runner(tmp_path):
     assert seen["config_path"].is_file()
     cfg = yaml.safe_load(seen["config_path"].read_text())
     assert cfg["config"]["process"][0]["model"]["model_kwargs"]["train_high_noise"] is True
+    # offline-safe: name_or_path is the resolved local snapshot, not the hub id
+    assert cfg["config"]["process"][0]["model"]["name_or_path"] == str(base)
 
 
-def test_train_slot_wan_half_train_fails_loud(tmp_path):
+def test_train_slot_wan_half_train_fails_loud(tmp_path, monkeypatch):
+    base = tmp_path / "wan-base"
+    base.mkdir()
+    monkeypatch.setattr(W, "resolve_local_hf_snapshot", lambda s: str(base))
     refs = [_png(tmp_path / "src_0.png")]
     ch = Character(slot="hero", name="t", prompt="", ref_paths=refs)
 
@@ -328,13 +382,15 @@ def test_run_aitoolkit_launches_the_configured_interpreter(tmp_path, monkeypatch
 
 def test_run_aitoolkit_raises_on_nonzero_exit_of_configured_interpreter(tmp_path, monkeypatch):
     """Negative control: a non-zero exit from the configured interpreter fails loud (a broken
-    training run must never be swallowed)."""
+    training run must never be swallowed). Tail of stdout is attached for RunPod-empty-stream cases."""
     (tmp_path / "run.py").write_text("# stub\n")
     stub = tmp_path / "fail_interp.sh"
-    stub.write_text("#!/usr/bin/env bash\nexit 7\n")
+    stub.write_text("#!/usr/bin/env bash\necho boom-line\nexit 7\n")
     stub.chmod(0o755)
     monkeypatch.setenv(W.AITOOLKIT_PYTHON_ENV, str(stub))
     cfg = tmp_path / "config.yaml"
     cfg.write_text("job: extension\n")
-    with pytest.raises(RuntimeError, match="exited 7"):
+    with pytest.raises(RuntimeError, match="exited 7") as ei:
         W._run_aitoolkit(cfg, cwd=tmp_path)
+    assert "boom-line" in str(ei.value)
+    assert "last" in str(ei.value)
