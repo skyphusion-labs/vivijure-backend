@@ -56,11 +56,17 @@ AITOOLKIT_PYTHON_ENV = "VIVIJURE_AITOOLKIT_PYTHON"
 # The Wan 2.2 A14B base ai-toolkit trains against. The T2V-A14B bf16 diffusers re-host is what the
 # Phase-0 spike validated; the adapters it emits load on the i2v `wan-2-2-t2v-720-lora` endpoint
 # (shared DiT attention layers). See the module docstring for the queued I2V-base experiment.
+#
+# Hub id is the LOGICAL name (tests / docs). The train IMAGE sets VIVIJURE_WAN_BASE_PATH to the
+# bake-time stable dir (/opt/models/aitoolkit/wan-base) so config never ships a hub id at runtime
+# (Conrad: bake it, don't just remap). default_wan_base_path() prefers that env / dir.
 DEFAULT_WAN_BASE_REPO = "ai-toolkit/Wan2.2-T2V-A14B-Diffusers-bf16"
+WAN_BASE_PATH_ENV = "VIVIJURE_WAN_BASE_PATH"
+DEFAULT_WAN_BASE_PATH = "/opt/models/aitoolkit/wan-base"
 
-# Hardcoded HF hub IDs inside ai-toolkit (not our config). Under HF_HUB_OFFLINE=1, diffusers'
-# from_pretrained(hub_id) still phones model_info() for shard lists and raises OfflineModeIsEnabled
-# even when the bake is complete. We rewrite these to absolute snapshot paths before run.py.
+# Hardcoded HF hub IDs inside upstream ai-toolkit (not our config). The train Dockerfile patches
+# these at bake time to absolute local dirs. Runtime rewrite below is belt-and-suspenders only
+# (idempotent no-op when the image already scrubbed the strings).
 AITOOLKIT_UMT5_REPO = "ai-toolkit/umt5_xxl_encoder"
 AITOOLKIT_VAE_REPO = "ai-toolkit/wan2.1-vae"
 _AITOOLKIT_HUB_ID_FILES = (
@@ -79,17 +85,35 @@ _AITOOLKIT_TAIL_LINES = 40
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
 
+def default_wan_base_path() -> str:
+    """The base path/id written into ai-toolkit config for a train run.
+
+    Prefer (1) VIVIJURE_WAN_BASE_PATH env (train image bake), (2) the stable bake dir if it
+    exists on disk, else (3) the hub id -- which resolve_local_hf_snapshot must still turn into
+    a local snapshot before run.py (belt-and-suspenders; Conrad: bake is the real fix).
+    """
+    env = (os.environ.get(WAN_BASE_PATH_ENV) or "").strip()
+    if env:
+        return env
+    if Path(DEFAULT_WAN_BASE_PATH).is_dir():
+        return DEFAULT_WAN_BASE_PATH
+    return DEFAULT_WAN_BASE_REPO
+
+
 def resolve_local_hf_snapshot(repo_or_path: str) -> str:
     """Resolve a hub id or filesystem path to an absolute local snapshot directory.
 
     Hub ids under HF_HUB_OFFLINE=1 cannot be passed to diffusers from_pretrained: the loader still
     calls huggingface model_info() for sharded checkpoints and raises OfflineModeIsEnabled even when
-    the weights are fully baked. snapshot_download(local_files_only=True) is the offline-safe
-    resolver the train image already asserts at bake time.
+    the weights are fully baked. Prefer bake-time stable dirs; snapshot_download(local_files_only=True)
+    is the fallback resolver the train image asserts at bake time.
     """
     p = Path(repo_or_path)
     if p.is_dir():
         return str(p.resolve())
+    # Hub id that matches the baked Wan base: prefer the stable symlink the image materializes.
+    if repo_or_path == DEFAULT_WAN_BASE_REPO and Path(DEFAULT_WAN_BASE_PATH).is_dir():
+        return str(Path(DEFAULT_WAN_BASE_PATH).resolve())
     from huggingface_hub import snapshot_download  # local: keep module import light for CPU tests
 
     try:
@@ -151,7 +175,8 @@ class WanLoraTrainConfig:
     weight_decay: float = 1e-4
     seed: int = 0
     low_vram: bool = False          # False = both experts GPU-resident (80GB, proven); True = swap
-    base_repo: str = DEFAULT_WAN_BASE_REPO
+    # Default is bake-time local dir when present (see default_wan_base_path); hub id otherwise.
+    base_repo: str = field(default_factory=default_wan_base_path)
     # The caption every reference trains under. `{name}` fills from the slot; the name is the
     # trigger token the render prompt uses to summon the identity. Same substitution rules as the
     # SDXL trainer (str.replace, {name}/{prompt} only).

@@ -130,9 +130,24 @@ RUN cd /opt/models/hf-cache \
 # Build-time OFFLINE-COMPLETENESS gate (D2, cf#29): with HF offline ON (ENV above), resolve ALL THREE
 # repos ai-toolkit loads from the baked cache. snapshot_download(local_files_only=True) raises
 # LocalEntryNotFoundError if any repo/file is missing -> a false-offline fails the BUILD here, in
-# seconds, instead of burning an ~80min endpoint cold start. (D2c still runs a real offline train_lora
-# as the functional proof; this proves the 3 baked repos are offline-resolvable + complete.)
+# seconds, instead of burning an ~80min endpoint cold start.
 RUN conda run --no-capture-output -n aitoolkit python -c "from huggingface_hub import snapshot_download; [print('offline-resolve OK:', r, snapshot_download(r, local_files_only=True)) for r in ('ai-toolkit/Wan2.2-T2V-A14B-Diffusers-bf16','ai-toolkit/umt5_xxl_encoder','ai-toolkit/wan2.1-vae')]"
+
+# Conrad ruling (cf#29 D2c): BAKE stable local dirs + patch ai-toolkit hub IDs at image build.
+# HF-cache alone is necessary but not sufficient: hub IDs still call model_info() under
+# HF_HUB_OFFLINE=1 (OfflineModeIsEnabled -- the D2c failure). Materialize
+# /opt/models/aitoolkit/{wan-base,umt5,vae} and rewrite ai-toolkit source so train never
+# depends on HF network OR on runtime-only remapping.
+COPY deploy/bake_aitoolkit_offline_paths.py /tmp/bake_aitoolkit_offline_paths.py
+RUN conda run --no-capture-output -n aitoolkit python /tmp/bake_aitoolkit_offline_paths.py \
+    && rm -f /tmp/bake_aitoolkit_offline_paths.py
+ENV VIVIJURE_AITOOLKIT_WEIGHTS=/opt/models/aitoolkit \
+    VIVIJURE_WAN_BASE_PATH=/opt/models/aitoolkit/wan-base
+
+# Strong offline smoke: hub IDs toxic offline; local baked dirs load config with HF HTTP forbidden.
+COPY deploy/smoke_train_offline.py /tmp/smoke_train_offline.py
+RUN conda run --no-capture-output -n aitoolkit python /tmp/smoke_train_offline.py \
+    && rm -f /tmp/smoke_train_offline.py
 
 # Our package. src/ layout -> /opt/vivijure/vivijure_backend, on the inherited PYTHONPATH.
 WORKDIR /opt/vivijure
@@ -142,7 +157,7 @@ COPY deploy/smoke_imports.py /opt/vivijure/smoke_imports.py
 # Build-time import smoke (the torch-2.9 divergence gate, cf#29 D1): FAIL the build here, in
 # seconds, if the vivijure env cannot import the worker + wan seam, or the aitoolkit env cannot
 # import torch/diffusers, rather than discovering it on a GPU pod.
-RUN conda run --no-capture-output -n vivijure python -c "import vivijure_backend.worker, vivijure_backend.wan_lora_train as W; assert W.aitoolkit_python().endswith('/aitoolkit/bin/python'), W.aitoolkit_python(); print('vivijure import smoke OK; seam ->', W.aitoolkit_python())"
+RUN conda run --no-capture-output -n vivijure python -c "import vivijure_backend.worker, vivijure_backend.wan_lora_train as W; assert W.aitoolkit_python().endswith('/aitoolkit/bin/python'), W.aitoolkit_python(); assert W.default_wan_base_path().startswith('/opt/models/aitoolkit/'), W.default_wan_base_path(); print('vivijure import smoke OK; seam ->', W.aitoolkit_python(), 'base ->', W.default_wan_base_path())"
 RUN conda run --no-capture-output -n aitoolkit python -c "import torch, torchaudio, diffusers, transformers, safetensors; print('aitoolkit import smoke OK: torch', torch.__version__, 'torchaudio', torchaudio.__version__, 'diffusers', diffusers.__version__)"
 
 # Main process: the RunPod serverless loop in the vivijure env (prod). The train_lora+wan path shells
