@@ -93,9 +93,16 @@ false-offline: `HF_HUB_OFFLINE=1` passes the transformer load then dies at the U
 `<9.6GB` bins (`bake_layers.py bin --ceiling-gb 9.6`; largest shard ~9.28GB), and `train.Dockerfile`
 COPYs them into `HF_HOME` + verifies a union-keyed sha256 manifest. The image sets `HF_HUB_OFFLINE=1 /
 TRANSFORMERS_OFFLINE=1 / HF_DATASETS_OFFLINE=1` so a cold worker hits ZERO HF network; the endpoint
-template env can override to `0` as an escape hatch. MANDATORY: verify with a real offline (`=1`) train
-run (D2c) before trusting the bake -- a partial bake reads fine until the text-encoder load. (D1
-`:train-0.1.0` staged on-demand -- superseded.)
+template env can override to `0` as an escape hatch.
+
+**Offline load gotcha (D2c):** a complete bake is necessary but not sufficient. Under
+`HF_HUB_OFFLINE=1`, diffusers `from_pretrained(<hub_id>)` still calls HuggingFace `model_info()` for
+sharded checkpoints and raises `OfflineModeIsEnabled` even when the snapshot is fully local.
+`wan_lora_train` therefore (1) resolves `model.name_or_path` via `snapshot_download(...,
+local_files_only=True)` before writing the ai-toolkit config, and (2) rewrites ai-toolkit's hardcoded
+UMT5/VAE hub-id strings to absolute snapshot paths before `run.py`. MANDATORY: verify with a real
+offline (`=1`) train run (D2c) before trusting the bake. (D1 `:train-0.1.0` staged on-demand --
+superseded.)
 
 ## The recipe (spike-proven defaults, `WanLoraTrainConfig`)
 

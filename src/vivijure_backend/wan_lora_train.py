@@ -33,7 +33,8 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .contract import Character
@@ -57,11 +58,80 @@ AITOOLKIT_PYTHON_ENV = "VIVIJURE_AITOOLKIT_PYTHON"
 # (shared DiT attention layers). See the module docstring for the queued I2V-base experiment.
 DEFAULT_WAN_BASE_REPO = "ai-toolkit/Wan2.2-T2V-A14B-Diffusers-bf16"
 
+# Hardcoded HF hub IDs inside ai-toolkit (not our config). Under HF_HUB_OFFLINE=1, diffusers'
+# from_pretrained(hub_id) still phones model_info() for shard lists and raises OfflineModeIsEnabled
+# even when the bake is complete. We rewrite these to absolute snapshot paths before run.py.
+AITOOLKIT_UMT5_REPO = "ai-toolkit/umt5_xxl_encoder"
+AITOOLKIT_VAE_REPO = "ai-toolkit/wan2.1-vae"
+_AITOOLKIT_HUB_ID_FILES = (
+    # (relative path under the ai-toolkit checkout, hub id string as it appears in source)
+    ("toolkit/models/wan21/wan21.py", AITOOLKIT_UMT5_REPO),
+    ("extensions_built_in/diffusion_models/wan22/wan22_14b_model.py", AITOOLKIT_VAE_REPO),
+)
+
 # The two MoE experts a Wan A14B LoRA is split across. Order is fixed; the harvest + the upload
 # keys key off these exact names.
 EXPERTS = ("high", "low")
 
+# How many trailing stdout lines to keep for a non-zero ai-toolkit exit (RunPod stream often empty).
+_AITOOLKIT_TAIL_LINES = 40
+
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def resolve_local_hf_snapshot(repo_or_path: str) -> str:
+    """Resolve a hub id or filesystem path to an absolute local snapshot directory.
+
+    Hub ids under HF_HUB_OFFLINE=1 cannot be passed to diffusers from_pretrained: the loader still
+    calls huggingface model_info() for sharded checkpoints and raises OfflineModeIsEnabled even when
+    the weights are fully baked. snapshot_download(local_files_only=True) is the offline-safe
+    resolver the train image already asserts at bake time.
+    """
+    p = Path(repo_or_path)
+    if p.is_dir():
+        return str(p.resolve())
+    from huggingface_hub import snapshot_download  # local: keep module import light for CPU tests
+
+    try:
+        return snapshot_download(repo_or_path, local_files_only=True)
+    except Exception as e:
+        raise FileNotFoundError(
+            f"HF snapshot {repo_or_path!r} not in local cache "
+            f"(HF_HOME={os.environ.get('HF_HOME', '')!r}); train image must bake it. "
+            f"underlying={e}"
+        ) from e
+
+
+def patch_aitoolkit_hub_ids_for_offline(cwd: Path) -> dict[str, str]:
+    """Rewrite ai-toolkit's hardcoded UMT5/VAE hub ids to absolute local snapshot paths.
+
+    Idempotent: skips a file whose hub-id string is already gone. Returns the resolved paths
+    (keys: umt5, vae) for logging/tests. If NONE of the target files exist (a stub checkout used
+    by CPU unit tests), returns {} without resolving. A partial checkout (some files present,
+    some missing) raises -- that is a broken train image, not a test stub.
+    """
+    cwd = Path(cwd)
+    present = [(rel, hub_id) for rel, hub_id in _AITOOLKIT_HUB_ID_FILES if (cwd / rel).is_file()]
+    if not present:
+        return {}
+    if len(present) != len(_AITOOLKIT_HUB_ID_FILES):
+        missing = [rel for rel, _ in _AITOOLKIT_HUB_ID_FILES if not (cwd / rel).is_file()]
+        raise FileNotFoundError(
+            f"ai-toolkit offline hub-id patch: incomplete checkout under {cwd}; "
+            f"missing {missing} (set {AITOOLKIT_DIR_ENV})")
+    resolved = {
+        "umt5": resolve_local_hf_snapshot(AITOOLKIT_UMT5_REPO),
+        "vae": resolve_local_hf_snapshot(AITOOLKIT_VAE_REPO),
+    }
+    by_repo = {AITOOLKIT_UMT5_REPO: resolved["umt5"], AITOOLKIT_VAE_REPO: resolved["vae"]}
+    for rel, hub_id in present:
+        path = cwd / rel
+        text = path.read_text(encoding="utf-8")
+        needle = f'"{hub_id}"'
+        if needle not in text:
+            continue  # already patched (or upstream renamed the string)
+        path.write_text(text.replace(needle, repr(by_repo[hub_id])), encoding="utf-8")
+    return resolved
 
 
 @dataclass
@@ -248,20 +318,28 @@ def _run_aitoolkit(config_path: Path, *, cwd: Path, progress_cb=None) -> None:
     and ai-toolkit's conflicting deps stay in separate conda envs (cf#29 D1). Streams the child's
     output to this worker's stdout (so RunPod captures the training log) and forwards coarse
     progress lines to `progress_cb` when one is wired. Injectable (`runner=` on `train_slot_wan`)
-    so everything else in this module tests without a GPU."""
+    so everything else in this module tests without a GPU.
+
+    Before launch: rewrite ai-toolkit's hardcoded UMT5/VAE hub ids to local snapshot paths so
+    HF_HUB_OFFLINE=1 does not crash on model_info() (cf#29 D2c). On non-zero exit, the exception
+    carries the last N stdout lines (RunPod's status stream is often empty).
+    """
     run_py = Path(cwd) / "run.py"
     if not run_py.is_file():
         raise FileNotFoundError(
             f"ai-toolkit run.py not found at {run_py} (set {AITOOLKIT_DIR_ENV} to the checkout; "
             "the training image must provide ai-toolkit)")
+    patch_aitoolkit_hub_ids_for_offline(cwd)
     proc = subprocess.Popen(
         [aitoolkit_python(), "run.py", str(config_path)],
         cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
     )
     assert proc.stdout is not None
+    tail: deque[str] = deque(maxlen=_AITOOLKIT_TAIL_LINES)
     for line in proc.stdout:
         sys.stdout.write(line)
         sys.stdout.flush()
+        tail.append(line.rstrip("\n"))
         if progress_cb is not None:
             try:
                 progress_cb(line.rstrip("\n"))
@@ -269,7 +347,11 @@ def _run_aitoolkit(config_path: Path, *, cwd: Path, progress_cb=None) -> None:
                 pass  # best-effort: a progress hook must never break training
     rc = proc.wait()
     if rc != 0:
-        raise RuntimeError(f"ai-toolkit run.py exited {rc} for config {config_path}")
+        excerpt = "\n".join(tail) if tail else "(no stdout captured)"
+        raise RuntimeError(
+            f"ai-toolkit run.py exited {rc} for config {config_path}\n"
+            f"--- last {len(tail)} lines ---\n{excerpt}"
+        )
 
 
 def train_slot_wan(
@@ -291,6 +373,9 @@ def train_slot_wan(
     import yaml  # local: keep the module import CPU-only and dependency-light at import time
 
     cfg = config or WanLoraTrainConfig()
+    # Hub id -> local snapshot so model.name_or_path never trips OfflineModeIsEnabled (cf#29 D2c).
+    # Injected runners / unit tests that pass an absolute path are unchanged (is_dir short-circuit).
+    cfg = replace(cfg, base_repo=resolve_local_hf_snapshot(cfg.base_repo))
     run = runner or _run_aitoolkit
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -305,7 +390,6 @@ def train_slot_wan(
     config_path.write_text(yaml.safe_dump(config_dict, sort_keys=False), encoding="utf-8")
 
     run(config_path, cwd=aitoolkit_dir(), progress_cb=progress_cb)
-
     high_path, low_path = harvest_experts(training_folder / name, name)
     return TrainedWanLora(
         slot=char.slot,
