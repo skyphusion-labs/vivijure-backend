@@ -570,3 +570,17 @@ def test_runpod_hook_falls_back_to_sdk_progress_update_without_rp_progress(monke
     hook({"status": "running", "counts": {}})
     assert [s["status"] for s in sent] == ["running"]
     hook.quiesce()                # no tracked threads: a no-op, never an error
+
+
+# --------------------------------------------------- i2v prefetch gate (cf#29 D2a)
+
+def test_wants_i2v_prefetch_skips_train_only_and_finish():
+    from vivijure_backend.harness.handler import _wants_i2v_prefetch
+    # SKIP: these jobs never load the Wan i2v pipeline, so the ~120GB prefetch must not start.
+    assert _wants_i2v_prefetch("finish_clip") is False
+    assert _wants_i2v_prefetch("train_lora") is False
+    # KEEP (positive controls): every render-path action still eagerly prefetches i2v.
+    for action in ("render", "finalize", "preview", "regen_shot"):
+        assert _wants_i2v_prefetch(action) is True, action
+    # default/unknown action falls through to the render path -> keep the prefetch
+    assert _wants_i2v_prefetch("render") is True
