@@ -73,14 +73,14 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -eu
-          python -m venv /tmp/hfdl
+          python3 -m venv /tmp/hfdl
           /tmp/hfdl/bin/pip install --quiet --upgrade huggingface_hub
           echo "Downloading the 3 HF repos ai-toolkit loads at train (~64GB) into the HF cache layout..."
           /tmp/hfdl/bin/python -c "from huggingface_hub import snapshot_download; [print('snapshot', r, '->', snapshot_download(r)) for r in ('ai-toolkit/Wan2.2-T2V-A14B-Diffusers-bf16','ai-toolkit/umt5_xxl_encoder','ai-toolkit/wan2.1-vae')]"
           echo "Non-hollow gate, then bin-pack <9.6GB/layer (10GB GHCR ceiling; largest shard ~9.28GB)..."
-          python deploy/bake_layers.py assert-weights --root "${HF_HOME}" --min-gb 55
-          python deploy/bake_layers.py bin --src "${HF_HOME}" --out deploy/train-bins --bins 12 --ceiling-gb 9.6 --min-gb 55
-          python deploy/bake_layers.py manifest --bins-root deploy/train-bins --out deploy/train-bins/weights-manifest.sha256
+          python3 deploy/bake_layers.py assert-weights --root "${HF_HOME}" --min-gb 55
+          python3 deploy/bake_layers.py bin --src "${HF_HOME}" --out deploy/train-bins --bins 12 --ceiling-gb 9.6 --min-gb 55
+          python3 deploy/bake_layers.py manifest --bins-root deploy/train-bins --out deploy/train-bins/weights-manifest.sha256
           rm -rf "${HF_HOME}"
           echo "Bins ready:"; ls -la deploy/train-bins/
 
@@ -117,7 +117,7 @@ jobs:
         run: |
           set -eu
           IMG="${REGISTRY}/${OWNER}/${IMAGE}:${{ steps.cfg.outputs.tag }}"
-          python deploy/bake_layers.py verify-image --image "${IMG}" --ceiling-gb 10.0
+          python3 deploy/bake_layers.py verify-image --image "${IMG}" --ceiling-gb 10.0
 
       # Dual-env import smoke (CPU, no GPU): the worker imports in the vivijure env AND ai-toolkit's
       # run.py entrypoint imports in the aitoolkit env. Catches a broken isolation in seconds rather
