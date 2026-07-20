@@ -95,14 +95,22 @@ COPYs them into `HF_HOME` + verifies a union-keyed sha256 manifest. The image se
 TRANSFORMERS_OFFLINE=1 / HF_DATASETS_OFFLINE=1` so a cold worker hits ZERO HF network; the endpoint
 template env can override to `0` as an escape hatch.
 
-**Offline load gotcha (D2c):** a complete bake is necessary but not sufficient. Under
-`HF_HUB_OFFLINE=1`, diffusers `from_pretrained(<hub_id>)` still calls HuggingFace `model_info()` for
-sharded checkpoints and raises `OfflineModeIsEnabled` even when the snapshot is fully local.
-`wan_lora_train` therefore (1) resolves `model.name_or_path` via `snapshot_download(...,
-local_files_only=True)` before writing the ai-toolkit config, and (2) rewrites ai-toolkit's hardcoded
-UMT5/VAE hub-id strings to absolute snapshot paths before `run.py`. MANDATORY: verify with a real
-offline (`=1`) train run (D2c) before trusting the bake. (D1 `:train-0.1.0` staged on-demand --
-superseded.)
+**Offline load gotcha (D2c) + Conrad ruling:** a complete HF-cache bake is necessary but not
+sufficient. Under `HF_HUB_OFFLINE=1`, diffusers `from_pretrained(<hub_id>)` still calls HuggingFace
+`model_info()` for sharded checkpoints and raises `OfflineModeIsEnabled` even when the snapshot is
+fully local. Conrad: **bake it, don't just remap** -- the train image must:
+
+1. Materialize stable dirs `/opt/models/aitoolkit/{wan-base,umt5,vae}` (symlinks into the baked
+   HF-cache snapshots) via `deploy/bake_aitoolkit_offline_paths.py`
+2. **Patch ai-toolkit at image build** so the hardcoded UMT5/VAE hub-id strings become those
+   absolute paths (no train-time HF dependency)
+3. Set `VIVIJURE_WAN_BASE_PATH=/opt/models/aitoolkit/wan-base` so worker config never ships a hub id
+4. Pass `deploy/smoke_train_offline.py` (hub ids still toxic offline; local config loads with HF
+   HTTP forbidden)
+
+Runtime `resolve_local_hf_snapshot` / hub-id rewrite in `wan_lora_train` is belt-and-suspenders only.
+MANDATORY: verify with a real offline (`=1`) train run (D2c) before trusting the bake. (D1
+`:train-0.1.0` staged on-demand -- superseded.)
 
 ## The recipe (spike-proven defaults, `WanLoraTrainConfig`)
 
