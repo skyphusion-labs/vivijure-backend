@@ -18,9 +18,10 @@
 # and wan_lora_train launches run.py under VIVIJURE_AITOOLKIT_PYTHON (set below). Both envs share the
 # same Blackwell-safe cu128 torch 2.7.1 line so neither fights the toolchain.
 #
-# BASE MODEL WEIGHTS (Wan2.2-T2V-A14B-Diffusers-bf16, ~50GB+) are NOT baked in D1: they stage into
-# the HF cache on first use. For the D2 prod endpoint, bake them per the bake doctrine (per-file
-# layers under the 10GB GHCR ceiling; a bf16 expert can exceed 10GB and needs splitting).
+# BASE MODEL WEIGHTS (Wan2.2-T2V-A14B-Diffusers-bf16, ~53GB) are BAKED (D2, cf#29): the build workflow
+# snapshot_downloads the repo into the HF-cache layout and bin-packs it into per-layer <9.6GB bins
+# (bake_layers.py; the 10GB GHCR ceiling forces the split -- a bf16 expert shard is ~9.3GB), then this
+# Dockerfile COPYs the bins into HF_HOME and verifies a sha256 manifest. A cold worker never re-pulls.
 
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
@@ -42,9 +43,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONPATH=/opt/vivijure \
     HF_HOME=/opt/models/hf-cache \
     VJ_MODELS_ROOT=/opt/models \
-    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-# NB: HF offline flags are deliberately NOT baked here -- a train endpoint stages the Wan base from
-# HF; the prod endpoint can flip offline via template env once the base is baked (D2).
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_DATASETS_OFFLINE=1
+# HF offline is ON (D2): the Wan base is BAKED below into HF_HOME, so a cold worker never phones home.
+# The endpoint template env can override (HF_HUB_OFFLINE=0) as an escape hatch if ai-toolkit ever needs
+# a file beyond the baked base -- but the correct fix then is to ADD it to the bake, not to ship online.
 
 # System deps: the SAME set the runtime base installs (ffmpeg + the libs opencv/insightface need at
 # import), plus openssh-server for reliable debug-pod SSH (baked, so no fragile runtime install).
@@ -95,6 +100,30 @@ RUN conda run --no-capture-output -n aitoolkit python -m pip install \
 # Point the worker's ai-toolkit seam at the isolated env. The worker (CMD) stays the vivijure env.
 ENV VIVIJURE_AITOOLKIT_DIR=/opt/ai-toolkit \
     VIVIJURE_AITOOLKIT_PYTHON=/opt/conda/envs/aitoolkit/bin/python
+
+# --- BAKED Wan 2.2 A14B base (D2, cf#29) ------------------------------------------------------------
+# train-image-build.yml snapshot_downloads ai-toolkit/Wan2.2-T2V-A14B-Diffusers-bf16 (~53GB) into the
+# HF-cache layout and bin-packs it into per-layer <9.6GB bins (deploy/train-bins/, gitignored + CI-only).
+# COPY each bin as ONE layer into HF_HOME so the union reconstructs the cache tree; then verify the
+# union-keyed sha256 manifest (a byte mismatch fails the build LOUD). BEFORE COPY src so a code change
+# never busts the ~53GB weight layers. Empty bins (bin_pack pre-creates all 12) are free zero-byte layers.
+COPY deploy/train-bins/bin-00/ /opt/models/hf-cache/
+COPY deploy/train-bins/bin-01/ /opt/models/hf-cache/
+COPY deploy/train-bins/bin-02/ /opt/models/hf-cache/
+COPY deploy/train-bins/bin-03/ /opt/models/hf-cache/
+COPY deploy/train-bins/bin-04/ /opt/models/hf-cache/
+COPY deploy/train-bins/bin-05/ /opt/models/hf-cache/
+COPY deploy/train-bins/bin-06/ /opt/models/hf-cache/
+COPY deploy/train-bins/bin-07/ /opt/models/hf-cache/
+COPY deploy/train-bins/bin-08/ /opt/models/hf-cache/
+COPY deploy/train-bins/bin-09/ /opt/models/hf-cache/
+COPY deploy/train-bins/bin-10/ /opt/models/hf-cache/
+COPY deploy/train-bins/bin-11/ /opt/models/hf-cache/
+COPY deploy/train-bins/weights-manifest.sha256 /opt/models/hf-cache/weights-manifest.sha256
+RUN cd /opt/models/hf-cache \
+    && sha256sum -c weights-manifest.sha256 --quiet \
+    && echo "wan base bake: sha256 verified ($(wc -l < weights-manifest.sha256) files)." \
+    && rm -f weights-manifest.sha256
 
 # Our package. src/ layout -> /opt/vivijure/vivijure_backend, on the inherited PYTHONPATH.
 WORKDIR /opt/vivijure
