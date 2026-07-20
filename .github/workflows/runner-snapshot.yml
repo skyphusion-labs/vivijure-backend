@@ -1,133 +1,20 @@
-name: Build runner snapshot image (#537)
+name: runner-snapshot (RETIRED)
 
-# Bake a CUSTOM RUNNER IMAGE that pre-stages what the backend bakes need, so they become
-# assemble + push only. This is the ACCELERATOR half of #537: it pre-pulls the pinned base image(s)
-# + the build toolchain (buildx, Hugging Face CLI) into the runner image's docker cache /
-# filesystem, then GitHub snapshots the runner into a reusable image (the `snapshot:` keyword, GA
-# 2026-03 for larger runners). Both consuming bakes run on a larger runner built from THIS image:
-#   - release.yml   (FROM the RUNTIME base@digest)  -> the runtime image must be pre-pulled.
-#   - runtime-build.yml (FROM the SEED image + 24x COPY --from=seed) -> the SEED image must be
-#     pre-pulled, or a runtime rebuild cold-pulls the ~87 GB seed on every deps/CVE bump.
-# So the snapshot carries BOTH the runtime base AND the seed; each bake reads its FROM cache-warm and
-# skips the ~87 GB pull.
-#
-# ACCELERATOR ONLY (design law #3): the consuming backend Dockerfile pins the RUNTIME base by DIGEST
-# and verifies its sha256 manifest. If this snapshot's cached base is older than the pinned digest,
-# docker pulls the newer one (SLOW); if a cached layer were ever wrong, `sha256sum -c` fails the build
-# LOUD. A stale snapshot can only ever make a build SLOWER, never change WHAT it builds. Rebuild the
-# snapshot (one dispatch) after a weights bump.
-#
-# DISPATCH-GATED ONLY (design law #5): larger / image-generation runners bill, so this never triggers
-# on a push/PR and is never fork-reachable.
-#
-# HOW THE `snapshot:` MECHANISM WORKS (GitHub custom images for larger runners):
-#   1. An org/enterprise admin creates an IMAGE-GENERATION runner (UI-only; enterprise group
-#      "Enterprise Image Generation Runners" group, provisioned by Conrad). This job's `runs-on` is
-#      that runner's label: ubuntu-latest-32c-128gb-1200-gen.
-#   2. This job installs the tools, and the job-level `snapshot:` key captures the runner state into a
-#      versioned image named `vivijure-bake-snapshot` on SUCCESS (a failed job creates no image).
-#   3. INFRA then creates a normal larger runner FROM that image, labels it, and release.yml's
-#      `runs-on` flips to that label. See the fleet-chezmoi handoff issue referenced from vivijure#537.
+# RETIRED 2026-07-20 (fc#754 Conrad ruling): Plane C `[self-hosted, gpu]` (vivijure-gpu-builds)
+# supersedes GH image-generation / larger-runner snapshot lanes. Do not re-enable.
+# Snapshot custom images (`vivijure-bake-snapshot`) are no longer consumed by publish/release workflows.
 
 on:
   workflow_dispatch:
-    inputs:
-      runtime_refs:
-        description: 'Space-separated base refs to pre-pull (tag or tag@digest). Include BOTH the runtime base (release.yml FROM) AND the seed (runtime-build.yml FROM). bf16 is prod.'
-        required: true
-        default: 'ghcr.io/skyphusion-labs/vivijure-backend:runtime-1-bf16-t1 ghcr.io/skyphusion-labs/vivijure-backend-seed:1-bf16@sha256:6c96ac5163d679786946a7f034ab446314dbde0c9f1a7c4b0f65403425aae971'
-  # Monthly BACKSTOP (#537 cadence): the snapshot is normally refreshed by runtime-build.yml's
-  # event-couple whenever a new runtime digest lands. This cron is the safety net (snapshot age is a
-  # health signal -- infra's half, fleet-chezmoi #370). On a scheduled run it reads the exact shipped
-  # runtime pin from deploy/Dockerfile AND the seed pin from deploy/runtime.Dockerfile (no drift).
-  schedule:
-    - cron: '0 7 1 * *'   # 07:00 UTC, 1st of each month (1h after the runtime re-bake floor)
 
 permissions:
-  contents: read   # checkout for the scheduled pin read
-  packages: read   # docker pull the runtime base from GHCR
-
-concurrency:
-  group: runner-snapshot
-  cancel-in-progress: false
+  contents: read
 
 jobs:
-  snapshot:
-    # The image-generation runner Conrad built (enterprise "Image Generation Runners" group,
-    # GitHub-owned Ubuntu 24.04, image-gen ENABLED, 32c/128GB/1200GB). Its label IS the runner name.
-    # Reachability + the enterprise tag/workflow allowlist are verified in the fleet-chezmoi handoff
-    # issue (see vivijure#537); this workflow's ref must match an allowlist entry to schedule.
-    runs-on: ubuntu-latest-32c-128gb-1200-gen
-    # The job-level snapshot key: on SUCCESS, GitHub captures this runner into the named image
-    # (auto-versioned: 1.0.0, then 1.1.0, ...). release.yml consumes a runner built from it.
-    snapshot: vivijure-bake-snapshot
-    timeout-minutes: 240
+  retired:
+    runs-on: ubuntu-latest
     steps:
-      # GHCR auth to pull the runtime base (public today, but least-privilege + private-safe).
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # buildx into the snapshot: the backend bake uses docker/build-push-action (BuildKit).
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      # A scheduled backstop run has no inputs, so read the exact shipped pins (tag@digest) from the
-      # committed Dockerfiles -- the snapshot always pre-pulls whatever is actually shipped, never a
-      # drifted constant: the RUNTIME base from deploy/Dockerfile (release.yml FROM) and the SEED from
-      # deploy/runtime.Dockerfile (runtime-build.yml FROM). A dispatch passes runtime_refs and skips this.
-      - name: Checkout (scheduled pin read)
-        if: github.event_name == 'schedule'
-        uses: actions/checkout@v7
-
-      - name: Resolve refs to pre-pull
-        id: refs
+      - name: Fail closed
         run: |
-          set -eu
-          REFS="${{ github.event.inputs.runtime_refs }}"
-          if [ -z "${REFS}" ]; then
-            RT="$(grep '^ARG RUNTIME_REF_BF16=' deploy/Dockerfile | sed 's/^ARG RUNTIME_REF_BF16=//')"
-            SEED="$(grep '^ARG SEED_REF_BF16=' deploy/runtime.Dockerfile | sed 's/^ARG SEED_REF_BF16=//')"
-            [ -n "${RT}" ]   || { echo "::error::no runtime_refs input and no RUNTIME_REF_BF16 pin found"; exit 1; }
-            [ -n "${SEED}" ] || { echo "::error::no SEED_REF_BF16 pin found in deploy/runtime.Dockerfile"; exit 1; }
-            REFS="${RT} ${SEED}"
-            echo "Scheduled backstop: pre-pulling the shipped pins ${REFS}"
-          fi
-          echo "refs=${REFS}" >> "$GITHUB_OUTPUT"
-
-      # THE POINT: pull the pinned base image(s) -- the runtime base (release FROM) AND the seed
-      # (runtime-build FROM) -- so they live in the runner's docker image store BEFORE the snapshot.
-      # A backend bake on the resulting runner then reads its FROM cache-warm instead of pulling ~87 GB.
-      - name: Pre-pull base image(s) into the docker cache
-        run: |
-          set -eu
-          for ref in ${{ steps.refs.outputs.refs }}; do
-            echo "::group::docker pull ${ref}"
-            docker pull "${ref}"
-            echo "::endgroup::"
-          done
-          echo "Pre-pulled: ${{ steps.refs.outputs.refs }}"
-
-      # HF CLI into the snapshot (toolchain the seed-curation / staging paths use). pipx keeps it
-      # isolated; the binary + venv persist on the runner filesystem the snapshot captures.
-      - name: Install the Hugging Face CLI
-        run: |
-          set -eu
-          python3 -m pip install --user --upgrade pipx || python3 -m pip install --upgrade pipx
-          python3 -m pipx ensurepath || true
-          pipx install "huggingface_hub[cli]" || python3 -m pip install --user "huggingface_hub[cli]"
-          hf --help >/dev/null 2>&1 || huggingface-cli --help >/dev/null 2>&1 || true
-          echo "Hugging Face CLI installed."
-
-      - name: Report cached state (what the snapshot will carry)
-        run: |
-          set -eu
-          echo "== docker images (runtime base + seed should both be present) =="
-          docker images --format '{{.Repository}}:{{.Tag}}  {{.Size}}' | sed -n '1,20p'
-          echo "== buildx =="
-          docker buildx version || true
-          echo "== disk =="
-          df -h / | tail -1
+          echo "::error::runner-snapshot retired (fc#754). Image bakes use Plane C [self-hosted, gpu]."
+          exit 1

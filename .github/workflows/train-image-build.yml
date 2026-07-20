@@ -9,8 +9,8 @@ name: Build Wan LoRA training image to GHCR (cf#29)
 #
 # The D2 training endpoint pins this by :version (bare, NEVER :sha -- runpod-endpoint-image-tag-version-not-sha).
 #
-# workflow_dispatch ONLY (never fork-reachable; larger runner bills). Runs on a self-hosted fleet
-# runner (disk for a ~15-20GB image build). BASE = a LEAN nvidia/cuda:12.8.1 base (cf#29 D1): the
+# workflow_dispatch ONLY (never fork-reachable). Runs on Plane C `[self-hosted, gpu]`
+# (vivijure-gpu-builds / propagandhi; fc#754). BASE = a LEAN nvidia/cuda:12.8.1 base (cf#29 D1): the
 # train image reproduces the worker's validated env (cu128 torch + deploy/requirements.txt) MINUS the
 # ~87GB render weight bake a train endpoint never loads -- so it is small and cold-pulls fast, unlike
 # the render image. torch 2.7.1 was delisted from the cu128 index; the image uses 2.9.0 and gates it
@@ -45,7 +45,7 @@ env:
 
 jobs:
   build-and-push:
-    runs-on: vivijure-bake-snap
+    runs-on: [self-hosted, gpu]
     timeout-minutes: 180
     steps:
       - name: Checkout repository
