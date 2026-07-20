@@ -19,11 +19,9 @@ name: Build runtime base image to GHCR (#537)
 # version). Rebuild triggers: a toolchain/deps/CUDA bump (bump toolchain_version) OR a weight bump
 # (rebuild the seed, repin SEED_REF in deploy/runtime.Dockerfile, bump model_version).
 #
-# workflow_dispatch ONLY (never fork-reachable; larger runners bill -- design law #5). Runs on the
-# SNAPSHOT runner vivijure-bake-snap, which pre-pulls the pinned SEED image (runner-snapshot.yml), so
-# `FROM seed` is a warm local hit and the ~87 GB seed pull is skipped on every runtime rebuild. A stale
-# or absent snapshot degrades to a one-time cold seed pull -- SLOWER, never wrong (the sha256 manifest
-# gate still verifies every baked weight). Before #-warm-runtime this ran cold on plain vivijure-bake.
+# workflow_dispatch ONLY (never fork-reachable). Runs on Plane C `[self-hosted, gpu]`
+# (vivijure-gpu-builds; fc#754). First bake may cold-pull the seed; later builds hit local docker
+# cache. Manifest gate still verifies every baked weight. GH snapshot lane RETIRED.
 
 on:
   workflow_dispatch:
@@ -82,7 +80,7 @@ jobs:
     # The SNAPSHOT runner (built from vivijure-bake-snapshot, which pre-pulls the seed): `FROM seed`
     # is a warm local cache hit here, so a runtime rebuild skips the ~87 GB seed pull. Same runner
     # release.yml uses; both bakes are dispatch-gated + infrequent, so no meaningful contention.
-    runs-on: vivijure-bake-snap
+    runs-on: [self-hosted, gpu]
     timeout-minutes: 180
     steps:
       - name: Checkout repository

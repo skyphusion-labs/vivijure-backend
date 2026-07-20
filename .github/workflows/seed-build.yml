@@ -11,12 +11,10 @@ name: Build seed image to GHCR (#537)
 # or per-tag event) -- so it is never fork-reachable and never runs untrusted code on the larger runner
 # (design law #5: snapshot/large-runner jobs are dispatch-gated only, larger runners bill).
 #
-# Runner: the org GitHub-hosted larger runner "vivijure-bake" (32-core / 128 GB / 1200 GB SSD) -- the
-# SAME lane release.yml uses. This build stages the seed from R2, reconstructs HF-cache symlinks,
-# bin-packs into <10 GB layers, WRITES THE UNION-KEYED SHA-256 MANIFEST, asserts a real (non-hollow)
-# weight set, builds the debian-slim carrier with the bins baked, per-layer-gates it, and pushes.
-# CPU-only, no GPU. The consuming backend Dockerfile pins the pushed tag+digest and verifies the
-# manifest. The runner snapshot (.github/workflows/runner-snapshot.yml) pre-pulls the pushed image.
+# Runner: Plane C `[self-hosted, gpu]` (vivijure-gpu-builds; fc#754). CPU-only bake on the GPU
+# pool (label is the pool membership). Stages seed from R2, reconstructs HF-cache symlinks,
+# bin-packs, writes the union-keyed SHA-256 manifest, asserts a real weight set, builds and pushes.
+# Consuming Dockerfile pins tag+digest. GH runner-snapshot lane is RETIRED.
 
 on:
   workflow_dispatch:
@@ -49,7 +47,7 @@ env:
 
 jobs:
   build-and-push:
-    runs-on: vivijure-bake
+    runs-on: [self-hosted, gpu]
     timeout-minutes: 180
     steps:
       - name: Checkout repository
@@ -71,8 +69,23 @@ jobs:
           echo "seed_prefix=bake-seed-${PREC}/"   >> "$GITHUB_OUTPUT"
           echo "Building ${SEED_IMAGE}:${TAG} (precision=${PREC}, seed=bake-seed-${PREC}/)."
 
-      - name: Install rclone
-        run: curl -fsSL https://rclone.org/install.sh | sudo bash
+      - name: Install rclone (user-local; ghrunner has no sudo)
+        run: |
+          set -eu
+          if command -v rclone >/dev/null 2>&1; then
+            rclone version
+            exit 0
+          fi
+          curl -fsSL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
+          python3 - <<'PY2'
+          import zipfile
+          zipfile.ZipFile("/tmp/rclone.zip").extractall("/tmp")
+          PY2
+          mkdir -p "${HOME}/bin"
+          cp /tmp/rclone-*-linux-amd64/rclone "${HOME}/bin/rclone"
+          chmod 755 "${HOME}/bin/rclone"
+          echo "${HOME}/bin" >> "$GITHUB_PATH"
+          "${HOME}/bin/rclone" version
 
       # A read-only, per-CI R2 token scoped to the vivijure bucket (per-function key). Set
       # R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT as repo or org Actions secrets -- NEVER
