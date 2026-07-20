@@ -262,6 +262,10 @@ class RenderRequest:
     # Optional audio bed: an R2 key the control plane staged (e.g. audio/<uuid>.m4a). The harness
     # fetches it and muxes it under the final video; None leaves the render silent.
     audio_key: str | None = None
+    # Which LoRA family a train job fits / a render consumes: "sdxl" (the in-process SDXL adapter,
+    # the default) or "wan" (the Wan 2.2 A14B two-expert adapter trained via ai-toolkit, vivijure-cf
+    # #29). Routes orchestrator cost + the pipeline trainer; an unknown value falls back to "sdxl".
+    model_family: str = "sdxl"
     # NOTE: there is deliberately NO submitter-identity field. The control plane completed the
     # anti-SaaS identity strip (vivijure #292): the studio is single-operator, sends no user_email,
     # and serves /api/artifact by key with no per-row ownership check. A legacy/hostile job body that
@@ -284,6 +288,7 @@ class RenderRequest:
             process_shot_ids=d.get("process_shot_ids") if isinstance(d.get("process_shot_ids"), list) else None,
             audio_key=_str(d.get("audio_key")) or None,
             keyframes_only=_bool(d.get("keyframes_only")),
+            model_family=_str(d.get("model_family"), "sdxl"),
         )
 
 

@@ -29,6 +29,19 @@ def lora_key(project: str, slot: str) -> str:
     return f"loras/{_slug(project)}/{_slug(slot)}/pytorch_lora_weights.safetensors"
 
 
+def wan_lora_key(project: str, slot: str, expert: str) -> str:
+    """A trained Wan 2.2 A14B character adapter, by slot and MoE expert (`high` / `low`).
+
+    Wan A14B is a two-expert mixture, so a Wan character LoRA is TWO files (a high-noise and a
+    low-noise adapter) that the render module feeds to `high_noise_loras` / `low_noise_loras`.
+    Each expert lands at its own key beside the single-file SDXL `lora_key`. `expert` is pinned to
+    {high, low} so a typo can never scatter a third phantom object into the project prefix."""
+    e = str(expert).strip().lower()
+    if e not in ("high", "low"):
+        raise ValueError(f"wan_lora_key: expert must be 'high' or 'low', got {expert!r}")
+    return f"loras/{_slug(project)}/{_slug(slot)}/wan_{e}_noise.safetensors"
+
+
 def keyframe_key(project: str, shot_id: str) -> str:
     """A rendered SDXL keyframe, by shot."""
     return f"renders/{_slug(project)}/keyframes/{_slug(shot_id)}.png"

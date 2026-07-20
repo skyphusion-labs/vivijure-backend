@@ -62,6 +62,11 @@ class KeyframeMode(str, Enum):
 # is an order-of-magnitude "what will this cost" before anything burns, not a stopwatch.
 _COST = {
     "lora_train_per_slot": 180.0,
+    # Wan 2.2 A14B LoRA training is a different order of magnitude from the SDXL adapter: the
+    # Phase-0 spike (vivijure-cf #29) bound identity in ~40min on an 80GB A100 (a full to-2000-step
+    # run is longer). This estimate is GPU-HOURS-scale, deliberately conservative (the planner
+    # over-estimates by design), and used only when a train job is model_family="wan".
+    "wan_lora_train_per_slot": 3600.0,
     "keyframe_generate": 6.0,
     "i2v_per_target_second": {QualityTier.DRAFT: 4.0, QualityTier.STANDARD: 9.0, QualityTier.FINAL: 18.0},
 }
@@ -99,6 +104,7 @@ class RenderPlan:
     assemble_off_gpu: bool          # merge on a CPU container, never burn GPU on ffmpeg
     estimated_gpu_seconds: float
     skips: list[str] = field(default_factory=list)   # every GPU unit the plan eliminated, in words
+    lora_family: str = "sdxl"                        # "sdxl" (in-process) or "wan" (ai-toolkit A14B)
 
     @property
     def keyframes_to_generate(self) -> int:
@@ -184,6 +190,7 @@ def plan(
     """Decide the whole render on the CPU. Nothing here touches a GPU."""
     action = Action.parse(request.action)
     quality = QualityTier.parse(request.quality_tier)
+    lora_family = "wan" if str(getattr(request, "model_family", "sdxl")).strip().lower() == "wan" else "sdxl"
     skips: list[str] = []
 
     # --- which scenes are in scope (finalize / regen can target a subset) ---
@@ -247,6 +254,7 @@ def plan(
         assemble_off_gpu=assemble_off_gpu,
         estimated_gpu_seconds=0.0,
         skips=skips,
+        lora_family=lora_family,
     )
     plan_obj.estimated_gpu_seconds = _estimate_cost(plan_obj)
     return plan_obj
@@ -277,7 +285,8 @@ def _estimate_cost(p: RenderPlan) -> float:
     # and MIXCACHE (final tier) reduce actual i2v GPU-seconds by 30-50%; the estimate is
     # therefore conservative (high) for those tiers and is intended only as an order-of-magnitude
     # pre-flight check, not a billing figure.
-    secs = len(p.lora.train) * _COST["lora_train_per_slot"]
+    per_slot = _COST["wan_lora_train_per_slot"] if p.lora_family == "wan" else _COST["lora_train_per_slot"]
+    secs = len(p.lora.train) * per_slot
     secs += p.keyframes_to_generate * _COST["keyframe_generate"]
     per_sec = _COST["i2v_per_target_second"][p.quality]
     for s in p.scenes:
