@@ -108,7 +108,7 @@ ENV VIVIJURE_AITOOLKIT_DIR=/opt/ai-toolkit \
 # HF-cache layout and bin-packs them into per-layer <9.6GB bins (deploy/train-bins/, gitignored + CI-only).
 # COPY each bin as ONE layer into HF_HOME so the union reconstructs the cache tree; then verify the
 # union-keyed sha256 manifest (a byte mismatch fails the build LOUD). BEFORE COPY src so a code change
-# never busts the ~53GB weight layers. Empty bins (bin_pack pre-creates all 12) are free zero-byte layers.
+# never busts the ~64GB weight layers. Empty bins (bin_pack pre-creates all 12) are free zero-byte layers.
 COPY deploy/train-bins/bin-00/ /opt/models/hf-cache/
 COPY deploy/train-bins/bin-01/ /opt/models/hf-cache/
 COPY deploy/train-bins/bin-02/ /opt/models/hf-cache/
@@ -126,6 +126,13 @@ RUN cd /opt/models/hf-cache \
     && sha256sum -c weights-manifest.sha256 --quiet \
     && echo "wan base bake: sha256 verified ($(wc -l < weights-manifest.sha256) files)." \
     && rm -f weights-manifest.sha256
+
+# Build-time OFFLINE-COMPLETENESS gate (D2, cf#29): with HF offline ON (ENV above), resolve ALL THREE
+# repos ai-toolkit loads from the baked cache. snapshot_download(local_files_only=True) raises
+# LocalEntryNotFoundError if any repo/file is missing -> a false-offline fails the BUILD here, in
+# seconds, instead of burning an ~80min endpoint cold start. (D2c still runs a real offline train_lora
+# as the functional proof; this proves the 3 baked repos are offline-resolvable + complete.)
+RUN conda run --no-capture-output -n aitoolkit python -c "from huggingface_hub import snapshot_download; [print('offline-resolve OK:', r, snapshot_download(r, local_files_only=True)) for r in ('ai-toolkit/Wan2.2-T2V-A14B-Diffusers-bf16','ai-toolkit/umt5_xxl_encoder','ai-toolkit/wan2.1-vae')]"
 
 # Our package. src/ layout -> /opt/vivijure/vivijure_backend, on the inherited PYTHONPATH.
 WORKDIR /opt/vivijure
