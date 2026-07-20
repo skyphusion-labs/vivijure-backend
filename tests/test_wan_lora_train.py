@@ -291,3 +291,50 @@ def test_wan_restore_half_upload_is_not_trained(tmp_path):
                   pipeline=_WanFakePipeline(), store=store, workdir=tmp_path / "work")
     # it retrained + uploaded both, proving the half-upload was not mistaken for trained
     assert keys.wan_lora_key("neon", "A", "low") in store.puts
+
+
+# ------------------------------------------------ interpreter seam (cf#29 D1: env isolation)
+
+def test_aitoolkit_python_defaults_to_sys_executable(monkeypatch):
+    # default: the worker's own interpreter (pre-isolation behavior, unchanged)
+    monkeypatch.delenv(W.AITOOLKIT_PYTHON_ENV, raising=False)
+    import sys
+    assert W.aitoolkit_python() == sys.executable
+
+
+def test_aitoolkit_python_honors_env_override(monkeypatch):
+    # the training image points this at the isolated aitoolkit conda env's python
+    monkeypatch.setenv(W.AITOOLKIT_PYTHON_ENV, "/opt/conda/envs/aitoolkit/bin/python")
+    assert W.aitoolkit_python() == "/opt/conda/envs/aitoolkit/bin/python"
+
+
+def test_run_aitoolkit_launches_the_configured_interpreter(tmp_path, monkeypatch):
+    """Real-seam positive control: _run_aitoolkit must launch the interpreter aitoolkit_python()
+    resolves, not a hardcoded one. Point the env at a stub 'interpreter' that records it ran; the
+    presence of its marker proves the configured interpreter was the one launched over the real
+    subprocess seam (no Popen stubbing)."""
+    (tmp_path / "run.py").write_text("# ai-toolkit entrypoint stub\n")
+    marker = tmp_path / "interp_ran.marker"
+    stub = tmp_path / "fake_interp.sh"
+    stub.write_text(f"#!/usr/bin/env bash\ntouch {marker}\nexit 0\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv(W.AITOOLKIT_PYTHON_ENV, str(stub))
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("job: extension\n")
+    W._run_aitoolkit(cfg, cwd=tmp_path)
+    assert marker.is_file(), "the configured interpreter (VIVIJURE_AITOOLKIT_PYTHON) was not launched"
+
+
+def test_run_aitoolkit_raises_on_nonzero_exit_of_configured_interpreter(tmp_path, monkeypatch):
+    """Negative control: a non-zero exit from the configured interpreter fails loud (a broken
+    training run must never be swallowed)."""
+    (tmp_path / "run.py").write_text("# stub\n")
+    stub = tmp_path / "fail_interp.sh"
+    stub.write_text("#!/usr/bin/env bash\nexit 7\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv(W.AITOOLKIT_PYTHON_ENV, str(stub))
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("job: extension\n")
+    with pytest.raises(RuntimeError, match="exited 7"):
+        W._run_aitoolkit(cfg, cwd=tmp_path)

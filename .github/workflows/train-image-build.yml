@@ -1,0 +1,146 @@
+name: Build Wan LoRA training image to GHCR (cf#29)
+
+# Build + push the Wan 2.2 A14B LoRA TRAINING image (deploy/train.Dockerfile): the validated runtime
+# base + an ISOLATED "aitoolkit" conda env carrying ai-toolkit's (conflicting) deps, + our worker src.
+# A train_lora+wan job routes worker -> orchestrator -> pipeline -> wan_lora_train, which shells the
+# ai-toolkit subprocess into the aitoolkit env (VIVIJURE_AITOOLKIT_PYTHON). See docs/wan-lora-training-image.md.
+#
+#   ghcr.io/skyphusion-labs/vivijure-backend:train-<version>   (a TAG in the vivijure-backend package)
+#
+# The D2 training endpoint pins this by :version (bare, NEVER :sha -- runpod-endpoint-image-tag-version-not-sha).
+#
+# workflow_dispatch ONLY (never fork-reachable; larger runner bills). Runs on a self-hosted fleet
+# runner (disk for a ~15-20GB image build). BASE = a LEAN nvidia/cuda:12.8.1 base (cf#29 D1): the
+# train image reproduces the worker's validated env (cu128 torch + deploy/requirements.txt) MINUS the
+# ~87GB render weight bake a train endpoint never loads -- so it is small and cold-pulls fast, unlike
+# the render image. torch 2.7.1 was delisted from the cu128 index; the image uses 2.9.0 and gates it
+# with a build-time import smoke (see deploy/train.Dockerfile).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Image version -> the train-<version> tag (bump on any change; SemVer-ish).'
+        required: true
+        default: '0.1.0'
+        type: string
+      aitoolkit_ref:
+        description: 'ai-toolkit commit to pin (reproducibility; never floats HEAD).'
+        required: true
+        default: '6e158dd1f1552b73b7aca6d7ddaa46a783538052'
+        type: string
+
+permissions:
+  contents: read
+  packages: write         # push the training image; pull the runtime base
+
+concurrency:
+  group: train-image-build-${{ github.event.inputs.version }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: skyphusion-labs
+  IMAGE: vivijure-backend   # the training image is a `train-*` TAG in the vivijure-backend package
+
+jobs:
+  build-and-push:
+    runs-on: vivijure-bake-snap
+    timeout-minutes: 180
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Resolve config
+        id: cfg
+        run: |
+          set -eu
+          VER='${{ github.event.inputs.version }}'
+          REF='${{ github.event.inputs.aitoolkit_ref }}'
+          case "${VER}" in ''|*[!0-9.]*) echo "::error::version must be digits + dots (e.g. 0.1.0)"; exit 1;; esac
+          case "${REF}" in ''|*[!0-9a-f]*) echo "::error::aitoolkit_ref must be a full hex commit sha"; exit 1;; esac
+          [ "${#REF}" -eq 40 ] || { echo "::error::aitoolkit_ref must be a full 40-char commit sha (no floating HEAD/branch)"; exit 1; }
+          echo "tag=train-${VER}"                        >> "$GITHUB_OUTPUT"
+          echo "immutable_tag=train-${VER}-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "aitoolkit_ref=${REF}"                    >> "$GITHUB_OUTPUT"
+          echo "Building ${IMAGE}:train-${VER} (ai-toolkit @${REF})."
+
+      # DOCKER driver (not docker-container): its build cache IS the daemon image store, so the runtime
+      # base pre-pulled by the snapshot runner is a warm local hit for `FROM runtime`.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build training image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/train.Dockerfile
+          platforms: linux/amd64
+          pull: false          # digest-pinned FROM; local-store hit when the snapshot is warm
+          load: true
+          push: false
+          build-args: |
+            AITOOLKIT_REF=${{ steps.cfg.outputs.aitoolkit_ref }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.IMAGE }}:${{ steps.cfg.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.IMAGE }}:${{ steps.cfg.outputs.immutable_tag }}
+
+      # Per-layer gate: no image layer >=10GB or GHCR rejects the push (the runtime weight layers are
+      # inherited, already under the ceiling; this catches a fat new aitoolkit layer).
+      - name: Verify image layers under the 10GB GHCR ceiling
+        run: |
+          set -eu
+          IMG="${REGISTRY}/${OWNER}/${IMAGE}:${{ steps.cfg.outputs.tag }}"
+          python deploy/bake_layers.py verify-image --image "${IMG}" --ceiling-gb 10.0
+
+      # Dual-env import smoke (CPU, no GPU): the worker imports in the vivijure env AND ai-toolkit's
+      # run.py entrypoint imports in the aitoolkit env. Catches a broken isolation in seconds rather
+      # than at the end of a GPU train run.
+      - name: Import smoke (both envs, CPU)
+        run: |
+          set -eu
+          IMG="${REGISTRY}/${OWNER}/${IMAGE}:${{ steps.cfg.outputs.tag }}"
+          echo "vivijure env: worker + wan_lora_train import"
+          docker run --rm "${IMG}" conda run --no-capture-output -n vivijure \
+            python -c "import vivijure_backend.worker, vivijure_backend.wan_lora_train as W; assert W.aitoolkit_python().endswith('/aitoolkit/bin/python'), W.aitoolkit_python(); print('vivijure env OK; seam ->', W.aitoolkit_python())"
+          echo "aitoolkit env: torch + diffusers import"
+          docker run --rm "${IMG}" conda run --no-capture-output -n aitoolkit \
+            python -c "import torch, diffusers, transformers; print('aitoolkit env OK:', torch.__version__, diffusers.__version__)"
+          echo "ai-toolkit checkout pinned at:"
+          docker run --rm "${IMG}" git -C /opt/ai-toolkit rev-parse HEAD
+
+      - name: Push tags to GHCR
+        id: push
+        run: |
+          set -eu
+          IMG="${REGISTRY}/${OWNER}/${IMAGE}"
+          docker push "${IMG}:${{ steps.cfg.outputs.tag }}"
+          docker push "${IMG}:${{ steps.cfg.outputs.immutable_tag }}"
+          DIGEST="$(docker inspect --format '{{ index .RepoDigests 0 }}' "${IMG}:${{ steps.cfg.outputs.tag }}" | sed 's/.*@//')"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Pushed ${IMAGE}:${{ steps.cfg.outputs.tag }} -- ${DIGEST}"
+
+      - name: Summary (pin the D2 training endpoint by :version)
+        run: |
+          IMG="${REGISTRY}/${OWNER}/${IMAGE}"
+          {
+            echo "## Wan LoRA training image published"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| tag | \`${IMG}:${{ steps.cfg.outputs.tag }}\` |"
+            echo "| immutable tag | \`${IMG}:${{ steps.cfg.outputs.immutable_tag }}\` |"
+            echo "| digest | \`${{ steps.push.outputs.digest }}\` |"
+            echo "| ai-toolkit ref | \`${{ steps.cfg.outputs.aitoolkit_ref }}\` |"
+            echo ""
+            echo "Pin the D2 training endpoint to \`${IMG}:${{ steps.cfg.outputs.tag }}\` (bare :version, NEVER :sha)."
+          } >> "$GITHUB_STEP_SUMMARY"
