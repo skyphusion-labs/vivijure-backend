@@ -84,13 +84,18 @@ made that the wrong call for a train-only image -- superseded.)
 
 ## Base model weights
 
-`ai-toolkit/Wan2.2-T2V-A14B-Diffusers-bf16` (both experts, bf16, ~53GB). BAKED as of `:train-0.2.0`
-(D2, cf#29): `train-image-build.yml` `snapshot_download`s the repo into the HF-cache layout, bin-packs
-it into per-layer `<9.6GB` bins (`bake_layers.py bin --ceiling-gb 9.6`; the 10GB GHCR ceiling forces the
-split -- a bf16 expert shard is ~9.3GB), and `train.Dockerfile` COPYs the bins into `HF_HOME` + verifies
-a union-keyed sha256 manifest. The image sets `HF_HUB_OFFLINE=1 / TRANSFORMERS_OFFLINE=1 /
-HF_DATASETS_OFFLINE=1` so a cold worker never re-pulls the ~53GB base; the endpoint template env can
-override to `0` as an escape hatch. (D1 `:train-0.1.0` staged it on-demand -- superseded.)
+ai-toolkit loads THREE HF repos at train time, all BAKED as of `:train-0.2.0` (D2, cf#29):
+`ai-toolkit/Wan2.2-T2V-A14B-Diffusers-bf16` (the 2 DiT experts, ~53GB), `ai-toolkit/umt5_xxl_encoder`
+(UMT5 text encoder + tokenizer, ~11GB; hardcoded `wan21.py` te_path -- the base has no `text_encoder/`),
+and `ai-toolkit/wan2.1-vae` (VAE, ~0.2GB; hardcoded `wan22_14b_model.py`). Baking ONLY the base is a
+false-offline: `HF_HUB_OFFLINE=1` passes the transformer load then dies at the UMT5 load.
+`train-image-build.yml` `snapshot_download`s all three into the HF-cache layout, bin-packs into per-layer
+`<9.6GB` bins (`bake_layers.py bin --ceiling-gb 9.6`; largest shard ~9.28GB), and `train.Dockerfile`
+COPYs them into `HF_HOME` + verifies a union-keyed sha256 manifest. The image sets `HF_HUB_OFFLINE=1 /
+TRANSFORMERS_OFFLINE=1 / HF_DATASETS_OFFLINE=1` so a cold worker hits ZERO HF network; the endpoint
+template env can override to `0` as an escape hatch. MANDATORY: verify with a real offline (`=1`) train
+run (D2c) before trusting the bake -- a partial bake reads fine until the text-encoder load. (D1
+`:train-0.1.0` staged on-demand -- superseded.)
 
 ## The recipe (spike-proven defaults, `WanLoraTrainConfig`)
 

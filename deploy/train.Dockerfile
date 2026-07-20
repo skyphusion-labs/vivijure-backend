@@ -18,10 +18,12 @@
 # and wan_lora_train launches run.py under VIVIJURE_AITOOLKIT_PYTHON (set below). Both envs share the
 # same Blackwell-safe cu128 torch 2.7.1 line so neither fights the toolchain.
 #
-# BASE MODEL WEIGHTS (Wan2.2-T2V-A14B-Diffusers-bf16, ~53GB) are BAKED (D2, cf#29): the build workflow
-# snapshot_downloads the repo into the HF-cache layout and bin-packs it into per-layer <9.6GB bins
-# (bake_layers.py; the 10GB GHCR ceiling forces the split -- a bf16 expert shard is ~9.3GB), then this
-# Dockerfile COPYs the bins into HF_HOME and verifies a sha256 manifest. A cold worker never re-pulls.
+# TRAIN WEIGHTS (~64GB) are BAKED (D2, cf#29): the THREE HF repos ai-toolkit loads at train --
+# Wan2.2-T2V-A14B-Diffusers-bf16 (the 2 DiT experts), umt5_xxl_encoder (text encoder + tokenizer),
+# wan2.1-vae -- are snapshot_downloaded by the build workflow into the HF-cache layout and bin-packed
+# into per-layer <9.6GB bins (bake_layers.py; the 10GB GHCR ceiling forces the split, largest shard
+# ~9.28GB), then this Dockerfile COPYs the bins into HF_HOME + verifies a sha256 manifest. Baking ONLY
+# the base is a false-offline (ai-toolkit dies at the UMT5 load) -- all three are required for offline.
 
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
@@ -101,9 +103,9 @@ RUN conda run --no-capture-output -n aitoolkit python -m pip install \
 ENV VIVIJURE_AITOOLKIT_DIR=/opt/ai-toolkit \
     VIVIJURE_AITOOLKIT_PYTHON=/opt/conda/envs/aitoolkit/bin/python
 
-# --- BAKED Wan 2.2 A14B base (D2, cf#29) ------------------------------------------------------------
-# train-image-build.yml snapshot_downloads ai-toolkit/Wan2.2-T2V-A14B-Diffusers-bf16 (~53GB) into the
-# HF-cache layout and bin-packs it into per-layer <9.6GB bins (deploy/train-bins/, gitignored + CI-only).
+# --- BAKED Wan 2.2 A14B train weights: 3 HF repos (D2, cf#29) ---------------------------------------
+# train-image-build.yml snapshot_downloads the base + umt5_xxl_encoder + wan2.1-vae (~64GB) into the
+# HF-cache layout and bin-packs them into per-layer <9.6GB bins (deploy/train-bins/, gitignored + CI-only).
 # COPY each bin as ONE layer into HF_HOME so the union reconstructs the cache tree; then verify the
 # union-keyed sha256 manifest (a byte mismatch fails the build LOUD). BEFORE COPY src so a code change
 # never busts the ~53GB weight layers. Empty bins (bin_pack pre-creates all 12) are free zero-byte layers.
