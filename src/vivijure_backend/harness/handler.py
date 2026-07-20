@@ -556,6 +556,17 @@ def run_i2v_clip_job(
     }
 
 
+def _wants_i2v_prefetch(action: str) -> bool:
+    """Whether a job will load the Wan i2v pipeline, and so benefits from eager-starting the
+    ~120GB i2v model prefetch that overlaps LoRA training. False for jobs that never reach an i2v
+    stage, so the pull is not started for nothing:
+      - finish_clip: RIFE interpolation / face-restore only, no Wan pipeline.
+      - train_lora:  a train-only job -- it fits a LoRA and stops; no keyframe/i2v stage runs, and
+                     the Wan-LoRA train image carries no i2v weights to mirror (cf#29 D2a).
+    Every other action (render / finalize / preview / regen_shot) keeps the prefetch."""
+    return str(action) not in ("finish_clip", "train_lora")
+
+
 def handler(job: dict) -> dict:
     """RunPod serverless entry point. Mirrors models on a cold worker, builds the live R2
     client, runs the job through the deployed GPU pipeline, returns the response. RunPod passes
@@ -600,8 +611,9 @@ def handler(job: dict) -> dict:
         # Eager-start the Wan I2V pull in the background so it overlaps LoRA training: training is
         # GPU-bound with the network idle, while the pull (~120GB from R2) is network-bound. The two
         # run concurrently; ensure_i2v_models() joins the thread before loading the Wan pipeline.
-        # finish_clip never loads the Wan pipeline, so skip the prefetch for that action.
-        if str(payload.get("action", "render")) != "finish_clip":
+        # SKIP the prefetch for jobs that never load the Wan i2v pipeline (see _wants_i2v_prefetch),
+        # so the ~120GB pull is not started for nothing.
+        if _wants_i2v_prefetch(payload.get("action", "render")):
             from .models_mirror import start_i2v_prefetch
             start_i2v_prefetch()
 
