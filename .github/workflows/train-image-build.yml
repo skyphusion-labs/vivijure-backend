@@ -22,7 +22,7 @@ on:
       version:
         description: 'Image version -> the train-<version> tag (bump on any change; SemVer-ish).'
         required: true
-        default: '0.1.0'
+        default: '0.2.0'
         type: string
       aitoolkit_ref:
         description: 'ai-toolkit commit to pin (reproducibility; never floats HEAD).'
@@ -67,6 +67,23 @@ jobs:
 
       # DOCKER driver (not docker-container): its build cache IS the daemon image store, so the runtime
       # base pre-pulled by the snapshot runner is a warm local hit for `FROM runtime`.
+      - name: Stage + bin-pack the Wan base into GHCR-safe layers (D2 bake, cf#29)
+        env:
+          HF_HOME: ${{ github.workspace }}/_wanbase
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -eu
+          python -m venv /tmp/hfdl
+          /tmp/hfdl/bin/pip install --quiet --upgrade huggingface_hub
+          echo "Downloading the 3 HF repos ai-toolkit loads at train (~64GB) into the HF cache layout..."
+          /tmp/hfdl/bin/python -c "from huggingface_hub import snapshot_download; [print('snapshot', r, '->', snapshot_download(r)) for r in ('ai-toolkit/Wan2.2-T2V-A14B-Diffusers-bf16','ai-toolkit/umt5_xxl_encoder','ai-toolkit/wan2.1-vae')]"
+          echo "Non-hollow gate, then bin-pack <9.6GB/layer (10GB GHCR ceiling; largest shard ~9.28GB)..."
+          python deploy/bake_layers.py assert-weights --root "${HF_HOME}" --min-gb 55
+          python deploy/bake_layers.py bin --src "${HF_HOME}" --out deploy/train-bins --bins 12 --ceiling-gb 9.6 --min-gb 55
+          python deploy/bake_layers.py manifest --bins-root deploy/train-bins --out deploy/train-bins/weights-manifest.sha256
+          rm -rf "${HF_HOME}"
+          echo "Bins ready:"; ls -la deploy/train-bins/
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
         with:
