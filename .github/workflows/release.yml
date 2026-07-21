@@ -60,14 +60,27 @@ env:
   WORKER_IMAGE: vivijure-backend
 
 jobs:
+  # Inline sync: public repo cannot workflow_call internal fleet-chezmoi.
   sync-gpu-allowlist:
     if: startsWith(github.ref, 'refs/tags/backend-v')
-    uses: skyphusion-labs/fleet-chezmoi/.github/workflows/sync-gpu-allowlist.yml@main
-    secrets:
-      RUNNER_GROUP_ADMIN_TOKEN: ${{ secrets.RUNNER_GROUP_ADMIN_TOKEN }}
-    with:
-      ensure_repo: vivijure-backend
-      ensure_tag: ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout fleet-chezmoi (sync script)
+        uses: actions/checkout@v4
+        with:
+          repository: skyphusion-labs/fleet-chezmoi
+          ref: main
+          token: ${{ secrets.RUNNER_GROUP_ADMIN_TOKEN }}
+
+      - name: Sync vivijure-gpu-builds allowlist
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_GROUP_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          bash scripts/sync-vivijure-gpu-builds-allowlist.sh \
+            --apply \
+            --ensure-tag "vivijure-backend" "${{ github.ref_name }}"
 
   build-and-push:
     needs: sync-gpu-allowlist
