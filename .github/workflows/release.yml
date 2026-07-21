@@ -60,7 +60,18 @@ env:
   WORKER_IMAGE: vivijure-backend
 
 jobs:
+  sync-gpu-allowlist:
+    if: startsWith(github.ref, 'refs/tags/backend-v')
+    uses: skyphusion-labs/fleet-chezmoi/.github/workflows/sync-gpu-allowlist.yml@main
+    secrets:
+      RUNNER_GROUP_ADMIN_TOKEN: ${{ secrets.RUNNER_GROUP_ADMIN_TOKEN }}
+    with:
+      ensure_repo: vivijure-backend
+      ensure_tag: ${{ github.ref_name }}
+
   build-and-push:
+    needs: sync-gpu-allowlist
+    if: always() && (needs.sync-gpu-allowlist.result == 'success' || needs.sync-gpu-allowlist.result == 'skipped')
     # vivijure-bake-snap = the enterprise snapshot runner; the runtime base is pre-pulled into the
     # runner image docker daemon store, so the FROM is a local cache hit (assemble+push only, no cold
     # base pull). Access control = this label + the backend-v* tag ruleset (backend-release-tags); a
