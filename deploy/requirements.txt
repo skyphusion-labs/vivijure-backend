@@ -43,7 +43,7 @@ av==13.1.0                # PyAV: the imageio plugin="pyav" backend finish.py us
                           # (bundled ffmpeg), so no compile.
 ftfy==6.3.1               # Wan text prompt cleanup
 numpy==2.3.5              # py3.11 conda line. Do not jump to numpy 2.5.x (needs >=3.12).
-Pillow==12.2.0           # 12.2.0 clears 6 image-parsing CVEs (was 12.0.0)
+Pillow==12.3.0           # 12.3.0 clears 13 Pillow CVEs through 2026-07 (was 12.2.0)
 PyYAML>=6.0               # contract.py storyboard parse (no version sensitivity)
 
 # --- identity stack (InstantID single-char upgrade) ---
