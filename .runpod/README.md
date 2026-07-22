@@ -37,7 +37,7 @@ credentials. A full render still needs the four R2 vars above.
 
 ## Operator checklist (listing status)
 
-1. GitHub release exists for the image you want Hub to index (currently `:1.0.4`)` / `:1.0.4`).
+1. GitHub release exists for the image you want Hub to index (currently `backend-v1.0.5` / `:1.0.5`).
 2. In the RunPod console Hub page, confirm the listing build/test is green (Pending vs Live).
 3. After any Hub-facing change under `.runpod/`, cut a new GitHub release so Hub re-indexes.
 
