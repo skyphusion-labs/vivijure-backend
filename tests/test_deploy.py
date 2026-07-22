@@ -115,25 +115,37 @@ def test_model_server_uses_job_config_specs(monkeypatch):
     """Cold-start: the first job's model fields must reach ModelServer.specs."""
     from vivijure_backend.models import ModelRole, DEFAULT_SPECS
     monkeypatch.setattr(worker, "_SERVER", None)
-    req = _req(render_overrides={"keyframe": {"base_model": "custom/sdxl-base"}})
+    # Overrides must stay inside DEFAULT_SPECS namespaces (SG161222) so the allowlist accepts them.
+    req = _req(render_overrides={"keyframe": {"base_model": "SG161222/custom-sdxl-base"}})
     pipe = worker.build_pipeline(req)
     assert worker._SERVER is not None
-    assert worker._SERVER.specs[ModelRole.KEYFRAME_BASE].repo_id == "custom/sdxl-base"
+    assert worker._SERVER.specs[ModelRole.KEYFRAME_BASE].repo_id == "SG161222/custom-sdxl-base"
     # weight_name and other non-repo fields must be preserved (regression: positional ModelSpec
     # construction dropped weight_name and broke the keyframe distill LoRA load)
     assert (worker._SERVER.specs[ModelRole.KEYFRAME_FEWSTEP].weight_name
             == DEFAULT_SPECS[ModelRole.KEYFRAME_FEWSTEP].weight_name)
     # warm-worker path: a second job with the SAME models reuses the loaded server
-    req_same = _req(render_overrides={"keyframe": {"base_model": "custom/sdxl-base"}})
+    req_same = _req(render_overrides={"keyframe": {"base_model": "SG161222/custom-sdxl-base"}})
     pipe2 = worker.build_pipeline(req_same)
     assert pipe2.server is pipe.server  # reused
     # ...but a second job with DIFFERENT models is REFUSED, never silently rendered on the
     # previously-loaded (wrong) set -- the client resubmits and a fresh worker loads correctly.
     import pytest
-    req_diverged = _req(render_overrides={"keyframe": {"base_model": "other/sdxl"}})
-    with pytest.raises(worker.ModelDivergenceError, match="other/sdxl"):
+    req_diverged = _req(render_overrides={"keyframe": {"base_model": "SG161222/other-sdxl"}})
+    with pytest.raises(worker.ModelDivergenceError, match="SG161222/other-sdxl"):
         worker.build_pipeline(req_diverged)
-    assert worker._SERVER.specs[ModelRole.KEYFRAME_BASE].repo_id == "custom/sdxl-base"  # unchanged
+    assert worker._SERVER.specs[ModelRole.KEYFRAME_BASE].repo_id == "SG161222/custom-sdxl-base"  # unchanged
+
+
+def test_cold_start_rejects_disallowed_model_repo_id(monkeypatch):
+    """Job-controlled repo_id must fail closed before ModelServer is built (path / foreign org)."""
+    import pytest
+    from vivijure_backend.models import InvalidModelRepoId
+    monkeypatch.setattr(worker, "_SERVER", None)
+    for bad in ("/etc/passwd", "evil-org/malware", "https://evil.example/model"):
+        with pytest.raises(InvalidModelRepoId):
+            worker.build_pipeline(_req(render_overrides={"keyframe": {"base_model": bad}}))
+        assert worker._SERVER is None  # never constructed on reject
 
 
 # ----------------------------------------------------------- de-risk driver sha <-> EXPECT_SHA guard

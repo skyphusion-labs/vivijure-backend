@@ -21,11 +21,20 @@ imports and unit-tests on a CPU box.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
 from .device import Device, Quant, current
+
+# Hugging Face hub ids are exactly `namespace/name` (one slash, no schemes/paths). Job input
+# may try to inject absolute paths or arbitrary orgs at cold start; pin namespaces to the
+# DEFAULT_SPECS set so only known hubs can reach ModelServer.
+_HF_REPO_ID_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
+    r"/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+)
 
 
 class ModelRole(str, Enum):
@@ -116,6 +125,57 @@ DEFAULT_SPECS: dict[ModelRole, ModelSpec] = {
              "VERIFY the chosen model's license before seeding its weights to R2.",
     ),
 }
+
+
+def _namespaces_from_specs(specs: dict[ModelRole, ModelSpec]) -> frozenset[str]:
+    """The HF org/user namespaces present in a specs table (repo_id + fp8_repo_id)."""
+    out: set[str] = set()
+    for spec in specs.values():
+        for rid in (spec.repo_id, spec.fp8_repo_id):
+            if rid and "/" in rid:
+                out.add(rid.split("/", 1)[0])
+    return frozenset(out)
+
+
+# Namespaces a job may request at cold start. Derived from DEFAULT_SPECS so adding a default
+# model automatically widens the allowlist; arbitrary orgs stay rejected.
+ALLOWED_REPO_NAMESPACES: frozenset[str] = _namespaces_from_specs(DEFAULT_SPECS)
+
+
+class InvalidModelRepoId(ValueError):
+    """Job-supplied model repo_id failed the HF shape / namespace allowlist check."""
+
+
+def validate_repo_id(
+    repo_id: str,
+    *,
+    allowed_namespaces: frozenset[str] | None = None,
+) -> str:
+    """Accept only HF-looking `org/name` ids whose org is in the DEFAULT_SPECS namespaces.
+
+    Rejects absolute paths, URI schemes, path traversal, backslashes, and non-`org/name`
+    shapes before any ModelServer / hub download can see them. Returns the validated id.
+    """
+    if not isinstance(repo_id, str) or not repo_id.strip():
+        raise InvalidModelRepoId(f"model repo_id must be a non-empty org/name string, got {repo_id!r}")
+    rid = repo_id.strip()
+    # Absolute / URI / traversal shapes before the regex (clearer errors for attack-shaped input).
+    if rid.startswith(("/", "\\")) or "://" in rid or "\\" in rid or ".." in rid:
+        raise InvalidModelRepoId(
+            f"model repo_id must be a Hugging Face org/name id, not a path or URI: {rid!r}")
+    if len(rid) >= 2 and rid[1] == ":":  # Windows drive (C:/..., D:\\...)
+        raise InvalidModelRepoId(
+            f"model repo_id must be a Hugging Face org/name id, not a path or URI: {rid!r}")
+    if not _HF_REPO_ID_RE.fullmatch(rid):
+        raise InvalidModelRepoId(
+            f"model repo_id must match Hugging Face org/name shape, got {rid!r}")
+    namespace = rid.split("/", 1)[0]
+    allowed = ALLOWED_REPO_NAMESPACES if allowed_namespaces is None else allowed_namespaces
+    if namespace not in allowed:
+        raise InvalidModelRepoId(
+            f"model repo_id namespace {namespace!r} is not in the allowed set "
+            f"{sorted(allowed)}; got {rid!r}")
+    return rid
 
 
 def quant_for(family: ModelFamily, device: Device) -> Quant:

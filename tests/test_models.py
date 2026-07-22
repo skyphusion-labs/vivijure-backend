@@ -56,6 +56,68 @@ def test_default_specs_cover_every_role():
         assert spec.repo_id  # a real, non-empty HF id
 
 
+# ------------------------------------------------------- repo_id allowlist (cold-start security)
+
+from vivijure_backend.models import (
+    ALLOWED_REPO_NAMESPACES,
+    DEFAULT_SPECS as _DEFAULT_SPECS_FOR_ALLOWLIST,
+    InvalidModelRepoId,
+    validate_repo_id,
+)
+import pytest
+
+
+def test_allowed_namespaces_are_derived_from_default_specs():
+    expected = {spec.repo_id.split("/", 1)[0] for spec in _DEFAULT_SPECS_FOR_ALLOWLIST.values()}
+    expected |= {
+        spec.fp8_repo_id.split("/", 1)[0]
+        for spec in _DEFAULT_SPECS_FOR_ALLOWLIST.values()
+        if spec.fp8_repo_id
+    }
+    assert ALLOWED_REPO_NAMESPACES == frozenset(expected)
+    assert "SG161222" in ALLOWED_REPO_NAMESPACES
+    assert "Wan-AI" in ALLOWED_REPO_NAMESPACES
+
+
+def test_validate_repo_id_accepts_default_specs_and_same_namespace_swaps():
+    for spec in _DEFAULT_SPECS_FOR_ALLOWLIST.values():
+        assert validate_repo_id(spec.repo_id) == spec.repo_id
+        if spec.fp8_repo_id:
+            assert validate_repo_id(spec.fp8_repo_id) == spec.fp8_repo_id
+    # Same org, different name (documented deploy-time swap shape) stays allowed.
+    assert validate_repo_id("SG161222/RealVisXL_V4.0") == "SG161222/RealVisXL_V4.0"
+    assert validate_repo_id("  Wan-AI/Wan2.2-I2V-A14B-Diffusers  ") == (
+        "Wan-AI/Wan2.2-I2V-A14B-Diffusers")
+
+
+@pytest.mark.parametrize("bad", [
+    "",
+    "   ",
+    "/etc/passwd",
+    "/tmp/models/weights",
+    "\\Windows\\System32",
+    "C:/Users/evil/model",
+    "file:///tmp/x",
+    "https://huggingface.co/evil/model",
+    "../escape/repo",
+    "org/../other",
+    "just-a-name",
+    "too/many/slashes",
+    "evil-org/malware",  # HF-shaped but namespace not in DEFAULT_SPECS
+    "cagliostrolab/animagine-xl-4.0",  # note-mentioned alt; not an allowlisted namespace
+    "h94/IP-Adapter/extra",  # more than org/name
+])
+def test_validate_repo_id_rejects_paths_uris_and_foreign_namespaces(bad):
+    with pytest.raises(InvalidModelRepoId):
+        validate_repo_id(bad)
+
+
+def test_validate_repo_id_honors_explicit_namespace_override():
+    assert validate_repo_id("only-me/model", allowed_namespaces=frozenset({"only-me"})) == "only-me/model"
+    with pytest.raises(InvalidModelRepoId):
+        validate_repo_id("SG161222/RealVisXL_V5.0", allowed_namespaces=frozenset({"only-me"}))
+
+
 # ----------------------------------------------------------------- RIFE 64-divisible padding (#245)
 
 def test_pad_to_multiple_aligns_to_64():
