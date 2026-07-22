@@ -38,9 +38,13 @@ gh api "/orgs/skyphusion-labs/packages/container/vivijure-backend/versions" \
 (or the GHCR Packages UI.) Take the highest published semver, pick the next FREE one above it, and
 cut `backend-v<that>`. Do NOT assume the next number after the latest git tag is free.
 
+**Snapshot (2026-07-22):** git tag **`backend-v1.0.4`** / GHCR **`:1.0.4`** on overlay runtime
+`runtime-1-bf16-t4` (Pillow 12.3.0; cf#178). Do **not** pin `:1.0.3` (tagless dispatch still on t3)
+or `:1.0.1` (t2 weight-digest miss). Next free semver: re-check GHCR before the next cut.
+
 **Snapshot (2026-07-15):** git + GHCR at **`1.0.2`** (`backend-v1.0.2`) on overlay runtime
 `runtime-1-bf16-t3` (~104 GB shared with `1.0.0`; ~96 MB new). Do **not** pin `1.0.1` (t2
-weight-digest miss). Next free semver is `1.0.3` (always re-check GHCR before tagging).
+weight-digest miss). Superseded by the 2026-07-22 line above.
 
 **Snapshot (2026-07-05):** git tags trail at `backend-v0.4.4`; GHCR is published through `0.4.7`. The
 next release tag is `backend-v0.4.8`, NOT `backend-v0.4.5` (0.4.5 / 0.4.6 / 0.4.7 are taken).
@@ -76,6 +80,7 @@ policy: `docs/weights-base-and-snapshots.md`.
 
 | git tag | GHCR image | source commit | built | notes |
 |---|---|---|---|---|
+| backend-v1.0.4 | 1.0.4 | (tag SHA) | 2026-07-22 (GHA) | **Pillow 12.3.0** via runtime `runtime-1-bf16-t4` overlay (#295 / cf#178). Pin RunPod to `:1.0.4` after verify+promote. Do not pin `:1.0.3` (tagless; still t3). |
 | backend-v1.0.2 | 1.0.2 | d62360e | 2026-07-15 (GHA) | **Fix for broken `1.0.1` RunPod pull.** Deps-overlay runtime `runtime-1-bf16-t3` FROM t1 (run 29466705701); weight layers share ~104 GB with `1.0.0`, ~96 MB new. Restores resolvable t2-era pins (safetensors 0.8.0 / tokenizers 0.22.2) without re-emitting weights. Digest `sha256:ea38bc9d...`. Pin RunPod to `:1.0.2` (not `:1.0.1`). |
 | backend-v1.0.1 | 1.0.1 | 22cadfe | 2026-07-15 (GHA) | **DO NOT PIN on RunPod.** Full t2 rebuild re-emitted ~101 GB weight digests; cold pull dies with unexpected EOF. Superseded by `1.0.2` (t3 overlay). Digest `sha256:da037184...`. |
 |---|---|---|---|---|

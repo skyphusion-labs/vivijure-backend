@@ -5,6 +5,14 @@ pre-1.0: PATCH for fixes and backend-only tweaks, MINOR for new features). Entri
 newest-first. History before this file was introduced lives in the git tags; the recent
 releases are summarized below from that history.
 
+## [1.0.4] -- 2026-07-22
+
+**Pillow 12.3.0 security overlay** (cf#178 / Dependabot CVE batch).
+
+- **deps:** `Pillow==12.3.0` in `deploy/requirements.txt` (#295).
+- **runtime:** assemble on `runtime-1-bf16-t4` (overlay from t3; Pillow + CVE floor without re-emitting weight digests).
+- **Note:** GHCR `:1.0.3` exists as a tagless dispatch and still FROM t3 -- do **not** pin `:1.0.3` for the Pillow fix. Pin **`:1.0.4`**.
+
 ## [1.0.0] -- 2026-07-13
 
 **First stable release of the GPU render backend.** The clean-room RunPod serverless render engine
