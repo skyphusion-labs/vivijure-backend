@@ -4,6 +4,6 @@
 # version) was DELISTED from the cu128 index, so this pins 2.9.0 (closest available); torchvision +
 # torchaudio are pinned to the MATCHING 2.9.0-line wheels (unpinned, torchaudio resolves to 2.11.0 and
 # mismatches -- ai-toolkit imports torchaudio at import time). Verified on an A100 80GB build (cf#29 D1).
-torch==2.9.0
-torchvision==0.24.0
-torchaudio==2.9.0
+torch==2.13.0
+torchvision==0.28.0
+torchaudio==2.11.0
