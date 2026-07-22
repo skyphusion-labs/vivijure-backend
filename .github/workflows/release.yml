@@ -67,7 +67,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout fleet-chezmoi (sync script)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: skyphusion-labs/fleet-chezmoi
           ref: main
