@@ -3,7 +3,7 @@
 How to size and pin the RunPod serverless endpoints that back the Vivijure render
 and finish chain. This is the operator-facing reference: the GPU-tier rule, the
 economics behind it, the per-endpoint actuals, and the two hard deploy
-constraints (version-tag pinning, the 10-worker account cap).
+constraints (version-tag pinning, the account worker quota).
 
 See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 `docs/operations.md` (build/deploy/pin mechanics).
@@ -85,12 +85,20 @@ GPU for the bulk of its wall-time. If it does not, fix the handler first.
 All endpoints: `workersMin = 0` (no always-active billing), flashboot on,
 `scalerType = QUEUE_DELAY`, scalerValue 4.
 
-| Endpoint                 | id               | GPU tier                          | workersMax | standby | Image source repo            |
-|--------------------------|------------------|-----------------------------------|------------|---------|------------------------------|
-| `vivijure-backend`       | `t9wcvlxh8rc5la` | **B200 / H200** (datacenter)      | 4          | 4       | `vivijure-backend`           |
-| `vivijure-video-upscale` | `4q8idwbk6tyqbq` | **RTX PRO 6000 Blackwell** (96 GB)| 2          | 2       | `vivijure-upscale`           |
-| `vivijure-audio-upscale` | `sj0btgpjdtswa7` | **RTX PRO 6000 Blackwell** (96 GB)| 2          | 2       | `vivijure-audio-upscale`     |
-| `vivijure-musetalk`      | `zw6pt4lymf69pk` | **RTX PRO 6000 Blackwell** (Server)| 2         | 2       | `vivijure-musetalk`          |
+| Endpoint                 | id               | Panel / role                      | GPU tier                          | workersMax | standby | Image source repo            |
+|--------------------------|------------------|-----------------------------------|-----------------------------------|------------|---------|------------------------------|
+| `vivijure-backend`       | `t9wcvlxh8rc5la` | **CF production render**          | **B200 / H200** (datacenter)      | 8          | 8       | `vivijure-backend`           |
+| `vivijure-backend-local` | `uf4iwoen5r48zx` | **Local panel render**            | **B200 / H200** (datacenter)      | 3          | 3       | `vivijure-backend`           |
+| `vivijure-video-upscale` | `4q8idwbk6tyqbq` | CF finish                         | **RTX PRO 6000 Blackwell** (96 GB)| 3          | 3       | `vivijure-upscale`           |
+| `vivijure-audio-upscale` | `sj0btgpjdtswa7` | CF finish                         | **RTX PRO 6000 Blackwell** (96 GB)| 2          | 2       | `vivijure-audio-upscale`     |
+| `vivijure-musetalk`      | `zw6pt4lymf69pk` | CF finish                         | **RTX PRO 6000 Blackwell** (Server)| 2         | 2       | `vivijure-musetalk`          |
+
+**Render `workersMax` policy (through 2026-07-30):** both render endpoints keep
+**at least 3** workers (`workersMax` and `workersStandby` >= 3). **CF production
+render (`t9wcvlxh8rc5la`) normally runs higher than local (`uf4iwoen5r48zx`)**
+because CF carries more production testing; canonical local backend stays **3**.
+Do not conflate the two IDs during quota ops or promote/restore (#305). Fleet map:
+`fleet-chezmoi` `docs/runbooks/vivijure-runpod-endpoints.md`.
 
 `vivijure-backend` lists three Blackwell RTX PRO 6000 SKUs only where it is the
 finish tier; its render tier is B200 / H200. The finish endpoints list all three
@@ -111,27 +119,21 @@ Pinning is a deliberate, separate step from building: a build does not touch the
 live endpoint (`docs/operations.md`). You pin the template, and the endpoint pulls
 the new image on its next cold start.
 
-## Deploy constraint 2: the 10-worker account cap
+## Deploy constraint 2: the 30-worker account quota
 
-The RunPod account has a **hard cap of 10 concurrent workers.** The sum of every
-endpoint's `workersMax` must be `<= 10`.
+The RunPod account has a **hard cap of 30 concurrent workers** across **all**
+serverless endpoints (CF production, local panel, Wan train, finish chain, and
+local mirrors). The sum of every endpoint's `workersMax` must stay `<= 30`.
 
-Current allocation is **exactly at the cap**:
-
-```
-vivijure-backend        4
-vivijure-video-upscale  2
-vivijure-audio-upscale  2
-vivijure-musetalk       2
-                       --
-total                  10   (= the cap)
-```
+Smoke RCA (2026-07-22, backend #305): quota pressure and promote `flush_worker_pool`
+restore can leave the job plane paused or force emergency rebalancing. **Free
+headroom by lowering the local panel render EP (`uf4iwoen5r48zx`) to 3**, not by
+collapsing CF production render (`t9wcvlxh8rc5la`) to 3. CF prod render stays at
+**8** until the planned 2026-07-30 scale event (fleet runbook).
 
 Consequence: **adding a new endpoint, or raising any `workersMax`, requires
-lowering another endpoint's `workersMax` first.** There is no headroom. A
-`wrangler`/Cloudflare deploy will not catch this; only a RunPod scale event will,
-and it fails by silently capping concurrency (jobs queue) rather than erroring.
-Re-balance deliberately when the finish chain's load profile changes.
+lowering another endpoint's `workersMax` first.** Re-balance deliberately; a
+`wrangler`/Cloudflare deploy will not catch over-allocation.
 
 ## Billing note (so nobody re-flags standby)
 
