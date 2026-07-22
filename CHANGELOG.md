@@ -7,6 +7,10 @@ releases are summarized below from that history.
 
 ## Unreleased
 
+- **fix(promote):** harden `flush_worker_pool` restore + smoke against job-plane
+  `ENDPOINT_PAUSED` after `workersMax=0` drain (#305 / #304). REST read-back on restore;
+  smoke retries `/run` 409 with re-PATCH; `PromoteError.partial` keeps template pin evidence
+  in the verify report when smoke fails.
 - **docs(hub):** `.runpod/README.md` Hub-facing R2 env blurb (`R2_ENDPOINT` vs satellite
   `R2_ENDPOINT_URL`) and listing checklist for backend#300.
 - **fix(hub):** real `.runpod/handler.py` + `.runpod/Dockerfile` (root entries are git

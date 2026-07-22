@@ -979,6 +979,11 @@ class _PromoteFake:
                     "workersMax": self.workers_max, "workersMin": self.workers_min}
         if method == "PATCH" and url.endswith("/endpoints/%s" % self.endpoint_id):
             self.endpoint_patches.append(payload)
+            # Mirror REST: PATCH updates the control-plane workersMax the next GET will read (#305).
+            if isinstance(payload, dict) and "workersMax" in payload:
+                self.workers_max = payload["workersMax"]
+            if isinstance(payload, dict) and "workersMin" in payload:
+                self.workers_min = payload["workersMin"]
             return {}
         if method == "PATCH" and "/templates/" in url:
             return {}
@@ -1146,3 +1151,75 @@ def test_promote_smoke_bundle_and_project_are_overridable():
                      smoke_bundle_key="bundles/other_smoke.tar.gz", smoke_project="scratch")
     submitted = [c for c in fake.calls if c[0] == "POST" and c[1].endswith("/run")][0][2]["input"]
     assert submitted["bundle_key"] == "bundles/other_smoke.tar.gz" and submitted["project"] == "scratch"
+
+
+def test_restore_endpoint_workers_retries_until_readback_matches():
+    # #305: a single restore PATCH can 200 while REST still lies; re-PATCH until workersMax matches.
+    state = {"max": 0, "patches": 0}
+
+    def transport(url, *, method="GET", headers=None, payload=None):
+        if method == "PATCH" and "/endpoints/" in url:
+            state["patches"] += 1
+            # First PATCH is a no-op on the lying control plane; second lands.
+            if state["patches"] >= 2:
+                state["max"] = payload["workersMax"]
+            return {}
+        if method == "GET" and "/endpoints/" in url:
+            return {"workersMax": state["max"], "workersMin": 0}
+        raise AssertionError("unexpected %s %s" % (method, url))
+
+    out = rv.restore_endpoint_workers(
+        "e1", transport=transport, headers={}, restore_payload={"workersMax": 8, "workersMin": 0},
+        clock=_mk_clock(), poll_sleep=lambda _s: None, attempts=5, settle_s=0.0)
+    assert out["workersMax"] == 8 and out["attempts"] == 2
+    assert state["patches"] == 2
+
+
+def test_smoke_retries_endpoint_paused_then_completes():
+    # #305: /run 409 ENDPOINT_PAUSED after flush -> re-restore workersMax, then smoke lands.
+    class _PausedThenOk(_PromoteFake):
+        def __init__(self):
+            super().__init__("img", health_seq=[{"idle": 0, "ready": 0, "running": 0,
+                                                 "initializing": 0, "throttled": 0, "unhealthy": 0}])
+            self._run_n = 0
+
+        def __call__(self, url, *, method="GET", headers=None, payload=None):
+            if method == "POST" and url.endswith("/run"):
+                self._run_n += 1
+                self.calls.append((method, url, payload))
+                if self._run_n == 1:
+                    raise RuntimeError("409 Client Error: Conflict; body={\"error\":\"ENDPOINT_PAUSED\",\"max_workers\":0}")
+                return {"id": self.run_id}
+            return super().__call__(url, method=method, headers=headers, payload=payload)
+
+    fake = _PausedThenOk()
+    out = rv.smoke_fresh_worker(
+        "t9wcvlxh8rc5la", transport=fake, headers={"Authorization": "Bearer k"},
+        clock=_mk_clock(), poll_sleep=lambda _s: None, bundle_key="bundles/x.tar.gz",
+        restore_payload={"workersMax": 8, "workersMin": 0})
+    assert out["status"] == "COMPLETED"
+    assert out["paused_recoveries"] == 1 and out["submit_attempts"] == 2
+    # re-restore PATCHed workersMax back to 8
+    assert {"workersMax": 8, "workersMin": 0} in fake.endpoint_patches
+
+
+def test_promote_image_surfaces_partial_pin_when_smoke_stays_paused():
+    # #304: template pin must remain in the report when smoke never clears ENDPOINT_PAUSED.
+    class _AlwaysPaused(_PromoteFake):
+        def __call__(self, url, *, method="GET", headers=None, payload=None):
+            if method == "POST" and url.endswith("/run"):
+                self.calls.append((method, url, payload))
+                raise RuntimeError("409 Conflict ENDPOINT_PAUSED max_workers=0")
+            return super().__call__(url, method=method, headers=headers, payload=payload)
+
+    fake = _AlwaysPaused(
+        "ghcr.io/x:2", workers_max=8,
+        health_seq=[{"idle": 0, "ready": 0, "running": 0, "initializing": 0, "throttled": 0, "unhealthy": 0}])
+    with pytest.raises(rv.PromoteError) as ei:
+        rv.promote_image("ghcr.io/x:2", api_key="k-1", transport=fake, clock=_mk_clock(),
+                         poll_sleep=lambda _s: None)
+    err = ei.value
+    assert err.partial["imageName"] == "ghcr.io/x:2"
+    assert err.partial["template_id"] == "tpl-1"
+    assert "flush" in err.partial
+
