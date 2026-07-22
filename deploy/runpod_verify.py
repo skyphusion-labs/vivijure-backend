@@ -1054,13 +1054,36 @@ def build_verify_pod_env(base_env: dict, source_env: "dict | Any", *, run_id: st
     return pod_env, r2_read_env
 
 
+class PromoteError(RuntimeError):
+    """Promote failed after a partial landing (e.g. template pin + flush OK, smoke 409).
+
+    ``partial`` carries whatever the gate already proved (template imageName, flush evidence) so a
+    red promote with ``passed: true`` is still operator-observable without guessing (#304)."""
+
+    def __init__(self, message: str, *, partial: dict):
+        super().__init__(message)
+        self.partial = partial
+
+
+def _http_error_detail(resp: "Any") -> str:  # noqa: ANN401 -- requests.Response without importing requests at module load
+    """Body snippet for HTTPError messages so ENDPOINT_PAUSED / max_workers=0 are not lost (#305)."""
+    try:
+        text = (resp.text or "").strip().replace("\n", " ")
+    except Exception:  # noqa: BLE001
+        text = ""
+    return text[:400] if text else "(empty body)"
+
+
 def _default_promote_transport() -> "Callable[..., Any]":
     """The live HTTP leg for the promote/flush/smoke RunPod calls (injected as a fake in tests)."""
     import requests
 
     def transport(url, *, method="GET", headers, payload=None):  # noqa: ANN001 -- thin HTTP leg
         resp = requests.request(method, url, headers=headers, json=payload, timeout=30)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError as e:
+            raise requests.HTTPError("%s; body=%s" % (e, _http_error_detail(resp)), response=resp) from e
         return resp.json() if resp.content else {}
 
     return transport
@@ -1074,6 +1097,43 @@ def _worker_counts(health: dict) -> dict:
     """Project a GET /v2/{id}/health body down to the integer per-state worker counts."""
     workers = health.get("workers") or {}
     return {s: int(workers.get(s) or 0) for s in _WORKER_STATES}
+
+
+def _is_endpoint_paused_error(exc: BaseException) -> bool:
+    """True when a /run (or transport) fault looks like a paused job plane (#305)."""
+    msg = str(exc).upper()
+    return "ENDPOINT_PAUSED" in msg or ("409" in msg and "CONFLICT" in msg)
+
+
+def restore_endpoint_workers(endpoint_id: str, *, transport: "Callable[..., Any]", headers: dict,
+                             restore_payload: dict, clock: "Callable[[], float]",
+                             poll_sleep: "Callable[[float], None] | None",
+                             attempts: int = 5, settle_s: float = 2.0) -> dict:
+    """PATCH workersMax/Min then read back until the REST control plane matches (backend#305).
+
+    Draining to ``workersMax=0`` pauses the serverless job plane. A single restore PATCH can 200 while
+    the job plane still reports ``max_workers=0`` / ``ENDPOINT_PAUSED`` on ``/run``. We re-PATCH +
+    re-GET until REST ``workersMax`` matches the restore target (or raise loud). Job-plane proof is
+    the smoke leg's 409 retry, which calls this helper again before re-submitting."""
+    want_max = restore_payload.get("workersMax")
+    if want_max is None:
+        raise RuntimeError("restore: restore_payload missing workersMax")
+    last: dict | None = None
+    for i in range(attempts):
+        transport("%s/endpoints/%s" % (RUNPOD_REST_BASE, endpoint_id), method="PATCH", headers=headers,
+                  payload=restore_payload)
+        last = transport("%s/endpoints/%s" % (RUNPOD_REST_BASE, endpoint_id), method="GET", headers=headers)
+        got = last.get("workersMax")
+        if got == want_max:
+            return {"workersMax": got, "workersMin": last.get("workersMin"),
+                    "attempts": i + 1, "endpoint": last}
+        if poll_sleep is not None and i + 1 < attempts:
+            poll_sleep(settle_s)
+        else:
+            clock()  # keep fake clocks advancing in tests that omit poll_sleep
+    raise RuntimeError("restore: endpoint %s workersMax read-back=%r after %d PATCH(es); wanted %r "
+                       "(job plane may still be ENDPOINT_PAUSED; refusing to continue with a lying REST)"
+                       % (endpoint_id, (last or {}).get("workersMax"), attempts, want_max))
 
 
 def wait_endpoint_quiescent(endpoint_id: str, *, transport: "Callable[..., Any]", headers: dict,
@@ -1112,9 +1172,10 @@ def flush_worker_pool(endpoint_id: str, *, transport: "Callable[..., Any]", head
     Sequence: wait until ``running == 0`` (never kill an in-flight render; bounded, raises loud on
     timeout WITHOUT draining) -> record the endpoint's ``workersMax``/``workersMin`` -> set BOTH to 0 to
     drain -> poll ``/health`` until every worker state reaches 0 (timeout-bounded) -> ALWAYS restore the
-    recorded values in a ``finally`` (prod is NEVER left at 0 on any exit path). Returns the quiesce +
-    drain timelines as evidence. A drain that never reaches zero raises loud (after restore); the one
-    state worse than a stale pool is a stuck-at-zero endpoint, so a restore-PATCH fault raises loudest."""
+    recorded values in a ``finally`` with REST read-back (prod is NEVER left at 0 on any exit path;
+    #305). Returns the quiesce + drain timelines as evidence. A drain that never reaches zero raises
+    loud (after restore); the one state worse than a stale pool is a stuck-at-zero endpoint, so a
+    restore fault raises loudest."""
     # 1) Never drain in-flight work: block until the endpoint is quiescent (raises loud on timeout).
     quiesce = wait_endpoint_quiescent(endpoint_id, transport=transport, headers=headers, clock=clock,
                                       poll_sleep=poll_sleep, timeout_s=quiesce_timeout_s,
@@ -1129,6 +1190,7 @@ def flush_worker_pool(endpoint_id: str, *, transport: "Callable[..., Any]", head
     t0 = clock()
     timeline: list[dict] = []
     drained = False
+    restore_info: dict | None = None
     try:
         transport("%s/endpoints/%s" % (RUNPOD_REST_BASE, endpoint_id), method="PATCH", headers=headers,
                   payload={"workersMax": 0, "workersMin": 0})
@@ -1146,31 +1208,56 @@ def flush_worker_pool(endpoint_id: str, *, transport: "Callable[..., Any]", head
             if poll_sleep is not None:
                 poll_sleep(poll_interval_s)
     finally:
-        # HARD REQUIREMENT (#209): restore on EVERY exit path so prod never stays scaled to zero.
-        transport("%s/endpoints/%s" % (RUNPOD_REST_BASE, endpoint_id), method="PATCH", headers=headers,
-                  payload=restore_payload)
+        # HARD REQUIREMENT (#209 / #305): restore + REST read-back on EVERY exit path so prod never
+        # stays scaled to zero / job-plane-paused while REST lies about workersMax.
+        restore_info = restore_endpoint_workers(
+            endpoint_id, transport=transport, headers=headers, restore_payload=restore_payload,
+            clock=clock, poll_sleep=poll_sleep)
     if not drained:
         raise RuntimeError("flush: worker pool on %s did not drain to zero within %.0fs (last=%r); "
                            "workersMax restored to %r"
                            % (endpoint_id, timeout_s, timeline[-1] if timeline else None, max_before))
     return {"workers_max_before": max_before, "workers_min_before": restore_payload["workersMin"],
             "drained": True, "drain_seconds": round(clock() - t0, 1), "quiesce": quiesce,
-            "timeline": timeline}
+            "timeline": timeline, "restore": restore_info, "restore_payload": restore_payload}
 
 
 def smoke_fresh_worker(endpoint_id: str, *, transport: "Callable[..., Any]", headers: dict,
                        clock: "Callable[[], float]", poll_sleep: "Callable[[float], None] | None",
                        bundle_key: str, project: str = "verify", timeout_s: float = 1800.0,
-                       poll_interval_s: float = 15.0) -> dict:
+                       poll_interval_s: float = 15.0,
+                       restore_payload: dict | None = None,
+                       paused_retries: int = 4) -> dict:
     """Post-promote smoke: submit a cheap draft-keyframe (``action:preview``) job to the endpoint and
     poll ``/status`` to a terminal state, PROVING a freshly-provisioned worker actually serves the
     promoted image before the gate reports success. Because the pool was just drained to zero, whatever
     worker runs this job MUST be newly provisioned on the new template. Returns the job id, terminal
     status, and the cold ``delayTime`` (start latency, ms) as evidence. A FAILED / timed-out job raises
-    (the promote is not proven landed)."""
-    submit = transport("%s/%s/run" % (RUNPOD_RUN_BASE, endpoint_id), method="POST", headers=headers,
-                       payload={"input": {"action": "preview", "project": project,
-                                          "bundle_key": bundle_key, "quality_tier": "draft"}})
+    (the promote is not proven landed).
+
+    When ``restore_payload`` is set (post-flush), a 409 ``ENDPOINT_PAUSED`` on ``/run`` re-runs
+    ``restore_endpoint_workers`` and retries the submit (#305 / #304) instead of leaving the gate red
+    while REST already shows workersMax > 0."""
+    submit_attempts = 0
+    paused_recoveries = 0
+    submit: dict = {}
+    while True:
+        submit_attempts += 1
+        try:
+            submit = transport("%s/%s/run" % (RUNPOD_RUN_BASE, endpoint_id), method="POST", headers=headers,
+                               payload={"input": {"action": "preview", "project": project,
+                                                  "bundle_key": bundle_key, "quality_tier": "draft"}})
+            break
+        except Exception as e:  # noqa: BLE001 -- transport fakes raise RuntimeError; live raises HTTPError
+            if restore_payload is None or not _is_endpoint_paused_error(e) or paused_recoveries >= paused_retries:
+                raise RuntimeError("smoke: endpoint %s /run failed (%s); job plane may still be "
+                                   "ENDPOINT_PAUSED after flush restore (workersMax REST=%r)"
+                                   % (endpoint_id, e, (restore_payload or {}).get("workersMax"))) from e
+            paused_recoveries += 1
+            restore_endpoint_workers(endpoint_id, transport=transport, headers=headers,
+                                     restore_payload=restore_payload, clock=clock, poll_sleep=poll_sleep)
+            if poll_sleep is not None:
+                poll_sleep(3.0)
     job_id = submit.get("id")
     if not job_id:
         raise RuntimeError("smoke: endpoint %s /run returned no job id (%r)" % (endpoint_id, submit))
@@ -1184,7 +1271,8 @@ def smoke_fresh_worker(endpoint_id: str, *, transport: "Callable[..., Any]", hea
             delay_ms = last.get("delayTime")
             return {"job_id": job_id, "status": status, "delay_ms": delay_ms,
                     "execution_ms": last.get("executionTime"), "smoke_seconds": round(elapsed, 1),
-                    "cold_start": bool(delay_ms) and delay_ms >= COLD_DELAY_MS}
+                    "cold_start": bool(delay_ms) and delay_ms >= COLD_DELAY_MS,
+                    "submit_attempts": submit_attempts, "paused_recoveries": paused_recoveries}
         if status in ("FAILED", "CANCELLED", "TIMED_OUT"):
             raise RuntimeError("smoke: promote proof job %s on %s terminal=%s (new image does not serve): %r"
                                % (job_id, endpoint_id, status, last.get("error") or last.get("output")))
@@ -1243,15 +1331,21 @@ def promote_image(image: str, *, endpoint_id: str = PROD_ENDPOINT_ID, api_key: s
     result = {"endpoint_id": endpoint_id, "template_id": template_id, "image": image,
               "imageName": landed, "response": after}
     # 2) The repin is on the template; recycle the running pool so the new image actually serves (#209).
-    if flush:
-        result["flush"] = flush_worker_pool(endpoint_id, transport=transport, headers=headers,
-                                            clock=clock, poll_sleep=poll_sleep, timeout_s=flush_timeout_s,
-                                            quiesce_timeout_s=quiesce_timeout_s)
-    # 3) Prove a freshly-provisioned worker serves the new image before the gate reports success.
-    if smoke:
-        result["smoke"] = smoke_fresh_worker(endpoint_id, transport=transport, headers=headers,
-                                            clock=clock, poll_sleep=poll_sleep, bundle_key=smoke_bundle_key,
-                                            project=smoke_project, timeout_s=smoke_timeout_s)
+    restore_payload: dict | None = None
+    try:
+        if flush:
+            result["flush"] = flush_worker_pool(endpoint_id, transport=transport, headers=headers,
+                                                clock=clock, poll_sleep=poll_sleep, timeout_s=flush_timeout_s,
+                                                quiesce_timeout_s=quiesce_timeout_s)
+            restore_payload = result["flush"].get("restore_payload")
+        # 3) Prove a freshly-provisioned worker serves the new image before the gate reports success.
+        if smoke:
+            result["smoke"] = smoke_fresh_worker(
+                endpoint_id, transport=transport, headers=headers, clock=clock, poll_sleep=poll_sleep,
+                bundle_key=smoke_bundle_key, project=smoke_project, timeout_s=smoke_timeout_s,
+                restore_payload=restore_payload)
+    except Exception as e:  # noqa: BLE001 -- re-raise with partial evidence for the report (#304)
+        raise PromoteError("%s" % e, partial=result) from e
     return result
 
 
@@ -1453,6 +1547,10 @@ def main(argv: list[str] | None = None) -> int:
                     smoke_bundle_key=args.smoke_bundle_key, smoke_project=args.smoke_project,
                     clock=time.monotonic, poll_sleep=time.sleep)
                 report["promoted"] = True
+            except PromoteError as e:  # noqa: BLE001 -- partial pin/flush still lands in the report (#304)
+                report["promoted"] = False
+                report["promote"] = e.partial
+                report["promote_error"] = "%s: %s" % (type(e).__name__, e)
             except Exception as e:  # noqa: BLE001 -- a promote fault is loud; teardown already ran
                 report["promoted"] = False
                 report["promote_error"] = "%s: %s" % (type(e).__name__, e)
