@@ -31,22 +31,29 @@ def _server(req: RenderRequest | None = None):
     pod restart. If `req` is None the server uses DEFAULT_SPECS (e.g. standalone test usage)."""
     global _SERVER
     if _SERVER is None:
-        from .models import ModelServer, ModelRole, DEFAULT_SPECS  # deferred: torch
+        # deferred: torch; validate_repo_id rejects path/URI/foreign-namespace ids before load
+        from .models import ModelServer, ModelRole, DEFAULT_SPECS, validate_repo_id
         job_specs: dict = {}
         if req is not None:
             kc, ic = req.config.keyframe, req.config.i2v
             # Use dataclasses.replace to override ONLY the repo_id, preserving weight_name and
             # all other spec fields (KEYFRAME_FEWSTEP carries weight_name=<specific .safetensors>;
             # rebuilding ModelSpec positionally drops it and breaks the distill LoRA load).
+            # validate_repo_id runs BEFORE ModelServer construction so job-controlled ids cannot
+            # smuggle absolute paths or non-allowlisted HF namespaces into the load path.
             job_specs = {
                 ModelRole.KEYFRAME_BASE: dataclasses.replace(
-                    DEFAULT_SPECS[ModelRole.KEYFRAME_BASE], repo_id=kc.base_model),
+                    DEFAULT_SPECS[ModelRole.KEYFRAME_BASE],
+                    repo_id=validate_repo_id(kc.base_model)),
                 ModelRole.KEYFRAME_FEWSTEP: dataclasses.replace(
-                    DEFAULT_SPECS[ModelRole.KEYFRAME_FEWSTEP], repo_id=kc.distill_model),
+                    DEFAULT_SPECS[ModelRole.KEYFRAME_FEWSTEP],
+                    repo_id=validate_repo_id(kc.distill_model)),
                 ModelRole.I2V: dataclasses.replace(
-                    DEFAULT_SPECS[ModelRole.I2V], repo_id=ic.model),
+                    DEFAULT_SPECS[ModelRole.I2V],
+                    repo_id=validate_repo_id(ic.model)),
                 ModelRole.I2V_DISTILL: dataclasses.replace(
-                    DEFAULT_SPECS[ModelRole.I2V_DISTILL], repo_id=ic.distill_model),
+                    DEFAULT_SPECS[ModelRole.I2V_DISTILL],
+                    repo_id=validate_repo_id(ic.distill_model)),
             }
         _SERVER = ModelServer(specs=job_specs or None)
     return _SERVER
