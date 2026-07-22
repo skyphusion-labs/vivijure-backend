@@ -5,6 +5,11 @@ pre-1.0: PATCH for fixes and backend-only tweaks, MINOR for new features). Entri
 newest-first. History before this file was introduced lives in the git tags; the recent
 releases are summarized below from that history.
 
+## Unreleased
+
+- **docs(hub):** `.runpod/README.md` Hub-facing R2 env blurb (`R2_ENDPOINT` vs satellite
+  `R2_ENDPOINT_URL`) and listing checklist for backend#300.
+
 ## [1.0.4] -- 2026-07-22
 
 **Pillow 12.3.0 security overlay** (cf#178 / Dependabot CVE batch).
