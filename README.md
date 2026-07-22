@@ -10,7 +10,9 @@ finished video back to the Studio.
 
 **Want to run it? Go straight to [docs/deploy.md](docs/deploy.md).** Supply a couple of keys, run
 one script, done. You do not build anything and you do not download any models; the published
-image already has every model baked in.
+image already has every model baked in. Deploying from the RunPod Hub listing? The four R2 env
+names and the `R2_ENDPOINT` vs satellite `R2_ENDPOINT_URL` gotcha are in
+[.runpod/README.md](.runpod/README.md).
 
 ## Where this fits
 
