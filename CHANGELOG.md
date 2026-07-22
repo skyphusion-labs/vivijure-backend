@@ -9,6 +9,8 @@ releases are summarized below from that history.
 
 - **docs(hub):** `.runpod/README.md` Hub-facing R2 env blurb (`R2_ENDPOINT` vs satellite
   `R2_ENDPOINT_URL`) and listing checklist for backend#300.
+- **fix(hub):** real `.runpod/handler.py` + `.runpod/Dockerfile` (root entries are git
+  symlinks Hub may not detect); cut `backend-v1.0.5` so Hub re-indexes.
 
 ## [1.0.4] -- 2026-07-22
 
