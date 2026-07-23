@@ -11,6 +11,11 @@
 > touching prod; a real release turns it on. Per verify-before-require the job goes REQUIRED in branch
 > protection only AFTER a real dispatch passes green end to end; until then an image may still reach
 > prod by a deliberate manual `:version` pin.
+>
+> **Verify pass (2026-07-23):** live gate **PASS** on `ghcr.io/skyphusion-labs/vivijure-backend:1.0.9`
+> with `promote=false` after #330 tenant-scoped smoke bundle keys (`bundles/verify/Verify_Smoke.tar.gz`,
+> project `verify`). Run: [actions/runs/30045715106](https://github.com/skyphusion-labs/vivijure-backend/actions/runs/30045715106)
+> (~15 min, H200, all checks green; prod template already `:1.0.9`, no promote).
 
 The doctrine that governs how a built image becomes a running production worker, and the CI pipeline
 intended to enforce it. ICD-grade: the contract is reproducible from this doc alone.
