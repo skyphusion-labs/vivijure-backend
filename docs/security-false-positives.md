@@ -14,6 +14,7 @@ The RunPod worker runs with operator-configured environment and filesystem layou
 
 | Date | Audit | Finding | Rationale |
 | --- | --- | --- | --- |
+| 2026-07-23 | K3 repo | Cross-project R2 keys | **Hardened** -- bundle_key + scoped read keys bound to project slug (#fix/kf3-r2-tenant-binding) |
 | 2026-07-23 | K2.7 PR #319 | aitoolkit_python env injection | Operator-controlled GPU env |
 | 2026-07-23 | K2.7 PR #319 | config_path subprocess injection | List-form Popen, no shell |
 | 2026-07-23 | K2.7 PR #319 | wan_train_runtime_ready filesystem probe | Operator trust boundary on worker FS |

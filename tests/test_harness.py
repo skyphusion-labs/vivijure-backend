@@ -164,11 +164,11 @@ def _job(**over):
 def test_run_job_offloaded_emits_clips_and_manifest(tmp_path):
     store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"))
     res = run_job(
-        _job(render_overrides={"finish_offloaded": True}, pretrained_loras={"A": "loras/ext/A.safetensors"}),
+        _job(render_overrides={"finish_offloaded": True}, pretrained_loras={"A": "loras/neon/A.safetensors"}),
         pipeline=FakePipeline(), store=store, workdir=tmp_path / "work")
 
     # pretrained A reused, B trained+uploaded
-    assert res["lora"]["A"] == {"lora_id": "loras/ext/A.safetensors"}
+    assert res["lora"]["A"] == {"lora_id": "loras/neon/A.safetensors"}
     assert res["lora"]["B"]["lora_id"] == "loras/neon/B/pytorch_lora_weights.safetensors"
     # offloaded: per-shot clips in storyboard order, a manifest, and NO merged output
     assert [c["shot_id"] for c in res["clips"]] == ["shot_01", "shot_02"]
@@ -403,10 +403,40 @@ def test_check_job_key_rejects_out_of_prefix_traversal_and_absolute():
             keys.check_job_key(bad, prefixes=("bundles/",), what="t")
 
 
+def test_bundle_key_matches_project_accepts_control_plane_shapes():
+    assert keys.bundle_key_matches_project("bundles/neon.tar.gz", "neon")
+    assert keys.bundle_key_matches_project("bundles/neon/2026/storyboard.tar.gz", "neon")
+    assert keys.bundle_key_matches_project("bundles/neon-0123456789abcdef.tar.gz", "neon")
+    assert keys.bundle_key_matches_project("bundles/My_Film.tar.gz", "My  Film")
+
+
+def test_bundle_key_matches_project_rejects_cross_tenant():
+    assert not keys.bundle_key_matches_project("bundles/victim.tar.gz", "neon")
+    assert not keys.bundle_key_matches_project("bundles/neonx.tar.gz", "neon")
+
+
+def test_check_bundle_key_for_project_rejects_mismatch():
+    with pytest.raises(ValueError, match="must belong to project"):
+        keys.check_bundle_key_for_project("bundles/victim.tar.gz", "neon", what="render: bundle_key")
+
+
+def test_check_scoped_job_key_rejects_cross_project_lora():
+    with pytest.raises(ValueError, match="loras/neon/"):
+        keys.check_scoped_job_key("loras/victim/A/x.safetensors", project="neon",
+                                  prefixes=("loras/",), what="pretrained LoRA")
+
+
 def test_run_job_rejects_a_bundle_key_outside_the_bundle_prefix(tmp_path):
     with pytest.raises(HarnessError, match="bundle_key"):
         run_job(_job(bundle_key="renders/neon/full.mp4"), pipeline=FakePipeline(),
                 store=FakeStore(tmp_path / "x.tar.gz"), workdir=tmp_path / "w")
+
+
+def test_run_job_rejects_cross_project_bundle_key(tmp_path):
+    store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    with pytest.raises(HarnessError, match="bundle_key"):
+        run_job(_job(bundle_key="bundles/victim.tar.gz"), pipeline=FakePipeline(),
+                store=store, workdir=tmp_path / "w")
 
 
 def test_run_job_rejects_a_pretrained_lora_ref_outside_loras(tmp_path):
