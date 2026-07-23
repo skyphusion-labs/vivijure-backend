@@ -218,9 +218,9 @@ def _patch_runpod_content_type() -> None:
                     )
 
         _rp_http._transmit = _patched_transmit
-        print("@event patch_applied {\"patch\": \"job_done_content_type\"}", flush=True)
+        print("@event patch_applied " + _json.dumps({"patch": "job_done_content_type"}), flush=True)
     except Exception as exc:
-        print(f"@event patch_failed {{\"patch\": \"job_done_content_type\", \"error\": \"{exc}\"}}", flush=True)
+        print("@event patch_failed " + _json.dumps({"patch": "job_done_content_type", "error": str(exc)[:200]}), flush=True)
 
 
 if __name__ == "__main__":
