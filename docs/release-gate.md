@@ -51,11 +51,13 @@ intended to enforce it. ICD-grade: the contract is reproducible from this doc al
   Because the pool was drained, whatever worker runs the post-promote smoke MUST be newly
   provisioned on the new template, so a COMPLETED `action:preview` draft-keyframe job (cold-start
   `delayTime` expected) is the proof the new image actually serves. The smoke renders a dedicated
-  **TRAIN-FREE** bundle (`SMOKE_BUNDLE_KEY` = `bundles/Verify_Smoke.tar.gz`: a storyboard with no
-  cast, so the plan trains nothing) on its own `verify-smoke` project slug, NOT the full verify
-  render bundle. A bundle with a cast trains a LoRA first (Packet_Chase = 8800 steps, ~131 min),
-  which cannot finish inside `smoke_timeout_s` (1800s), so it false-reds every promote even on a
-  clean fresh worker (#243). Override with `--smoke-bundle-key` / `--smoke-project` if needed.
+  **TRAIN-FREE** bundle (`SMOKE_BUNDLE_KEY` = `bundles/verify-smoke/Verify_Smoke.tar.gz`: a
+  storyboard with no cast, so the plan trains nothing) on its own `verify-smoke` project slug, NOT
+  the full verify render bundle. The pod-staging verify render uses the same tarball at
+  `bundles/verify/Verify_Smoke.tar.gz` (project `verify`; tenant binding #324). A bundle with a
+  cast trains a LoRA first (Packet_Chase = 8800 steps, ~131 min), which cannot finish inside
+  `smoke_timeout_s` (1800s), so it false-reds every promote even on a clean fresh worker (#243).
+  Override with `--smoke-bundle-key` / `--smoke-project` if needed.
 - **`runpod-verify` is NOT a branch-protection required check, deliberately.** It is a manual,
   GPU-spending, prod-promoting RELEASE gate that runs only on `workflow_dispatch`; it never posts a
   status on a PR head, so requiring its context in the `main` ruleset would phantom-block every PR

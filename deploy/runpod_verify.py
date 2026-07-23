@@ -973,7 +973,7 @@ PROD_ENDPOINT_ID = "t9wcvlxh8rc5la"  # the production serverless endpoint (docs/
 # and the preview is a cheap keyframe render that still proves the fresh worker pulls + serves the image.
 # Its own project slug isolates the smoke's R2 state from the full verify render (no keyframe-reuse
 # cross-talk on the shared "verify" project).
-SMOKE_BUNDLE_KEY = "bundles/Verify_Smoke.tar.gz"
+SMOKE_BUNDLE_KEY = "bundles/verify-smoke/Verify_Smoke.tar.gz"
 SMOKE_PROJECT = "verify-smoke"
 
 # The image + endpoint config live on the RunPod REST v1 control plane; the run/status/health job API
