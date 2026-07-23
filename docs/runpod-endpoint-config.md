@@ -89,21 +89,29 @@ All endpoints: `workersMin = 0` (no always-active billing), flashboot on,
 |--------------------------|------------------|-----------------------------------|-----------------------------------|------------|---------|------------------------------|
 | `vivijure-backend`       | `t9wcvlxh8rc5la` | **CF production render**          | **B200 / H200** (datacenter)      | 8          | 8       | `vivijure-backend`           |
 | `vivijure-backend-local` | `uf4iwoen5r48zx` | **Local panel render**            | **B200 / H200** (datacenter)      | 3          | 3       | `vivijure-backend`           |
-| `vivijure-video-upscale` | `4q8idwbk6tyqbq` | CF finish                         | **RTX PRO 6000 Blackwell** (96 GB)| 3          | 3       | `vivijure-upscale`           |
-| `vivijure-audio-upscale` | `sj0btgpjdtswa7` | CF finish                         | **RTX PRO 6000 Blackwell** (96 GB)| 2          | 2       | `vivijure-audio-upscale`     |
-| `vivijure-musetalk`      | `zw6pt4lymf69pk` | CF finish                         | **RTX PRO 6000 Blackwell** (Server)| 2         | 2       | `vivijure-musetalk`          |
+| `vivijure-wan-train`     | `zqb7tougbqfkqa` | **CF Wan LoRA train**             | **B200 / H200** (datacenter)      | 3          | 3       | `vivijure-wan-train`         |
+| `vivijure-video-upscale` | `4q8idwbk6tyqbq` | CF finish                         | **RTX PRO 6000 Blackwell** (96 GB)| 5          | 5       | `vivijure-upscale`           |
+| `vivijure-audio-upscale` | `sj0btgpjdtswa7` | CF finish                         | **RTX PRO 6000 Blackwell** (96 GB)| 3          | 3       | `vivijure-audio-upscale`     |
+| `vivijure-musetalk`      | `zw6pt4lymf69pk` | CF finish                         | **RTX PRO 6000 Blackwell** (Server)| 3         | 3       | `vivijure-musetalk`          |
 
-**Render `workersMax` policy (through 2026-07-30):** both render endpoints keep
-**at least 3** workers (`workersMax` and `workersStandby` >= 3). **CF production
-render (`t9wcvlxh8rc5la`) normally runs higher than local (`uf4iwoen5r48zx`)**
-because CF carries more production testing; canonical local backend stays **3**.
-Do not conflate the two IDs during quota ops or promote/restore (#305). Fleet map:
-`fleet-chezmoi` `docs/runbooks/vivijure-runpod-endpoints.md`.
+**Worker quota (2026-07-23):** sum of `workersMax` across the six rows above = **25** (plan raised
+from 18). Fleet IaC: `fleet-chezmoi/system/runpod/vivijure-worker-quota/spec.json`. RunPod account
+hard cap remains 30 until 2026-07-30 deposit/quota-40 (do not fund without Conrad).
 
-`vivijure-backend` lists three Blackwell RTX PRO 6000 SKUs only where it is the
-finish tier; its render tier is B200 / H200. The finish endpoints list all three
-RTX PRO 6000 Blackwell editions (Server / Workstation / Max-Q) so the scheduler
-can place on whichever has stock.
+**Render `workersMax` policy (through 2026-07-30):** both render endpoints keep **at least 3**
+workers (`workersMax` and `workersStandby` >= 3). **CF production render (`t9wcvlxh8rc5la`) normally
+runs higher than local (`uf4iwoen5r48zx`)** because CF carries more production testing; canonical
+local backend stays **3**. Do not conflate the two IDs during quota ops or promote/restore (#305).
+Fleet map: `fleet-chezmoi/docs/runbooks/vivijure-runpod-endpoints.md`.
+
+**cf#61 local idle:** RunPod idle scale-down can drop local render `workersMax` to **0** after ~7d
+without requests. IaC target remains **3**; vivijure-core pre-submit reconcile (cf#61) restores when
+`RUNPOD_WORKERS_MAX` is set on the host.
+
+Render-tier endpoints (`vivijure-backend`, `vivijure-backend-local`, `vivijure-wan-train`) list
+**B200 / H200 only** (no RTX PRO 6000 Blackwell 96 GB SKUs). Finish endpoints list all three RTX
+PRO 6000 Blackwell editions (Server / Workstation / Max-Q) so the scheduler can place on whichever
+has stock.
 
 ## Deploy constraint 1: pin by `:version`, never `:sha`
 
@@ -119,11 +127,25 @@ Pinning is a deliberate, separate step from building: a build does not touch the
 live endpoint (`docs/operations.md`). You pin the template, and the endpoint pulls
 the new image on its next cold start.
 
-## Deploy constraint 2: the 30-worker account quota
+## Deploy constraint 2: the 25-worker quota plan (30 hard cap)
 
 The RunPod account has a **hard cap of 30 concurrent workers** across **all**
-serverless endpoints (CF production, local panel, Wan train, finish chain, and
-local mirrors). The sum of every endpoint's `workersMax` must stay `<= 30`.
+serverless endpoints. The **planned allocation** for the six primary CF + local
+render endpoints sums to **25** `workersMax` (2026-07-23 rebalance; was 18). Local
+finish endpoints and local Wan train are additional slots outside that sum.
+
+| Endpoint | workersMax |
+| --- | ---: |
+| CF render | 8 |
+| Local render | 3 |
+| CF Wan train | 3 |
+| Video upscale | 5 |
+| MuseTalk | 3 |
+| Audio upscale | 3 |
+| **Sum** | **25** |
+
+IaC: `fleet-chezmoi/system/runpod/vivijure-worker-quota/spec.json`. **Do not**
+raise account quota to 40 or fund the $500 deposit for 2026-07-30 without Conrad.
 
 Smoke RCA (2026-07-22, backend #305): quota pressure and promote `flush_worker_pool`
 restore can leave the job plane paused or force emergency rebalancing. **Free
