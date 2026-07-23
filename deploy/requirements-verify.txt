@@ -1,6 +1,6 @@
 # Deps for the pod-staging verify harness (deploy/runpod_verify.py), installed on the STOCK control
 # runner in .github/workflows/runpod-verify.yml. No torch / GPU here -- this drives the RunPod API and
 # asserts on the pod's structured @event channel over SSH/HTTP; the GPU work happens ON the pod.
-runpod>=1.10.1
+runpod>=1.11.0
 requests>=2.34.2
 boto3>=1.43.49  # S1 live gate: read the run-scoped R2 verify summary.json + pass R2 creds to the pod
