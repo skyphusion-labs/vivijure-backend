@@ -1,9 +1,0 @@
-# pip CONSTRAINTS for the isolated ai-toolkit conda env (vivijure-cf #29, Phase D1).
-#
-# HOLD the cu128 torch trio so no ai-toolkit transitive dep swaps it. torch 2.7.1 (the render-validated
-# version) was DELISTED from the cu128 index, so this pins 2.9.0 (closest available); torchvision +
-# torchaudio are pinned to the MATCHING 2.9.0-line wheels (unpinned, torchaudio resolves to 2.11.0 and
-# mismatches -- ai-toolkit imports torchaudio at import time). Verified on an A100 80GB build (cf#29 D1).
-torch==2.9.0
-torchvision==0.24.0
-torchaudio==2.9.0
