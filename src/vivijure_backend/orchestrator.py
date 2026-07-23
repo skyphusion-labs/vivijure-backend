@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from .contract import Cast, RenderRequest, Scene, Storyboard
-from . import wan_lora_train as _wan_lora_train
 from .routing import QualityTier, Stage, Tier, gpu_for
 import hashlib
 import json
@@ -184,10 +183,9 @@ def validate(request: RenderRequest, storyboard: Storyboard, *, cast: Cast | Non
 def resolve_lora_family(action: Action, model_family: str) -> str:
     """Pick SDXL vs Wan training for this job.
 
-    Explicit ``model_family`` in the job body wins. When omitted (empty string), ``train_lora`` on
-    the dedicated train image defaults to Wan (cf#29); every other action, and train_lora on the
-    render image, stay on SDXL so keyframe inline training and legacy SDXL-only train jobs keep
-    working without a cross-repo flag day.
+    Wan character LoRA training lives on the ``vivijure-wan-train`` satellite endpoint
+    (``RUNPOD_WAN_TRAIN_ENDPOINT_ID``). This render backend trains SDXL adapters inline only.
+    Explicit ``model_family:"wan"`` is rejected at the pipeline layer on this image.
     """
     explicit = str(model_family or "").strip().lower()
     if explicit == "wan":
@@ -196,8 +194,6 @@ def resolve_lora_family(action: Action, model_family: str) -> str:
         return "sdxl"
     if explicit:
         return "sdxl"
-    if action is Action.TRAIN_LORA and _wan_lora_train.wan_train_runtime_ready():
-        return "wan"
     return "sdxl"
 
 

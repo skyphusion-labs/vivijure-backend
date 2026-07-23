@@ -116,7 +116,7 @@ routing flags it still reads off it (e.g. `finish_offloaded`).
 | `process_shot_ids` | list[str] \| null | null | Restrict `finalize` / `regen_shot` to a subset of shots. |
 | `audio_key` | str \| null | null | R2 key of an audio bed to mux under the final video. A REQUESTED bed that cannot be fetched FAILS the render. Set `render_overrides.audio_optional: true` to opt into soft-degrade instead: the film ships silent, `audio_missing: true` appears in the result, and an `audio_missing` event is emitted. |
 | `keyframes_only` | bool | `false` | DEPRECATED, kept for compat: on a `render`, draw keyframes (training the LoRAs they need) then short-circuit before any i2v/finish GPU-seconds. The studio stopped sending it in v0.160.0 and sends `action:"preview"` instead; do not build new callers on it. |
-| `model_family` | str | *(auto)* | `sdxl` \| `wan`. Omitted = auto: `train_lora` on the Wan train image selects Wan; render-path inline training stays SDXL. Explicit values override. Unknown strings fall back to SDXL. |
+| `model_family` | str | `sdxl` | `sdxl` \| `wan`. On the **render** backend, only SDXL inline training runs; `wan` fails loud (submit to `vivijure-wan-train` via `RUNPOD_WAN_TRAIN_ENDPOINT_ID`). On the **Wan train** satellite, defaults to Wan. Unknown strings fall back to SDXL. |
 
 ### Actions
 

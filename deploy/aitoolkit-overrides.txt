@@ -1,8 +1,0 @@
-# Deliberate post-install pin corrections for the isolated ai-toolkit conda env (vivijure-cf #29 D1).
-#
-# ai-toolkit/requirements.txt is installed first (its own pinned set at AITOOLKIT_REF); this file is
-# applied AFTER it, for the SMALL set of torch-coupled packages that must be re-pinned to resolve
-# cleanly against the validated cu128 torch 2.7.1 line rather than ai-toolkit's default assumption.
-# Each entry carries the why. Empty means ai-toolkit's own pins all resolved against torch 2.7.1.
-#
-# (finalized from the A100 80GB pod install -- see docs/wan-lora-training-image.md)
