@@ -426,6 +426,29 @@ def test_check_scoped_job_key_rejects_cross_project_lora():
                                   prefixes=("loras/",), what="pretrained LoRA")
 
 
+def test_is_cast_registry_lora_key_accepts_cast_bank_and_slug_prefixes():
+    assert keys.is_cast_registry_lora_key("loras/cast-4/1783494258012.safetensors")
+    assert keys.is_cast_registry_lora_key(
+        "loras/lora-mara-2-1782254441/A/pytorch_lora_weights.safetensors")
+    assert keys.is_cast_registry_lora_key(
+        "loras/lora-wren-1784581417/A/wan_high_noise.safetensors")
+
+
+def test_is_cast_registry_lora_key_rejects_arbitrary_loras_prefix():
+    assert not keys.is_cast_registry_lora_key("loras/victim/A/x.safetensors")
+    assert not keys.is_cast_registry_lora_key("loras/cast-evil/x.safetensors")
+    assert not keys.is_cast_registry_lora_key("loras/lora")  # no subpath
+
+
+def test_check_scoped_job_key_allows_cast_registry_lora():
+    cast_key = "loras/cast-4/1783494258012.safetensors"
+    slug_key = "loras/lora-mara-2-1782254441/A/pytorch_lora_weights.safetensors"
+    assert keys.check_scoped_job_key(cast_key, project="e2e_pipeline_proof",
+                                     prefixes=("loras/",), what="pretrained LoRA") == cast_key
+    assert keys.check_scoped_job_key(slug_key, project="e2e_pipeline_proof",
+                                     prefixes=("loras/",), what="pretrained LoRA") == slug_key
+
+
 def test_check_scoped_job_key_allows_flat_studio_audio_bed():
     assert keys.check_scoped_job_key(
         "audio/550e8400-e29b-41d4-a716-446655440000.m4a", project="neon",
@@ -463,6 +486,17 @@ def test_run_job_rejects_a_pretrained_lora_ref_outside_loras(tmp_path):
         run_job(_job(pretrained_loras={"A": "bundles/evil.safetensors"},
                      render_overrides={"finish_offloaded": True}),
                 pipeline=FakePipeline(), store=store, workdir=tmp_path / "w")
+
+
+def test_run_job_stages_cast_registry_pretrained_lora(tmp_path):
+    store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    cast_key = "loras/cast-4/1783494258012.safetensors"
+    pipe = FakePipeline()
+    res = run_job(
+        _job(pretrained_loras={"A": cast_key}, render_overrides={"finish_offloaded": True}),
+        pipeline=pipe, store=store, workdir=tmp_path / "w")
+    assert res["lora"]["A"] == {"lora_id": cast_key}
+    assert pipe.pretrained_loras["A"].endswith("1783494258012.safetensors")
 
 
 # --------------------------------------------------------- audio honesty (S3)
