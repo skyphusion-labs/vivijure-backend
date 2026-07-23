@@ -58,7 +58,7 @@ onnxruntime-gpu>=1.27.0
 
 # --- serverless SDK + R2 object I/O : floors (import-validated, not render-exercised) ---
 runpod>=1.6
-boto3>=1.43.42
+boto3>=1.43.54
 
 # --- finishing stage (RIFE interpolation + face restore) ---
 # av / PyAV: the imageio pyav plugin that finish_clip uses to decode/encode video clips.
