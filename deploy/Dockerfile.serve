@@ -1,0 +1,6 @@
+# Thin serve overlay on the pinned backend consumer image (homelab LOCAL_FINISH_RIFE_URL).
+ARG BACKEND_IMAGE=ghcr.io/skyphusion-labs/vivijure-backend:1.0.6
+FROM ${BACKEND_IMAGE}
+
+COPY runpod_http_serve.py serve.py /opt/vivijure/
+CMD ["conda", "run", "--no-capture-output", "-n", "vivijure", "python", "-u", "/opt/vivijure/serve.py"]
