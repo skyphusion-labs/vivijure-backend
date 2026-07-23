@@ -449,6 +449,15 @@ def test_check_scoped_job_key_allows_cast_registry_lora():
                                      prefixes=("loras/",), what="pretrained LoRA") == slug_key
 
 
+def test_check_scoped_job_key_rejects_cast_registry_lora_with_traversal():
+    for bad in ("loras/cast-4/../victim/x.safetensors",
+                "loras/lora-mara-2-1782254441/A/../../victim/x.safetensors",
+                "loras/cast-4/foo/../bar.safetensors"):
+        with pytest.raises(ValueError):
+            keys.check_scoped_job_key(bad, project="neon",
+                                      prefixes=("loras/",), what="pretrained LoRA")
+
+
 def test_check_scoped_job_key_allows_flat_studio_audio_bed():
     assert keys.check_scoped_job_key(
         "audio/550e8400-e29b-41d4-a716-446655440000.m4a", project="neon",
