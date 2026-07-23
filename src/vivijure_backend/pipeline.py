@@ -158,6 +158,12 @@ class GpuPipeline:
         return result.path
 
     def _train_slot_wan(self, char, out_dir: Path) -> tuple[Path, Path]:
+        if not _wan_lora_train.wan_train_runtime_ready():
+            raise RuntimeError(
+                "Wan LoRA training requires the dedicated train image (ai-toolkit env + baked "
+                "Wan base). This worker is the render image or a dev box without "
+                "VIVIJURE_AITOOLKIT_PYTHON / /opt/models/aitoolkit/wan-base. Submit train_lora to "
+                "the Wan train endpoint, or set model_family:'sdxl' for legacy SDXL training.")
         # Wan 2.2 A14B character LoRA via ai-toolkit (subprocess): a TWO-file adapter (high-noise +
         # low-noise expert). Coarse per-step lines from ai-toolkit flow to the same structured
         # channel, throttled to the tqdm cadence so the event stream is not flooded. Returns the

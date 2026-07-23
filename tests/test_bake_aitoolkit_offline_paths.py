@@ -18,6 +18,20 @@ def test_default_wan_base_path_falls_back_to_hub_id(monkeypatch):
     assert W.default_wan_base_path() == W.DEFAULT_WAN_BASE_REPO
 
 
+def test_wan_train_runtime_ready_prefers_env_python(monkeypatch, tmp_path):
+    py = tmp_path / "aitoolkit-py"
+    py.write_text("#!/usr/bin/env python3\n")
+    py.chmod(0o755)
+    monkeypatch.setenv("VIVIJURE_AITOOLKIT_PYTHON", str(py))
+    assert W.wan_train_runtime_ready() is True
+
+
+def test_wan_train_runtime_ready_false_on_plain_cpu_box(monkeypatch):
+    monkeypatch.delenv("VIVIJURE_AITOOLKIT_PYTHON", raising=False)
+    monkeypatch.delenv("VIVIJURE_WAN_BASE_PATH", raising=False)
+    assert W.wan_train_runtime_ready() is False
+
+
 def test_wan_lora_train_config_default_uses_default_wan_base_path(monkeypatch, tmp_path):
     base = tmp_path / "wan-base"
     base.mkdir()

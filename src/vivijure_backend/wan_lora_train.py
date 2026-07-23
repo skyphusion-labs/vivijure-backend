@@ -209,6 +209,24 @@ def aitoolkit_python() -> str:
     return os.environ.get(AITOOLKIT_PYTHON_ENV) or sys.executable
 
 
+def wan_train_runtime_ready() -> bool:
+    """True when this worker image can run the ai-toolkit Wan trainer (cf#29 train image).
+
+    The render image lacks the isolated aitoolkit env and baked Wan base weights; a train_lora job
+    that resolves to the Wan family on that image must fail loud (see pipeline._train_slot_wan).
+    CPU tests keep the pre-train-image behavior (False unless env/deps are stubbed in).
+    """
+    env_py = (os.environ.get(AITOOLKIT_PYTHON_ENV) or "").strip()
+    if env_py:
+        p = Path(env_py)
+        if p.is_file() and os.access(p, os.X_OK):
+            return True
+    if Path(DEFAULT_WAN_BASE_PATH).is_dir():
+        return True
+    run_py = Path(DEFAULT_AITOOLKIT_DIR) / "run.py"
+    return run_py.is_file()
+
+
 def caption_for(char: Character, template: str) -> str:
     """The training caption for a slot. Same safe substitution as `lora_train.caption_for`:
     str.replace (never str.format, so no attribute-access payloads), only `{name}`/`{prompt}`

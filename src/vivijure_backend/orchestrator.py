@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from .contract import Cast, RenderRequest, Scene, Storyboard
+from . import wan_lora_train as _wan_lora_train
 from .routing import QualityTier, Stage, Tier, gpu_for
 import hashlib
 import json
@@ -180,6 +181,26 @@ def validate(request: RenderRequest, storyboard: Storyboard, *, cast: Cast | Non
     return errs
 
 
+def resolve_lora_family(action: Action, model_family: str) -> str:
+    """Pick SDXL vs Wan training for this job.
+
+    Explicit ``model_family`` in the job body wins. When omitted (empty string), ``train_lora`` on
+    the dedicated train image defaults to Wan (cf#29); every other action, and train_lora on the
+    render image, stay on SDXL so keyframe inline training and legacy SDXL-only train jobs keep
+    working without a cross-repo flag day.
+    """
+    explicit = str(model_family or "").strip().lower()
+    if explicit == "wan":
+        return "wan"
+    if explicit == "sdxl":
+        return "sdxl"
+    if explicit:
+        return "sdxl"
+    if action is Action.TRAIN_LORA and _wan_lora_train.wan_train_runtime_ready():
+        return "wan"
+    return "sdxl"
+
+
 def plan(
     request: RenderRequest,
     storyboard: Storyboard,
@@ -190,7 +211,7 @@ def plan(
     """Decide the whole render on the CPU. Nothing here touches a GPU."""
     action = Action.parse(request.action)
     quality = QualityTier.parse(request.quality_tier)
-    lora_family = "wan" if str(getattr(request, "model_family", "sdxl")).strip().lower() == "wan" else "sdxl"
+    lora_family = resolve_lora_family(action, request.model_family)
     skips: list[str] = []
 
     # --- which scenes are in scope (finalize / regen can target a subset) ---
