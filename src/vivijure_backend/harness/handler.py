@@ -281,7 +281,8 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
     if audio_path is None and req.audio_key:
         # staged beds live under audio/ (the studio's upload route); pipeline-produced beds
         # (music/dialogue/master chains) live under renders/ -- both are inside the key map.
-        _job_key(req.audio_key, prefixes=("audio/", "renders/"), what="audio_key")
+        _job_scoped_key(req.audio_key, project=req.project,
+                        prefixes=("audio/", "renders/"), what="audio_key")
         try:
             audio_dest = workdir / ("audio" + (Path(req.audio_key).suffix or ".m4a"))
             store.get_file(req.audio_key, audio_dest)

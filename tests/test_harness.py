@@ -426,6 +426,24 @@ def test_check_scoped_job_key_rejects_cross_project_lora():
                                   prefixes=("loras/",), what="pretrained LoRA")
 
 
+def test_check_scoped_job_key_allows_flat_studio_audio_bed():
+    assert keys.check_scoped_job_key(
+        "audio/550e8400-e29b-41d4-a716-446655440000.m4a", project="neon",
+        prefixes=("audio/", "renders/"), what="audio_key") == "audio/550e8400-e29b-41d4-a716-446655440000.m4a"
+
+
+def test_check_scoped_job_key_rejects_nested_audio_path():
+    with pytest.raises(ValueError, match="flat audio bed"):
+        keys.check_scoped_job_key("audio/neon/bed.m4a", project="neon",
+                                  prefixes=("audio/", "renders/"), what="audio_key")
+
+
+def test_check_scoped_job_key_rejects_cross_project_renders_audio():
+    with pytest.raises(ValueError, match="renders/neon/"):
+        keys.check_scoped_job_key("renders/victim/audio/bed.wav", project="neon",
+                                  prefixes=("audio/", "renders/"), what="audio_key")
+
+
 def test_run_job_rejects_a_bundle_key_outside_the_bundle_prefix(tmp_path):
     with pytest.raises(HarnessError, match="bundle_key"):
         run_job(_job(bundle_key="renders/neon/full.mp4"), pipeline=FakePipeline(),
