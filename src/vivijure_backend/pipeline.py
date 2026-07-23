@@ -25,7 +25,6 @@ from typing import Any
 from . import i2v as _i2v
 from . import keyframe as _keyframe
 from . import lora_train as _lora_train
-from . import wan_lora_train as _wan_lora_train
 from .config import RenderConfig
 from .device import current as _current_device
 from .harness.handler import HarnessError, Outputs
@@ -157,26 +156,6 @@ class GpuPipeline:
         # out_dir (which is inside the workdir), so the harness's workdir teardown cleans them up.
         return result.path
 
-    def _train_slot_wan(self, char, out_dir: Path) -> tuple[Path, Path]:
-        if not _wan_lora_train.wan_train_runtime_ready():
-            raise RuntimeError(
-                "Wan LoRA training requires the dedicated train image (ai-toolkit env + baked "
-                "Wan base). This worker is the render image or a dev box without "
-                "VIVIJURE_AITOOLKIT_PYTHON / /opt/models/aitoolkit/wan-base. Submit train_lora to "
-                "the Wan train endpoint, or set model_family:'sdxl' for legacy SDXL training.")
-        # Wan 2.2 A14B character LoRA via ai-toolkit (subprocess): a TWO-file adapter (high-noise +
-        # low-noise expert). Coarse per-step lines from ai-toolkit flow to the same structured
-        # channel, throttled to the tqdm cadence so the event stream is not flooded. Returns the
-        # (high_noise, low_noise) adapter paths for the harness to upload under the Wan keys.
-        emitter = self.progress
-
-        def line_cb(line: str) -> None:
-            if "/" in line and ("it/s" in line or "loss" in line):
-                emitter.emit("wan_train_progress", slot=char.slot, line=line[:200])
-
-        result = _wan_lora_train.train_slot_wan(char, out_dir, progress_cb=line_cb)
-        return result.high_path, result.low_path
-
     def _render_keyframe(self, scene, cast, storyboard, out_path: Path, lora_paths: dict[str, Path]) -> Path:
         return _keyframe.render_keyframe(
             scene, cast, storyboard, self._model_server(), out_path,
@@ -232,23 +211,21 @@ class GpuPipeline:
         # A14B two-expert adapter via ai-toolkit (a train-only job -- no scenes, so nothing consumes
         # it for SDXL keyframing); "sdxl" (default) fits the in-process single-file UNet adapter.
         lora_paths: dict[str, Path] = {}
-        wan_family = plan.lora_family == "wan"
+        if plan.lora_family == "wan":
+            raise HarnessError(
+                "Wan LoRA training is not available on the render backend image. Submit train_lora "
+                "to RUNPOD_WAN_TRAIN_ENDPOINT_ID (vivijure-wan-train satellite), or set "
+                "model_family:'sdxl' for SDXL training on this endpoint.")
         for slot in plan.lora.train:
             char = cast.characters.get(slot)
             if char is None:
                 raise HarnessError(
                     f"plan requires LoRA training for slot {slot!r} but the cast has no "
                     "such character; validate(cast=bundle.cast) should have caught this")
-            if wan_family:
-                high, low = self._train_slot_wan(char, workdir / "loras" / slot)
-                out.wan_loras[slot] = (high, low)
-                self.progress.emit("train_done", slot=slot, family="wan",
-                                   high=str(high), low=str(low))
-            else:
-                path = self._train_slot(char, workdir / "loras" / slot)
-                out.loras[slot] = path
-                lora_paths[slot] = path
-                self.progress.emit("train_done", slot=slot, path=str(path))
+            path = self._train_slot(char, workdir / "loras" / slot)
+            out.loras[slot] = path
+            lora_paths[slot] = path
+            self.progress.emit("train_done", slot=slot, path=str(path))
         # Reused / pretrained adapters feed keyframing too, when staged on disk locally (the
         # adapter is portable .safetensors; an R2-key reference that is not a local file is left
         # to the deploy to stage, and the shot falls back to IP-Adapter identity if absent).
