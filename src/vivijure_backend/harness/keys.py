@@ -103,6 +103,14 @@ def check_scoped_job_key(key: str, *, project: str, prefixes: tuple[str, ...], w
     """Validate a job-supplied read key is under the project slug within its prefix."""
     k = check_job_key(key, prefixes=prefixes, what=what)
     slug = _slug(project)
+    if k.startswith("audio/"):
+        # Studio beds are flat audio/<uuid>.<ext> (vivijure-cf upload route). No project prefix,
+        # but reject nested paths so audio_key cannot smuggle renders/ or bundles/ reads.
+        rest = k[len("audio/"):]
+        if "/" in rest or not rest:
+            raise ValueError(
+                f"{what}: flat audio bed key {k!r} must be audio/<filename> with no extra slashes")
+        return k
     if k.startswith("renders/") and not k.startswith(f"renders/{slug}/"):
         raise ValueError(
             f"{what}: R2 key {k!r} must be under renders/{slug}/ for project {project!r}")

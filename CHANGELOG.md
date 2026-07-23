@@ -9,6 +9,13 @@ releases are summarized below from that history.
 
 (none)
 
+## [1.0.8] -- 2026-07-23
+
+**Fix: scope harness audio_key reads (KF3 closeout).** PATCH.
+
+- `renders/` audio beds must sit under `renders/<project>/`; flat `audio/<filename>` studio beds
+  remain allowed (no nested `audio/` paths).
+
 ## [1.0.7] -- 2026-07-23
 
 **Fix: bind harness R2 keys to project slug (KF3 audit, backend#324).** PATCH.
