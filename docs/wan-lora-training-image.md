@@ -6,11 +6,16 @@ ai-toolkit trainer instead of the render stack. Built by `.github/workflows/trai
 from `deploy/train.Dockerfile`; the D2 training endpoint pins it by `:train-<version>` (bare version,
 never `:sha`).
 
-## The routing (already merged, Phase A -- no dispatch gap)
+## The routing (Phase A + default-on-train-image, cf#29)
 
-A job with `action="train_lora"` + `model_family="wan"` flows:
+A `train_lora` job on the **dedicated train endpoint** (image `:train-*`) auto-selects the Wan
+family when `model_family` is omitted: the orchestrator calls `wan_train_runtime_ready()` (aitoolkit
+env + baked Wan base present) and routes to ai-toolkit. Explicit `model_family:"wan"` or
+`model_family:"sdxl"` always wins. Render-path jobs (`render`, `preview`, …) keep SDXL inline
+training for keyframe LoRAs unless the caller sets `model_family:"wan"` (only valid on the train
+image).
 
-    worker.build_pipeline -> harness.handler.run_job -> orchestrator.plan (lora_family="wan")
+    worker.build_pipeline -> harness.handler.run_job -> orchestrator.plan (lora_family resolved)
       -> pipeline.execute -> pipeline._train_slot_wan -> wan_lora_train.train_slot_wan
         -> ai-toolkit run.py (subprocess) -> harvest two .safetensors
       -> handler._finish uploads BOTH experts to R2 at

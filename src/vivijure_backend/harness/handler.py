@@ -20,7 +20,7 @@ from typing import Protocol, runtime_checkable
 
 from ..assemble import ClipInput, assemble, build_manifest, order_for_storyboard, write_manifest
 from ..contract import Bundle, RenderRequest, RenderResult, Keyframe, Clip
-from ..orchestrator import RenderPlan, plan as make_plan, validate
+from ..orchestrator import Action, RenderPlan, plan as make_plan, resolve_lora_family, validate
 from . import keys
 from .progress import NullEmitter, ProgressEmitter
 from . import job_done_diag
@@ -95,8 +95,10 @@ def run_job(
         # --- prior state from R2's per-artifact objects (#112) ---
         # Derived AFTER the bundle lands so the storyboard names every candidate key, and so
         # bundle-provided keyframes take precedence over restored ones (hybrid lane contract).
+        # Resolve LoRA family before restore so auto train_lora on the train image reads Wan keys.
+        lora_family = resolve_lora_family(Action.parse(req.action), req.model_family)
         trained_slots, existing_keyframes = _restore_prior_state(
-            store, req.project, bundle, model_family=req.model_family)
+            store, req.project, bundle, model_family=lora_family)
 
         # --- validate + plan (CPU) ---
         errs = validate(req, bundle.storyboard, cast=bundle.cast)
@@ -245,7 +247,7 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
 
     # Reused keyframes: already in R2 from a prior run, not re-uploaded, but the caller needs
     # their keys to animate them. Report every REUSE/INJECT shot that wasn't freshly generated.
-    from ..orchestrator import KeyframeMode
+    from ..orchestrator import Action, KeyframeMode, resolve_lora_family
     for sc in plan.scenes:
         if sc.shot_id not in reported_shots and sc.keyframe_mode in (KeyframeMode.REUSE, KeyframeMode.INJECT):
             result.keyframes.append(Keyframe(shot_id=sc.shot_id, key=keys.keyframe_key(project, sc.shot_id)))

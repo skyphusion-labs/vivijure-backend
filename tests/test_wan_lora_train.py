@@ -252,11 +252,26 @@ def test_wan_family_uses_wan_cost():
     assert p.estimated_gpu_seconds == 2 * 3600.0  # two slots, Wan per-slot cost
 
 
-def test_default_family_is_sdxl_cost():
-    # control: no model_family -> sdxl, the existing 180s/slot estimate stands
+def test_default_family_is_sdxl_cost_on_cpu_dev():
+    # train_lora with no model_family on a box without the train image stays SDXL (render EP compat).
     p = plan(_req(), _sb())
     assert p.lora_family == "sdxl"
     assert p.estimated_gpu_seconds == 2 * 180.0
+
+
+def test_train_lora_defaults_wan_when_runtime_ready(monkeypatch):
+    monkeypatch.setenv("VIVIJURE_WAN_BASE_PATH", "/opt/models/aitoolkit/wan-base")
+    monkeypatch.setattr(W, "wan_train_runtime_ready", lambda: True)
+    p = plan(_req(), _sb())
+    assert p.lora_family == "wan"
+    assert p.estimated_gpu_seconds == 2 * 3600.0
+
+
+def test_render_without_model_family_stays_sdxl_even_when_wan_ready(monkeypatch):
+    monkeypatch.setattr(W, "wan_train_runtime_ready", lambda: True)
+    d = {"action": "render", "project": "p", "bundle_key": "bundles/p.tar.gz"}
+    p = plan(RenderRequest.from_dict(d), _sb())
+    assert p.lora_family == "sdxl"
 
 
 # --------------------------------------------------------- handler dual-expert upload
