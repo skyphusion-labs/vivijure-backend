@@ -88,7 +88,7 @@ def run_job(
         # instead of a botocore ParamValidationError ("Invalid length for parameter Key") deep in R2.
         if not req.bundle_key:
             raise HarnessError(f"{req.action}: bundle_key is required (no project bundle to fetch)")
-        _job_key(req.bundle_key, prefixes=("bundles/",), what=f"{req.action}: bundle_key")
+        _job_bundle_key(req.bundle_key, req.project, what=f"{req.action}: bundle_key")
         tar = store.get_file(req.bundle_key, workdir / "bundle.tar.gz")
         bundle = Bundle.extract(Path(tar), workdir / "project")
 
@@ -161,6 +161,20 @@ def _job_key(key: str, *, prefixes: tuple[str, ...], what: str) -> str:
         raise HarnessError(str(e)) from None
 
 
+def _job_bundle_key(bundle_key: str, project: str, *, what: str) -> str:
+    try:
+        return keys.check_bundle_key_for_project(bundle_key, project, what=what)
+    except ValueError as e:
+        raise HarnessError(str(e)) from None
+
+
+def _job_scoped_key(key: str, *, project: str, prefixes: tuple[str, ...], what: str) -> str:
+    try:
+        return keys.check_scoped_job_key(key, project=project, prefixes=prefixes, what=what)
+    except ValueError as e:
+        raise HarnessError(str(e)) from None
+
+
 def _stage_pretrained_loras(req: RenderRequest, store, workdir: Path, progress) -> dict[str, str]:
     """Download each reused-LoRA R2 key to a local file so the GPU pipeline can load it without
     touching R2. Returns slot -> local path.
@@ -175,7 +189,8 @@ def _stage_pretrained_loras(req: RenderRequest, store, workdir: Path, progress) 
         if Path(ref).is_file():
             staged[slot] = str(ref)
             continue
-        _job_key(ref, prefixes=("loras/",), what=f"pretrained LoRA for slot {slot}")
+        _job_scoped_key(ref, project=req.project, prefixes=("loras/",),
+                        what=f"pretrained LoRA for slot {slot}")
         dest = workdir / "pretrained" / slot / (Path(ref).name or "pytorch_lora_weights.safetensors")
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -404,7 +419,8 @@ def run_finish_job(
 
     if not clip_key_in:
         raise HarnessError("finish_clip: clip_key is required")
-    _job_key(clip_key_in, prefixes=("renders/",), what="finish_clip: clip_key")
+    _job_scoped_key(clip_key_in, project=project, prefixes=("renders/",),
+                    what="finish_clip: clip_key")
 
     params = FinishParams(
         interpolate=bool(cfg.get("interpolate", True)),
@@ -502,8 +518,9 @@ def run_i2v_clip_job(
         raise HarnessError("i2v_clip: prompt is required (the motion description)")
 
     keyframe_key = str(job.get("keyframe_key") or "")
-    if keyframe_key:  # a job-supplied key is pinned to the key map; the derived default is trusted
-        _job_key(keyframe_key, prefixes=("renders/",), what="i2v_clip: keyframe_key")
+    if keyframe_key:  # a job-supplied key must sit under this project's renders/ prefix
+        _job_scoped_key(keyframe_key, project=project, prefixes=("renders/",),
+                        what="i2v_clip: keyframe_key")
     else:
         keyframe_key = keys.keyframe_key(project, shot_id)
     local_kf = workdir / "keyframe.png"
