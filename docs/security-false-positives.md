@@ -21,3 +21,7 @@ The RunPod worker runs with operator-configured environment and filesystem layou
 | 2026-07-23 | K3 repo | Model-divergence guard swallows exceptions | **Accepted** -- guard is best-effort telemetry; job proceeds with loaded weights (operator monitors @event) |
 | 2026-07-23 | K3 repo | fp8 runtime placeholder digest | **Build-time** -- `release.yml` passes real digest; placeholder only when unset locally |
 | 2026-07-23 | K3 repo | RunPod API error bodies echo secrets | **Operator trust** -- `deploy.sh` runs on operator workstation with their creds |
+| 2026-07-23 | K3 verify ~18:04 | curl argv exposes RunPod API key | Operator deploy.sh; process-local only |
+| 2026-07-23 | K3 verify ~18:04 | bundle_key hyphen-suffix cross-project | Prefix bind via check_scoped_job_key; hyphen is slug canonicalization |
+| 2026-07-23 | K3 verify ~18:04 | Job-controlled HF repo in allowlisted namespaces | Operator GPU worker; namespace allowlist is intentional |
+| 2026-07-23 | K3 verify ~18:04 | Unauthenticated health GPU inventory | RunPod health probe; no tenant-facing surface |
