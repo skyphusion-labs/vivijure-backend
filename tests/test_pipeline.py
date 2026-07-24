@@ -371,10 +371,10 @@ def test_run_job_fails_fast_when_a_reused_lora_cannot_be_staged(tmp_path):
             raise FileNotFoundError(key)                      # the LoRA key is not in R2
 
     pipe = StubPipeline(RenderConfig.for_tier(QualityTier.DRAFT),
-                        pretrained_loras={"A": "loras/x/A.safetensors"})
+                        pretrained_loras={"A": "loras/neon/A.safetensors"})
     with pytest.raises(HarnessError, match="could not stage pretrained LoRA"):
         run_job({"action": "render", "project": "neon", "bundle_key": "bundles/neon.tar.gz",
-                 "quality_tier": "draft", "pretrained_loras": {"A": "loras/x/A.safetensors"}},
+                 "quality_tier": "draft", "pretrained_loras": {"A": "loras/neon/A.safetensors"}},
                 pipeline=pipe, store=MissingLoraStore(tmp_path / "b.tar.gz"),
                 workdir=tmp_path / "work", job_id="j")
     assert pipe.trained == []                                 # failed before training anything

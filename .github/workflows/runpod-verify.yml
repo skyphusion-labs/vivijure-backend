@@ -50,7 +50,7 @@ on:
         # finish, which is the release-gate's scope. NOT Packet_Chase: that bundle carries 2 cast
         # slots with full ref sets, so the plan trains 2 LoRAs x 8800 steps (~2.3h) BEFORE any
         # keyframe -- structurally over the pod's 90-min TTL; LoRA training is out of smoke scope.
-        default: "bundles/Verify_Smoke.tar.gz"
+        default: "bundles/verify/Verify_Smoke.tar.gz"
       promote:
         description: "On PASS, repin the PROD serverless endpoint to the image (leave OFF for a proof run)."
         type: boolean

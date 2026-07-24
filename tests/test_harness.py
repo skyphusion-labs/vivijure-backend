@@ -164,11 +164,11 @@ def _job(**over):
 def test_run_job_offloaded_emits_clips_and_manifest(tmp_path):
     store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"))
     res = run_job(
-        _job(render_overrides={"finish_offloaded": True}, pretrained_loras={"A": "loras/ext/A.safetensors"}),
+        _job(render_overrides={"finish_offloaded": True}, pretrained_loras={"A": "loras/neon/A.safetensors"}),
         pipeline=FakePipeline(), store=store, workdir=tmp_path / "work")
 
     # pretrained A reused, B trained+uploaded
-    assert res["lora"]["A"] == {"lora_id": "loras/ext/A.safetensors"}
+    assert res["lora"]["A"] == {"lora_id": "loras/neon/A.safetensors"}
     assert res["lora"]["B"]["lora_id"] == "loras/neon/B/pytorch_lora_weights.safetensors"
     # offloaded: per-shot clips in storyboard order, a manifest, and NO merged output
     assert [c["shot_id"] for c in res["clips"]] == ["shot_01", "shot_02"]
@@ -403,10 +403,90 @@ def test_check_job_key_rejects_out_of_prefix_traversal_and_absolute():
             keys.check_job_key(bad, prefixes=("bundles/",), what="t")
 
 
+def test_bundle_key_matches_project_accepts_control_plane_shapes():
+    assert keys.bundle_key_matches_project("bundles/neon.tar.gz", "neon")
+    assert keys.bundle_key_matches_project("bundles/neon/2026/storyboard.tar.gz", "neon")
+    assert keys.bundle_key_matches_project("bundles/neon-0123456789abcdef.tar.gz", "neon")
+    assert keys.bundle_key_matches_project("bundles/My_Film.tar.gz", "My  Film")
+
+
+def test_bundle_key_matches_project_rejects_cross_tenant():
+    assert not keys.bundle_key_matches_project("bundles/victim.tar.gz", "neon")
+    assert not keys.bundle_key_matches_project("bundles/neonx.tar.gz", "neon")
+
+
+def test_check_bundle_key_for_project_rejects_mismatch():
+    with pytest.raises(ValueError, match="must belong to project"):
+        keys.check_bundle_key_for_project("bundles/victim.tar.gz", "neon", what="render: bundle_key")
+
+
+def test_check_scoped_job_key_rejects_cross_project_lora():
+    with pytest.raises(ValueError, match="loras/neon/"):
+        keys.check_scoped_job_key("loras/victim/A/x.safetensors", project="neon",
+                                  prefixes=("loras/",), what="pretrained LoRA")
+
+
+def test_is_cast_registry_lora_key_accepts_cast_bank_and_slug_prefixes():
+    assert keys.is_cast_registry_lora_key("loras/cast-4/1783494258012.safetensors")
+    assert keys.is_cast_registry_lora_key(
+        "loras/lora-mara-2-1782254441/A/pytorch_lora_weights.safetensors")
+    assert keys.is_cast_registry_lora_key(
+        "loras/lora-wren-1784581417/A/wan_high_noise.safetensors")
+
+
+def test_is_cast_registry_lora_key_rejects_arbitrary_loras_prefix():
+    assert not keys.is_cast_registry_lora_key("loras/victim/A/x.safetensors")
+    assert not keys.is_cast_registry_lora_key("loras/cast-evil/x.safetensors")
+    assert not keys.is_cast_registry_lora_key("loras/lora")  # no subpath
+
+
+def test_check_scoped_job_key_allows_cast_registry_lora():
+    cast_key = "loras/cast-4/1783494258012.safetensors"
+    slug_key = "loras/lora-mara-2-1782254441/A/pytorch_lora_weights.safetensors"
+    assert keys.check_scoped_job_key(cast_key, project="e2e_pipeline_proof",
+                                     prefixes=("loras/",), what="pretrained LoRA") == cast_key
+    assert keys.check_scoped_job_key(slug_key, project="e2e_pipeline_proof",
+                                     prefixes=("loras/",), what="pretrained LoRA") == slug_key
+
+
+def test_check_scoped_job_key_rejects_cast_registry_lora_with_traversal():
+    for bad in ("loras/cast-4/../victim/x.safetensors",
+                "loras/lora-mara-2-1782254441/A/../../victim/x.safetensors",
+                "loras/cast-4/foo/../bar.safetensors"):
+        with pytest.raises(ValueError):
+            keys.check_scoped_job_key(bad, project="neon",
+                                      prefixes=("loras/",), what="pretrained LoRA")
+
+
+def test_check_scoped_job_key_allows_flat_studio_audio_bed():
+    assert keys.check_scoped_job_key(
+        "audio/550e8400-e29b-41d4-a716-446655440000.m4a", project="neon",
+        prefixes=("audio/", "renders/"), what="audio_key") == "audio/550e8400-e29b-41d4-a716-446655440000.m4a"
+
+
+def test_check_scoped_job_key_rejects_nested_audio_path():
+    with pytest.raises(ValueError, match="flat audio bed"):
+        keys.check_scoped_job_key("audio/neon/bed.m4a", project="neon",
+                                  prefixes=("audio/", "renders/"), what="audio_key")
+
+
+def test_check_scoped_job_key_rejects_cross_project_renders_audio():
+    with pytest.raises(ValueError, match="renders/neon/"):
+        keys.check_scoped_job_key("renders/victim/audio/bed.wav", project="neon",
+                                  prefixes=("audio/", "renders/"), what="audio_key")
+
+
 def test_run_job_rejects_a_bundle_key_outside_the_bundle_prefix(tmp_path):
     with pytest.raises(HarnessError, match="bundle_key"):
         run_job(_job(bundle_key="renders/neon/full.mp4"), pipeline=FakePipeline(),
                 store=FakeStore(tmp_path / "x.tar.gz"), workdir=tmp_path / "w")
+
+
+def test_run_job_rejects_cross_project_bundle_key(tmp_path):
+    store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    with pytest.raises(HarnessError, match="bundle_key"):
+        run_job(_job(bundle_key="bundles/victim.tar.gz"), pipeline=FakePipeline(),
+                store=store, workdir=tmp_path / "w")
 
 
 def test_run_job_rejects_a_pretrained_lora_ref_outside_loras(tmp_path):
@@ -415,6 +495,17 @@ def test_run_job_rejects_a_pretrained_lora_ref_outside_loras(tmp_path):
         run_job(_job(pretrained_loras={"A": "bundles/evil.safetensors"},
                      render_overrides={"finish_offloaded": True}),
                 pipeline=FakePipeline(), store=store, workdir=tmp_path / "w")
+
+
+def test_run_job_stages_cast_registry_pretrained_lora(tmp_path):
+    store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    cast_key = "loras/cast-4/1783494258012.safetensors"
+    pipe = FakePipeline()
+    res = run_job(
+        _job(pretrained_loras={"A": cast_key}, render_overrides={"finish_offloaded": True}),
+        pipeline=pipe, store=store, workdir=tmp_path / "w")
+    assert res["lora"]["A"] == {"lora_id": cast_key}
+    assert pipe.pretrained_loras["A"].endswith("1783494258012.safetensors")
 
 
 # --------------------------------------------------------- audio honesty (S3)
