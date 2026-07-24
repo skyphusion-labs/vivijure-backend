@@ -9,6 +9,13 @@ releases are summarized below from that history.
 
 (none)
 
+## [1.0.10] -- 2026-07-23
+
+**Fix: allow cast-registry keys in pretrained_loras (E2E cast_loras).** PATCH.
+
+- `pretrained_loras` accepts cast-banked keys (`loras/cast-{id}/…`, `loras/lora-{slug}-…/…`) resolved
+  by the control plane; project-scoped `loras/<slug>/` and `bundle_key` tenancy unchanged.
+
 ## [1.0.8] -- 2026-07-23
 
 **Fix: scope harness audio_key reads (KF3 closeout).** PATCH.

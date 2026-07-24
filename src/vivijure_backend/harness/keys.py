@@ -99,6 +99,28 @@ def check_bundle_key_for_project(bundle_key: str, project: str, *, what: str) ->
     return k
 
 
+def is_cast_registry_lora_key(key: str) -> bool:
+    """True when ``key`` is a cast-banked LoRA under the global cast registry layout.
+
+    Cast adapters intentionally live outside the render project slug: the control plane resolves
+    opaque cast ids to these keys (``resolveCastLoras``) and passes them as ``pretrained_loras``.
+    Accept only the registry shapes the studio writes; arbitrary ``loras/<other-project>/`` paths
+    remain blocked by ``check_scoped_job_key``.
+    """
+    if not key.startswith("loras/"):
+        return False
+    rest = key[len("loras/"):]
+    # SDXL banked adapter: loras/cast-{id}/{timestamp}.safetensors (deriveLoraDestKey).
+    if re.fullmatch(r"cast-\d+/[^/]+\.safetensors", rest):
+        return True
+    # Render/train output keyed by cast slug: loras/lora-{slug}-{timestamp}/A/...
+    if rest.startswith("lora-") and "/" in rest:
+        head = rest.split("/", 1)[0]
+        if re.fullmatch(r"lora-[a-zA-Z0-9_-]+", head):
+            return True
+    return False
+
+
 def check_scoped_job_key(key: str, *, project: str, prefixes: tuple[str, ...], what: str) -> str:
     """Validate a job-supplied read key is under the project slug within its prefix."""
     k = check_job_key(key, prefixes=prefixes, what=what)
@@ -115,6 +137,8 @@ def check_scoped_job_key(key: str, *, project: str, prefixes: tuple[str, ...], w
         raise ValueError(
             f"{what}: R2 key {k!r} must be under renders/{slug}/ for project {project!r}")
     if k.startswith("loras/") and not k.startswith(f"loras/{slug}/"):
+        if is_cast_registry_lora_key(k):
+            return k
         raise ValueError(
             f"{what}: R2 key {k!r} must be under loras/{slug}/ for project {project!r}")
     return k
