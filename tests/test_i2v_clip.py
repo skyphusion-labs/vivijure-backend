@@ -88,9 +88,17 @@ def test_keyframe_key_defaults_to_project_shot_convention(tmp_path, fake_engine)
 def test_explicit_keyframe_key_is_used(tmp_path, fake_engine):
     store = KFStore()
     job = {"action": "i2v_clip", "project": "neon", "shot_id": "s1", "prompt": "drift",
-           "keyframe_key": "renders/other/keyframes/hero.png", "config": {"quality": "draft"}}
+           "keyframe_key": "renders/neon/keyframes/hero.png", "config": {"quality": "draft"}}
     h.run_i2v_clip_job(job, store=store, workdir=tmp_path)
-    assert store.gets == ["renders/other/keyframes/hero.png"]
+    assert store.gets == ["renders/neon/keyframes/hero.png"]
+
+
+def test_i2v_clip_rejects_cross_project_keyframe_key(tmp_path, fake_engine):
+    store = KFStore()
+    job = {"action": "i2v_clip", "project": "neon", "shot_id": "s1", "prompt": "drift",
+           "keyframe_key": "renders/other/keyframes/hero.png", "config": {"quality": "draft"}}
+    with pytest.raises(h.HarnessError, match="keyframe_key"):
+        h.run_i2v_clip_job(job, store=store, workdir=tmp_path)
 
 
 def test_draft_tier_drives_distill_and_overrides_reach_engine(tmp_path, fake_engine):

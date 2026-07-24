@@ -7,14 +7,36 @@ releases are summarized below from that history.
 
 ## Unreleased
 
-- **fix(promote):** harden `flush_worker_pool` restore + smoke against job-plane
-  `ENDPOINT_PAUSED` after `workersMax=0` drain (#305 / #304). REST read-back on restore;
-  smoke retries `/run` 409 with re-PATCH; `PromoteError.partial` keeps template pin evidence
-  in the verify report when smoke fails.
-- **docs(hub):** `.runpod/README.md` Hub-facing R2 env blurb (`R2_ENDPOINT` vs satellite
-  `R2_ENDPOINT_URL`) and listing checklist for backend#300.
-- **fix(hub):** real `.runpod/handler.py` + `.runpod/Dockerfile` (root entries are git
-  symlinks Hub may not detect); cut `backend-v1.0.5` so Hub re-indexes.
+(none)
+
+## [1.0.10] -- 2026-07-23
+
+**Fix: allow cast-registry keys in pretrained_loras (E2E cast_loras).** PATCH.
+
+- `pretrained_loras` accepts cast-banked keys (`loras/cast-{id}/…`, `loras/lora-{slug}-…/…`) resolved
+  by the control plane; project-scoped `loras/<slug>/` and `bundle_key` tenancy unchanged.
+
+## [1.0.8] -- 2026-07-23
+
+**Fix: scope harness audio_key reads (KF3 closeout).** PATCH.
+
+- `renders/` audio beds must sit under `renders/<project>/`; flat `audio/<filename>` studio beds
+  remain allowed (no nested `audio/` paths).
+
+## [1.0.7] -- 2026-07-23
+
+**Fix: bind harness R2 keys to project slug (KF3 audit, backend#324).** PATCH.
+
+- `bundle_key`, explicit `keyframe_key`, `clip_key`, and `pretrained_loras` reads are scoped to the job project slug before any R2 I/O.
+- Flat `audio/` staging keys unchanged (studio bed upload convention).
+
+## [1.0.6] -- 2026-07-22
+
+**Security PATCH: allowlist HF model repo_ids at cold start (#317).** PATCH.
+
+- **fix(security):** allowlist HF `org/name` model `repo_id`s (DEFAULT_SPECS namespaces) at cold start.
+- **fix(promote):** unpause job plane after flush restore (#315).
+- **ci:** adversarial security audit workflow.
 
 ## [1.0.4] -- 2026-07-22
 
