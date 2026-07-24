@@ -131,10 +131,11 @@ routing flags it still reads off it (e.g. `finish_offloaded`).
 | `finish_clip` | no | no | no | Standalone finishing pass on one existing clip. Separate job shape (no bundle); see [the `finish_clip` job](#the-finish_clip-job). |
 
 Job-supplied R2 keys are validated against the render key map before any store I/O:
-`bundle_key` must sit under `bundles/`, `pretrained_loras` values under `loras/`, `audio_key`
-under `audio/` (a staged bed) or `renders/` (a pipeline-produced bed), and the standalone jobs'
-`clip_key` / `keyframe_key` under `renders/`. A key outside its prefix, an absolute key, or one
-carrying `..` fails the job before any transfer.
+`bundle_key` must sit under `bundles/`, `pretrained_loras` values under `loras/` (project slug
+**or** a cast-registry key such as `loras/cast-{id}/…` / `loras/lora-{slug}-…/…` resolved by the
+control plane from cast rows), `audio_key` under `audio/` (a staged bed) or `renders/` (a
+pipeline-produced bed), and the standalone jobs' `clip_key` / `keyframe_key` under `renders/`. A key
+outside its prefix, an absolute key, or one carrying `..` fails the job before any transfer.
 
 The first five actions ride the `RenderRequest` shape above and the render pipeline. `i2v_clip` and
 `finish_clip` are sibling job types: the harness routes each directly to a standalone pass that needs

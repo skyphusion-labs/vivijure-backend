@@ -11,6 +11,7 @@ audit against the control plane.
 from __future__ import annotations
 
 import posixpath
+import re
 
 
 def _slug(project: str) -> str:
@@ -69,6 +70,78 @@ def i2v_clip_key(project: str, shot_id: str) -> str:
 def finished_clip_key(project: str, shot_id: str) -> str:
     """The standalone finish_clip job's output clip (run_finish_job). Same _slug rationale."""
     return f"renders/{_slug(project)}/clips/{_slug(shot_id)}_finished.mp4"
+
+
+def bundle_key_matches_project(bundle_key: str, project: str) -> bool:
+    """True when a job-supplied bundle_key belongs to the named project (defense-in-depth on the
+    shared bucket: prefix-only checks are not enough). Accepts the flat, content-addressed, and
+    nested bundle layouts the control plane emits."""
+    slug = _slug(project)
+    if not bundle_key.startswith("bundles/"):
+        return False
+    rest = bundle_key[len("bundles/"):]
+    if rest.startswith(f"{slug}/"):
+        return True
+    if rest == f"{slug}.tar.gz":
+        return True
+    return bool(re.fullmatch(re.escape(slug) + r"-[0-9a-f]{16}\.tar\.gz", rest))
+
+
+def check_bundle_key_for_project(bundle_key: str, project: str, *, what: str) -> str:
+    """Validate bundle_key shape AND project tenancy before any store I/O."""
+    k = check_job_key(bundle_key, prefixes=("bundles/",), what=what)
+    if not bundle_key_matches_project(k, project):
+        slug = _slug(project)
+        raise ValueError(
+            f"{what}: bundle_key {k!r} must belong to project {project!r} "
+            f"(expected bundles/{slug}/..., bundles/{slug}.tar.gz, or "
+            f"bundles/{slug}-<contenthash>.tar.gz)")
+    return k
+
+
+def is_cast_registry_lora_key(key: str) -> bool:
+    """True when ``key`` is a cast-banked LoRA under the global cast registry layout.
+
+    Cast adapters intentionally live outside the render project slug: the control plane resolves
+    opaque cast ids to these keys (``resolveCastLoras``) and passes them as ``pretrained_loras``.
+    Accept only the registry shapes the studio writes; arbitrary ``loras/<other-project>/`` paths
+    remain blocked by ``check_scoped_job_key``.
+    """
+    if not key.startswith("loras/"):
+        return False
+    rest = key[len("loras/"):]
+    # SDXL banked adapter: loras/cast-{id}/{timestamp}.safetensors (deriveLoraDestKey).
+    if re.fullmatch(r"cast-\d+/[^/]+\.safetensors", rest):
+        return True
+    # Render/train output keyed by cast slug: loras/lora-{slug}-{timestamp}/A/...
+    if rest.startswith("lora-") and "/" in rest:
+        head = rest.split("/", 1)[0]
+        if re.fullmatch(r"lora-[a-zA-Z0-9_-]+", head):
+            return True
+    return False
+
+
+def check_scoped_job_key(key: str, *, project: str, prefixes: tuple[str, ...], what: str) -> str:
+    """Validate a job-supplied read key is under the project slug within its prefix."""
+    k = check_job_key(key, prefixes=prefixes, what=what)
+    slug = _slug(project)
+    if k.startswith("audio/"):
+        # Studio beds are flat audio/<uuid>.<ext> (vivijure-cf upload route). No project prefix,
+        # but reject nested paths so audio_key cannot smuggle renders/ or bundles/ reads.
+        rest = k[len("audio/"):]
+        if "/" in rest or not rest:
+            raise ValueError(
+                f"{what}: flat audio bed key {k!r} must be audio/<filename> with no extra slashes")
+        return k
+    if k.startswith("renders/") and not k.startswith(f"renders/{slug}/"):
+        raise ValueError(
+            f"{what}: R2 key {k!r} must be under renders/{slug}/ for project {project!r}")
+    if k.startswith("loras/") and not k.startswith(f"loras/{slug}/"):
+        if is_cast_registry_lora_key(k):
+            return k
+        raise ValueError(
+            f"{what}: R2 key {k!r} must be under loras/{slug}/ for project {project!r}")
+    return k
 
 
 def check_job_key(key: str, *, prefixes: tuple[str, ...], what: str) -> str:

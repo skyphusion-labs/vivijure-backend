@@ -259,7 +259,7 @@ def test_run_job_records_error_event_then_reraises(tmp_path):
             raise RuntimeError("gpu exploded")
 
     with pytest.raises(RuntimeError, match="gpu exploded"):
-        run_job({"action": "render", "project": "neon", "bundle_key": "bundles/x.tar.gz", "quality_tier": "draft"},
+        run_job({"action": "render", "project": "neon", "bundle_key": "bundles/neon.tar.gz", "quality_tier": "draft"},
                 pipeline=Boom(RenderConfig.for_tier(QualityTier.DRAFT)),
                 store=store, workdir=tmp_path / "work", job_id="job-err")
     snap = json.loads(store.objects["renders/neon/progress/job-err.json"])
