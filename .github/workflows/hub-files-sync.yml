@@ -1,0 +1,41 @@
+name: hub files sync
+
+# .runpod/Dockerfile is a REAL-FILE duplicate of deploy/Dockerfile: the repo root Dockerfile is a
+# git symlink, and the RunPod Hub probe does not reliably treat a symlink as a present Dockerfile
+# (see .runpod/README.md). A duplicate with no gate drifts silently: repin RUNTIME_REF in
+# deploy/Dockerfile, forget the copy, and the Hub listing keeps building the OLD runtime base while
+# every other path builds the new one. This gate fails the build the moment the two disagree.
+#
+# If they ever need to diverge on purpose, delete this workflow in the same PR and say why.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hub-files-sync-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: .runpod/Dockerfile must match deploy/Dockerfile
+        run: |
+          set -euo pipefail
+          for f in .runpod/Dockerfile deploy/Dockerfile; do
+            [ -f "$f" ] || { echo "::error::$f is missing"; exit 1; }
+          done
+          if ! cmp -s .runpod/Dockerfile deploy/Dockerfile; then
+            echo "::error::.runpod/Dockerfile has drifted from deploy/Dockerfile; the Hub listing would build a different image than a release does"
+            diff -u deploy/Dockerfile .runpod/Dockerfile || true
+            exit 1
+          fi
+          echo "OK: .runpod/Dockerfile is byte-identical to deploy/Dockerfile"
