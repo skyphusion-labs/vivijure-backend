@@ -7,7 +7,11 @@ releases are summarized below from that history.
 
 ## Unreleased
 
-(none)
+- **chore(deps):** `av` (PyAV) 13.1.0 -> 18.0.0, a deliberate major bump (backend#313; the prior
+  dependabot PR was closed stale). finish.py only reads clips through imageio.v3 `pyav` plugin
+  (immeta/imiter), never the av API directly; that exact path is smoke-tested identical across
+  both versions (see deploy/requirements.txt). **Not yet render-verified on a pod, do not tag a
+  release on this alone.**
 
 ## [1.0.10] -- 2026-07-23
 
