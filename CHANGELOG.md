@@ -24,6 +24,14 @@ releases are summarized below from that history.
 - `pretrained_loras` accepts cast-banked keys (`loras/cast-{id}/…`, `loras/lora-{slug}-…/…`) resolved
   by the control plane; project-scoped `loras/<slug>/` and `bundle_key` tenancy unchanged.
 
+## [1.0.9] -- 2026-07-23
+
+- **fix(security): K3 worker.py close-out (#327).** `@event` JSON escaping in `worker.py`, so a value
+  carrying a quote or a newline cannot break the structured progress channel the studio parses.
+- **docs(security): the medium and low false-positive disposition (#328)**, recorded rather than
+  silently dismissed.
+  (Backfilled 2026-07-28 from the backend-v1.0.9 GitHub release; the row was missing from this file.)
+
 ## [1.0.8] -- 2026-07-23
 
 **Fix: scope harness audio_key reads (KF3 closeout).** PATCH.
@@ -46,6 +54,19 @@ releases are summarized below from that history.
 - **fix(promote):** unpause job plane after flush restore (#315).
 - **ci:** adversarial security audit workflow.
 
+## [1.0.5] -- 2026-07-21
+
+- **docs(hub): RunPod Hub listing probe files.** The Hub listing checklist needs to see real entry
+  files, and this repo's root `handler.py` / `Dockerfile` are git **symlinks** for the package
+  layout, which the probe cannot follow. So `.runpod/handler.py` and `.runpod/Dockerfile` are real
+  files; the root entries stay symlinks.
+- `.runpod/README.md` gained the Hub R2 env blurb (#307), which names the trap: this backend reads
+  `R2_ENDPOINT` while the satellites read `R2_ENDPOINT_URL`.
+- Also `docs(runpod)`: the Jul 30 render `workersMax` floor and quota-30 note (#306).
+- **No runtime or weight change**; `release.yml` assembles the consumer image from the pinned
+  runtime base. Hub re-indexes from the release, usually within an hour.
+  (Backfilled 2026-07-28 from the backend-v1.0.5 GitHub release; the row was missing from this file.)
+
 ## [1.0.4] -- 2026-07-22
 
 **Pillow 12.3.0 security overlay** (cf#178 / Dependabot CVE batch).
@@ -53,6 +74,38 @@ releases are summarized below from that history.
 - **deps:** `Pillow==12.3.0` in `deploy/requirements.txt` (#295).
 - **runtime:** assemble on `runtime-1-bf16-t4` (overlay from t3; Pillow + CVE floor without re-emitting weight digests).
 - **Note:** GHCR `:1.0.3` exists as a tagless dispatch and still FROM t3 -- do **not** pin `:1.0.3` for the Pillow fix. Pin **`:1.0.4`**.
+
+## [1.0.2] -- 2026-07-15
+
+- **RunPod-safe successor to the broken `1.0.1` pin.** Dependencies ship via the overlay runtime
+  `runtime-1-bf16-t3` (`FROM` t1), so weight layers stay shared with `1.0.0`: roughly 104 GB shared
+  against roughly 96 MB new.
+- **fix(bake): the deps-overlay runtime path (#273)** (`deploy/runtime-overlay.Dockerfile` plus
+  `overlay_from`), so a toolchain or pip bump inherits weight layers **by blob identity** instead of
+  rewriting them. This is the fix for the v1.0.1 class, not a workaround for one bad build.
+- **Gate: `bake_layers.py assert-shared-diff-ids`**, so the sharing property is asserted rather than
+  assumed on the next bump.
+- Resolvable t2-era pins restored for the py3.11 bake (`safetensors==0.8.0`, `tokenizers==0.22.2`,
+  numpy 2.4.6) without a full seed re-`COPY` (#274, #275).
+- **Both backend endpoints were repinned** (image tag only; ids in the release notes). Incident
+  write-up: `docs/runpod-1.0.1-weight-digest-eof.md`.
+  (Backfilled 2026-07-28 from the backend-v1.0.2 GitHub release; the row was missing from this file.)
+
+## [1.0.1] -- 2026-07-15
+
+- **Do NOT pin `:1.0.1`.** Repinning `RUNTIME_REF_BF16` to `runtime-1-bf16-t2` (#271) rewrote
+  roughly 101 GB of weight digests, so a cold worker pulling this image hits `unexpected EOF`.
+  **v1.0.2 is the RunPod-safe successor** and carries the same dependency content over an overlay
+  runtime that keeps the weight layers shared. Incident:
+  `docs/runpod-1.0.1-weight-digest-eof.md`.
+- The dependency content this tag intended, and which shipped safely in v1.0.2: av 13.1.0 -> 18.0.0
+  (#268), diffusers 0.38.0 -> 0.39.0 paired with safetensors 0.8.0 (#258, #262), insightface
+  `>=1.0.1` (#259), accelerate 1.14.0 (#260), transformers 5.13.1 (#261), onnxruntime-gpu `>=1.27.0`
+  (#257), plus boto3 / requests / pyyaml floors and standardized Dependabot grouping (#264).
+- **build(bake): warm the runtime rebuild by pre-pulling the seed into the snapshot (#263).**
+- (Backfilled 2026-07-28 from the commit log and from the v1.0.2 release notes, which are where the
+  reason this tag must not be pinned was recorded. This tag has no GitHub release of its own, and
+  the row was missing from this file.)
 
 ## [1.0.0] -- 2026-07-13
 
