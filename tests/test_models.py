@@ -362,3 +362,98 @@ def test_precision_facts_do_not_pass_when_nothing_was_measured():
     assert facts["i2v_dtype"] is None
     assert facts["matches_request"] is False
     assert facts["experts"] == {}
+
+
+# ---------------------------------------------- ATTACHED onnx providers, never requested (#350)
+#
+# The InstantID face path ran on CPU through three green releases because the REQUESTED provider
+# list said CUDA the whole time. These assert the read-back, and every one of them would pass
+# against the defect if the requested list were recorded instead, which is the point.
+
+from vivijure_backend.models import (  # noqa: E402
+    attached_onnx_providers, onnx_provider_facts,
+)
+
+
+class _Session:
+    def __init__(self, providers):
+        self._providers = providers
+
+    def get_providers(self):
+        return list(self._providers)
+
+
+class _OnnxModel:
+    def __init__(self, session):
+        self.session = session
+
+
+class _Analyzer:
+    def __init__(self, models):
+        self.models = models
+
+
+def test_attached_providers_read_the_session_not_the_request():
+    app = _Analyzer({
+        "detection": _OnnxModel(_Session(["CUDAExecutionProvider", "CPUExecutionProvider"])),
+        "recognition": _OnnxModel(_Session(["CUDAExecutionProvider", "CPUExecutionProvider"])),
+    })
+    facts = onnx_provider_facts(attached_onnx_providers(app))
+    assert facts["all_cuda"] is True
+    assert facts["cuda_attached"] is True
+    assert facts["per_model"]["detection"][0] == "CUDAExecutionProvider"
+
+
+def test_the_cpu_bound_face_path_is_visible():
+    # THE #346 shape: every session fell back to CPU while the requested list said CUDA. The render
+    # would have succeeded (face_analyzer passes a CPU fallback by design), so nothing else in the
+    # system could have caught this.
+    app = _Analyzer({
+        "detection": _OnnxModel(_Session(["CPUExecutionProvider"])),
+        "recognition": _OnnxModel(_Session(["CPUExecutionProvider"])),
+    })
+    facts = onnx_provider_facts(attached_onnx_providers(app))
+    assert facts["cuda_attached"] is False
+    assert facts["all_cuda"] is False
+
+
+def test_partial_cuda_is_not_healthy():
+    # One session on CUDA and one on CPU. An any()-shaped summary would call this fine.
+    app = _Analyzer({
+        "detection": _OnnxModel(_Session(["CUDAExecutionProvider"])),
+        "recognition": _OnnxModel(_Session(["CPUExecutionProvider"])),
+    })
+    facts = onnx_provider_facts(attached_onnx_providers(app))
+    assert facts["cuda_attached"] is True   # something is on CUDA...
+    assert facts["all_cuda"] is False       # ...but the path as a whole is not
+
+
+def test_an_unreachable_session_is_nothing_attached_not_a_dropped_model():
+    class _Broken:
+        session = None
+
+    class _Raises:
+        class session:  # noqa: N801
+            @staticmethod
+            def get_providers():
+                raise RuntimeError("session gone")
+
+    app = _Analyzer({"detection": _Broken(), "recognition": _Raises()})
+    per_model = attached_onnx_providers(app)
+    assert per_model == {"detection": [], "recognition": []}   # present and empty, not absent
+    assert onnx_provider_facts(per_model)["all_cuda"] is False
+
+
+def test_no_analyzer_at_all_is_not_healthy():
+    assert onnx_provider_facts({})["all_cuda"] is False
+
+
+def test_model_server_reports_none_until_the_analyzer_loads():
+    # None means the identity path did not run on this worker, which must stay distinct from a
+    # loaded analyzer reporting CPU. Never triggers a load.
+    server = ModelServer(device=H200)
+    assert server.onnx_provider_facts() is None
+    app = _Analyzer({"detection": _OnnxModel(_Session(["CPUExecutionProvider"]))})
+    app._vj_onnx_providers = onnx_provider_facts(attached_onnx_providers(app))
+    server._cache["face_analyzer"] = app
+    assert server.onnx_provider_facts()["cuda_attached"] is False

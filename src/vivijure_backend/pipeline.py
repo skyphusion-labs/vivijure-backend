@@ -156,11 +156,27 @@ class GpuPipeline:
         # out_dir (which is inside the workdir), so the harness's workdir teardown cleans them up.
         return result.path
 
-    def _render_keyframe(self, scene, cast, storyboard, out_path: Path, lora_paths: dict[str, Path]) -> Path:
+    def _render_keyframe(self, scene, cast, storyboard, out_path: Path,
+                         lora_paths: dict[str, Path]):
+        """Draw one keyframe and return the full `KeyframeResult`, not just its path.
+
+        It used to return `.path`, which threw away the only record of WHICH identity path ran. That
+        is why an InstantID face path that was CPU-bound across three releases was invisible in
+        render history: nothing distinguished an InstantID render from an IP-Adapter one, so the
+        history could neither confirm nor exclude that the path had ever run (#350)."""
         return _keyframe.render_keyframe(
             scene, cast, storyboard, self._model_server(), out_path,
             params=keyframe_params_from(self.config), lora_paths=lora_paths,
-        ).path
+        )
+
+    def _onnx_provider_facts(self):
+        """The attached-ONNX-provider record from the model server, or None when the identity path
+        never loaded an analyzer on this worker. Best-effort by construction: an observability read
+        must never be able to fail a render."""
+        try:
+            return self.server.onnx_provider_facts()
+        except Exception:  # noqa: BLE001
+            return None
 
     def _animate(self, scene, keyframe_path: Path, prompt: str, out_path: Path) -> Path:
         # Per-step i2v progress (every step; i2v is 4-40 steps, ~30s/step at final tier).
@@ -240,8 +256,9 @@ class GpuPipeline:
             if scene is None:
                 continue
             if sp.keyframe_mode is KeyframeMode.GENERATE:
-                kf_path = self._render_keyframe(
+                kf = self._render_keyframe(
                     scene, cast, storyboard, workdir / "keyframes" / f"{sp.shot_id}.png", lora_paths)
+                kf_path = kf.path
                 out.keyframes[sp.shot_id] = kf_path
                 # Write a param hash alongside the PNG so the next warm-worker run can skip
                 # regeneration when config is unchanged (_finish copies both into state.tar.gz).
@@ -249,7 +266,16 @@ class GpuPipeline:
                     kf_path.with_suffix(".hash").write_text(kf_hash(self.config.keyframe))
                 except Exception:
                     pass  # hash write is best-effort; a missing file = old-state reuse behavior
-                self.progress.emit("keyframe_done", shot=sp.shot_id)
+                # Record WHICH identity path ran, and for the InstantID path the ONNX providers
+                # onnxruntime actually ATTACHED (#350). Success and a dead CUDA EP coexist by design
+                # here -- face_analyzer passes a CPU fallback -- so "renders are succeeding" could
+                # never have established that the GPU path was alive, no matter how good a status
+                # field was. `onnx_providers` is None when the analyzer never loaded on this worker,
+                # which is deliberately distinct from a loaded analyzer reporting CPU.
+                self.progress.emit("keyframe_done", shot=sp.shot_id,
+                                   identity_requested=kf.identity_requested,
+                                   identity_path=kf.identity_path,
+                                   onnx_providers=self._onnx_provider_facts())
             else:
                 kf_path = self._resolve_keyframe(sp, scene, bundle, workdir, required=sp.needs_i2v)
             if sp.needs_i2v:

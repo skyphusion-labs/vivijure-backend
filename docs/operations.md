@@ -170,7 +170,7 @@ Events (discrete stages):
 | `started` | -- | Job begins. |
 | `mirror_done` | -- | Cold-start mirror complete. |
 | `train_done` | `slot` | A character LoRA finished training. |
-| `keyframe_done` | `shot` | A keyframe was generated. |
+| `keyframe_done` | `shot`, `identity_requested`, `identity_path`, `onnx_providers` | A keyframe was generated. `identity_requested` is the configured method; `identity_path` is which path actually RAN (`instantid`, `ip_adapter`, `regional_ip_adapter`, `lora_only`, `none`), and the two differ whenever InstantID falls back on a reference with no detectable face. `onnx_providers` is the providers onnxruntime ATTACHED (never the requested list), or `null` if the identity path never loaded an analyzer on this worker. Without these a CPU-bound face path is invisible in render history, which is how one shipped through three releases (backend#346 / #350). |
 | `i2v_done` | `shot` | A shot finished animating. |
 | `assemble_done` | -- | Clips concatenated (or per-shot manifest written, if offloaded). |
 | `upload_done` | `key` | An artifact was uploaded. |
