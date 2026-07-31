@@ -59,7 +59,7 @@ PyYAML>=6.0               # contract.py storyboard parse (no version sensitivity
 # face embedding + landmarks) and its ONNX runtime in the image so the path can be pod-validated.
 # insightface may compile from source on build; pin/prebuild if the build gets slow.
 insightface>=1.0.1
-onnxruntime-gpu>=1.27.0
+onnxruntime-gpu>=1.28.0
 # sentencepiece / protobuf are unneeded by the SDXL + Wan stack (transformers ran without them in
 # the validated env); add only if a future tokenizer requires them.
 
