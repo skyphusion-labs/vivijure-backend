@@ -32,6 +32,15 @@ SHELL ["conda", "run", "--no-capture-output", "-n", "vivijure", "/bin/bash", "-c
 COPY deploy/requirements.txt /tmp/requirements.txt
 RUN python -m pip install -r /tmp/requirements.txt
 
+# Force a CUDA-capable onnxruntime and PROVE it (backend#346). insightface hard-depends on the
+# CPU `onnxruntime` wheel, which shares the same package directory as onnxruntime-gpu and, when
+# it wins, silently strips CUDAExecutionProvider from the provider list -- so the InstantID face
+# embedding runs on CPU while every build stays green. This step removes it, repairs
+# onnxruntime-gpu, and HARD-FAILS the build unless a fresh interpreter reports
+# CUDAExecutionProvider. Needs no GPU: both failure modes are visible on a CPU-only runner.
+COPY deploy/ensure_onnxruntime_gpu.py /tmp/ensure_onnxruntime_gpu.py
+RUN python /tmp/ensure_onnxruntime_gpu.py /tmp/requirements.txt
+
 # Re-apply finish-dep compat patches: a pip refresh can restore upstream imports the sed
 # patched (basicsr / facexlib / gfpgan vs torchvision + numpy-2). Same surgical sed as
 # deploy/runtime.Dockerfile; no-op when already fixed.

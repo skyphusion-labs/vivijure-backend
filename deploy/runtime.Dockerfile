@@ -92,6 +92,15 @@ RUN python -m pip install --upgrade pip wheel setuptools \
 COPY deploy/requirements.txt /tmp/requirements.txt
 RUN python -m pip install -r /tmp/requirements.txt
 
+# Force a CUDA-capable onnxruntime and PROVE it (backend#346). insightface hard-depends on the
+# CPU `onnxruntime` wheel, which shares the same package directory as onnxruntime-gpu and, when
+# it wins, silently strips CUDAExecutionProvider from the provider list -- so the InstantID face
+# embedding runs on CPU while every build stays green. This step removes it, repairs
+# onnxruntime-gpu, and HARD-FAILS the build unless a fresh interpreter reports
+# CUDAExecutionProvider. Needs no GPU: both failure modes are visible on a CPU-only runner.
+COPY deploy/ensure_onnxruntime_gpu.py /tmp/ensure_onnxruntime_gpu.py
+RUN python /tmp/ensure_onnxruntime_gpu.py /tmp/requirements.txt
+
 # Compat patches for finishing-stage deps that predate the cu128 / numpy-2.x stack.
 # These are surgical sed passes over the three packages we know are affected; sed -i is a no-op
 # when a future pip release has already fixed the import, so the layer stays reproducible.
