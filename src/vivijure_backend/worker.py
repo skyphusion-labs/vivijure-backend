@@ -129,17 +129,26 @@ def handler(job: dict) -> dict:
     with a live GPU, the cu128 kernel actually launches on THIS card, and the baked weights +
     `.vj-baked` sentinel are on disk -- with NO R2, NO model load, and NO render. The RunPod Hub
     build test (`.runpod/tests.json`) and any endpoint liveness check hit it. It short-circuits
-    BEFORE the harness import so a health job never fetches a bundle or registers a pipeline."""
+    BEFORE the harness import so a health job never fetches a bundle or registers a pipeline, which
+    is why health still answers on an image too broken to render; keep that property.
+
+    It also returns `baked`, the parsed `.vj-baked` stamp, so the worker ATTESTS which build it is
+    running instead of leaving a caller to infer it from the endpoint pin (#363). The boolean
+    `vj_baked` only ever said the sentinel exists. `null` means no stamp (unbaked image); `{}` means
+    a stamp that yielded nothing readable, which is a different condition and stays distinguishable.
+    `vj_baked` is unchanged and `ok` is computed from exactly the same four facts as before, so
+    nothing consuming the current contract breaks."""
     payload = job.get("input", job)
 
     if str(payload.get("action", "render")) == "health":
-        from .verify import collect_gpu_facts, gpu_probe_payload
+        from .verify import collect_gpu_facts, gpu_probe_payload, read_bake_stamp
         probe = gpu_probe_payload(collect_gpu_facts())
         return {
             "ok": bool(probe["torch_cuda"] and probe["kernel_ok"]
                        and probe["vj_baked"] and probe["weights_on_disk"]),
             "action": "health",
             **probe,
+            "baked": read_bake_stamp(),
         }
 
     from .harness.handler import handler as harness_handler

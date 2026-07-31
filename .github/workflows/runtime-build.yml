@@ -53,8 +53,8 @@ on:
   # Monthly CVE-refresh FLOOR (#537 cadence): baked images rot -- CVEs + stale toolchains freeze in at
   # bake time, and since every release inherits the runtime's layers, runtime age = shipped CVE posture.
   # The scheduled run rebuilds WHATEVER is currently shipped (reads the pin, no drift) at the SAME tag
-  # with a fresh base/apt/pip-patch layer set, opens a RUNTIME_REF digest-bump PR, and re-triggers the
-  # snapshot. A deliberate toolchain bump still goes through the workflow_dispatch inputs above.
+  # with a fresh base/apt/pip-patch layer set and opens a RUNTIME_REF digest-bump PR. A deliberate
+  # toolchain bump still goes through the workflow_dispatch inputs above.
   # NOTE: the schedule still does a FULL rebuild today; prefer overlay_from for deps-only dispatch.
   schedule:
     - cron: '0 6 1 * *'   # 06:00 UTC, 1st of each month
@@ -63,7 +63,6 @@ permissions:
   contents: write         # push the auto-repin branch
   packages: write         # push the runtime image; pull the seed
   pull-requests: write    # open the RUNTIME_REF repin PR
-  actions: write          # re-trigger runner-snapshot (event-couple)
 
 concurrency:
   group: runtime-build-${{ github.event.inputs.precision || 'scheduled' }}
@@ -206,15 +205,38 @@ jobs:
           BASE='${{ steps.cfg.outputs.overlay_from }}'
           python deploy/bake_layers.py assert-shared-diff-ids --image "${IMG}" --base "${BASE}" --min-shared-gb 90
 
-      # Toolchain import smoke (CPU, no GPU, no app): catch a torch/CUDA ABI break in the runtime here,
-      # in seconds, rather than at the end of a 33-min GPU render. The APP import smoke runs in the
-      # consuming release build (it needs COPY src).
-      - name: Toolchain import smoke (CPU, no GPU)
+      # Toolchain import smoke (no app): catch a torch/CUDA ABI break in the runtime here, in seconds,
+      # rather than at the end of a 33-min GPU render. The APP import smoke runs in the consuming
+      # release build (it needs COPY src).
+      - name: Toolchain import smoke
         run: |
           set -eu
           IMG="${REGISTRY}/${OWNER}/${RUNTIME_IMAGE}:${{ steps.cfg.outputs.tag }}"
           docker run --rm "${IMG}" conda run --no-capture-output -n vivijure \
             python -c "import torch, torchvision, diffusers, transformers, safetensors; print('runtime import smoke OK:', torch.__version__)"
+
+      # Session-level CUDA execution-provider check, ON A REAL GPU (backend#349). This is the layer
+      # where the deps are actually installed, so it is where a bad onnxruntime wheel is born; catching
+      # it here is earlier than catching it in the consuming release.
+      #
+      # The import smoke above cannot catch this class. A provider NAME is not a working provider:
+      # onnxruntime-gpu 1.28.0 imports cleanly, advertises CUDAExecutionProvider, and then silently
+      # hands back a CPU session against this CUDA 12.8 base. That is what put the InstantID face path
+      # on CPU across backend-v1.0.9/1.0.10/1.0.11 without one build going red. Only creating a real
+      # session catches it, and that needs a GPU attached to the container, not merely present on the
+      # host. deploy/smoke_cuda_ep.py FAILS rather than skips when no GPU is visible, so a --gpus all
+      # that quietly did not attach cannot read as a pass.
+      #
+      # The script is mounted rather than baked: the base image carries no app code, and this keeps the
+      # check editable without a rebuild. Both Plane C boxes have the nvidia container runtime
+      # registered in dockerd (verified 2026-07-31), so either can serve this step.
+      - name: CUDA EP session check (GPU)
+        run: |
+          set -eu
+          IMG="${REGISTRY}/${OWNER}/${RUNTIME_IMAGE}:${{ steps.cfg.outputs.tag }}"
+          docker run --rm --gpus all \
+            -v "${GITHUB_WORKSPACE}/deploy/smoke_cuda_ep.py:/tmp/smoke_cuda_ep.py:ro" \
+            "${IMG}" conda run --no-capture-output -n vivijure python /tmp/smoke_cuda_ep.py
 
       - name: Push tags to GHCR
         id: push
@@ -249,11 +271,31 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Auto-open (or update) the RUNTIME_REF repin PR so the new digest reaches deploy/Dockerfile with
-      # a human merge through the gate (#537 cadence). Uses GITHUB_TOKEN on a fixed, force-updated branch
-      # so re-bakes never pile up PRs. Graceful degrade: if the org "Actions can create PRs" setting is
-      # ever off, the branch is still pushed and we log a warning -- never a hard fail. The consumer pins
-      # by DIGEST; the snapshot below refreshes by TAG, so the two stay coherent.
+      # Auto-open (or update) the RUNTIME_REF repin PR so the new digest reaches BOTH consumer
+      # Dockerfiles with a human merge through the gate (#537 cadence). Fixed, force-updated branch, so
+      # re-bakes never pile up PRs.
+      #
+      # BOTH FILES, NOT ONE (backend#356). .runpod/Dockerfile is a real-file duplicate of
+      # deploy/Dockerfile (the root Dockerfile is a symlink and the Hub probe does not reliably accept
+      # one), and hub-files-sync.yml requires the two to be BYTE-IDENTICAL. This step used to sed
+      # deploy/Dockerfile only, so every PR it opened failed `sync` by construction and the automated
+      # repin path could never produce a mergeable branch.
+      #
+      # ASSERT THE ANCHORS BEFORE WRITING. An anchor lookup that silently matches nothing turns a
+      # targeted edit into an untargeted one. Each file must contain the ARG line exactly once before
+      # the sed, and exactly once carrying the new ref after it, and the two must be identical both
+      # before and after. A half-repin fails here, loudly, instead of on a branch nobody reads.
+      #
+      # PR CREATION USES THE REST API, NOT gh (backend#356). The old step called `gh pr create` and
+      # degraded to a warning, and the warning blamed the org "Actions can create PRs" setting. That
+      # diagnosis was wrong: the setting is ON at both org and repo level. The actual cause is that the
+      # gh CLI is NOT INSTALLED on the Plane C runners -- the very next step failed with
+      # `gh: command not found` in the same run (30641630362). curl and jq are present, so the API call
+      # has no unmanaged host dependency.
+      #
+      # AND IT FAILS LOUDLY. The old graceful-degrade is what hid this: a repin that never reaches a PR
+      # is a silent no-op, and the monthly CVE-refresh cron exists precisely to be unattended. If the
+      # PR cannot be opened, the run goes red.
       - name: Open/update the RUNTIME_REF repin PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -263,32 +305,79 @@ jobs:
           ARGNAME="RUNTIME_REF_$(echo "$PREC" | tr '[:lower:]' '[:upper:]')"
           NEWREF="${REGISTRY}/${OWNER}/${RUNTIME_IMAGE}:${{ steps.cfg.outputs.tag }}@${{ steps.push.outputs.digest }}"
           BRANCH="auto/runtime-repin-${PREC}"
+          TARGETS="deploy/Dockerfile .runpod/Dockerfile"
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin main
           git checkout -B "${BRANCH}" origin/main
-          sed -i "s|ARG ${ARGNAME}=.*|ARG ${ARGNAME}=${NEWREF}|" deploy/Dockerfile
-          if git diff --quiet -- deploy/Dockerfile; then
-            echo "deploy/Dockerfile already pins ${NEWREF}; nothing to repin."
+
+          # --- pre-write assertions -------------------------------------------------------------
+          for f in ${TARGETS}; do
+            [ -f "${f}" ] || { echo "::error::${f} is missing"; exit 1; }
+            n="$(grep -c "^ARG ${ARGNAME}=" "${f}" || true)"
+            if [ "${n}" != "1" ]; then
+              echo "::error::expected exactly 1 line matching '^ARG ${ARGNAME}=' in ${f}, found ${n}; refusing to edit"
+              exit 1
+            fi
+          done
+          if ! cmp -s deploy/Dockerfile .runpod/Dockerfile; then
+            echo "::error::deploy/Dockerfile and .runpod/Dockerfile already differ on main; a repin would produce a half-synced branch. Fix the drift first."
+            diff -u deploy/Dockerfile .runpod/Dockerfile || true
+            exit 1
+          fi
+
+          for f in ${TARGETS}; do
+            sed -i "s|^ARG ${ARGNAME}=.*|ARG ${ARGNAME}=${NEWREF}|" "${f}"
+          done
+
+          # --- post-write assertions ------------------------------------------------------------
+          for f in ${TARGETS}; do
+            n="$(grep -Fxc "ARG ${ARGNAME}=${NEWREF}" "${f}" || true)"
+            if [ "${n}" != "1" ]; then
+              echo "::error::${f} does not carry 'ARG ${ARGNAME}=${NEWREF}' exactly once after the repin (found ${n})"
+              exit 1
+            fi
+          done
+          if ! cmp -s deploy/Dockerfile .runpod/Dockerfile; then
+            echo "::error::the two Dockerfiles diverged during the repin; hub-files-sync would fail on this branch"
+            diff -u deploy/Dockerfile .runpod/Dockerfile || true
+            exit 1
+          fi
+
+          if git diff --quiet -- ${TARGETS}; then
+            echo "Both Dockerfiles already pin ${NEWREF}; nothing to repin."
             exit 0
           fi
-          git add deploy/Dockerfile
+          git add ${TARGETS}
           git commit -m "build(bake): repin ${ARGNAME} to the re-baked runtime (#537 cadence)"
           git push -f origin "${BRANCH}"
-          gh pr create --base main --head "${BRANCH}" \
-            --title "build(bake): repin ${ARGNAME} to the re-baked runtime (#537 cadence)" \
-            --body "Automated RUNTIME_REF digest bump from a runtime re-bake (${{ github.event_name }}). New base: ${NEWREF}. Merge through the gate to refresh the shipped CVE posture; the next backend release inherits it. Fixed branch (force-updated), so re-bakes do not pile up PRs." \
-            || echo "::warning::PR not auto-created (branch ${BRANCH} pushed; open it manually -- check the org Actions-create-PR setting)."
 
-      # Event-couple the runner snapshot (#537 cadence): its whole job is pre-pulling this runtime, so a
-      # new runtime digest should refresh the snapshot. Dispatches by TAG (now pointing at the new
-      # digest). Non-fatal if it cannot dispatch (the monthly snapshot cron is the backstop).
-      - name: Re-trigger the runner snapshot (event-couple)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -eu
-          REF="${REGISTRY}/${OWNER}/${RUNTIME_IMAGE}:${{ steps.cfg.outputs.tag }}"
-          gh workflow run runner-snapshot.yml -f runtime_refs="${REF}" \
-            && echo "Dispatched runner-snapshot to pre-pull ${REF}." \
-            || echo "::warning::could not dispatch runner-snapshot (the monthly snapshot cron is the backstop)."
+          # --- open the PR via the REST API -----------------------------------------------------
+          TITLE="build(bake): repin ${ARGNAME} to the re-baked runtime (#537 cadence)"
+          PRBODY="Automated RUNTIME_REF digest bump from a runtime re-bake (${{ github.event_name }}). New base: ${NEWREF}. Repins deploy/Dockerfile AND .runpod/Dockerfile together so hub-files-sync stays green. Merge through the gate to refresh the shipped CVE posture; the next backend release inherits it. Fixed branch (force-updated), so re-bakes do not pile up PRs."
+          payload="$(jq -n --arg t "${TITLE}" --arg h "${BRANCH}" --arg b main --arg body "${PRBODY}" \
+            '{title: $t, head: $h, base: $b, body: $body}')"
+          code="$(curl -sS -o /tmp/repin-pr.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls" \
+            -d "${payload}")"
+          case "${code}" in
+            201)
+              echo "Opened $(jq -r '.html_url' /tmp/repin-pr.json)"
+              ;;
+            422)
+              if grep -q 'A pull request already exists' /tmp/repin-pr.json; then
+                echo "A PR is already open for ${BRANCH}; the force-pushed branch updates it in place."
+              else
+                echo "::error::PR creation rejected (HTTP 422): $(jq -c '{message, errors}' /tmp/repin-pr.json)"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::PR creation failed (HTTP ${code}): $(jq -r '.message // "no message"' /tmp/repin-pr.json)"
+              exit 1
+              ;;
+          esac

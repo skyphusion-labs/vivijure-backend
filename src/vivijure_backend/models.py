@@ -21,6 +21,7 @@ imports and unit-tests on a CPU box.
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -191,6 +192,180 @@ def quant_for(family: ModelFamily, device: Device) -> Quant:
     return Quant.BF16
 
 
+# --------------------------------------------------------------------------- precision reporting
+#
+# `quant_for` above is a CAPABILITY statement: the best precision this card could accelerate for a
+# family. It is NOT what the loaders in this module do, and reporting it as though it were is what
+# let `plan()` claim fp8 for roles that load bf16 and never quantize (#360). The two questions are
+# deliberately separate, because only one of them is a claim about state:
+#
+#   quant_for(family, device)          -- what the CARD can do.
+#   loaded_quant_for(family, device)   -- what THESE loaders actually produce.
+#
+# `plan()` answers the second, because that is the question every consumer of it was asking.
+
+# Below this much VRAM the inactive Wan expert is CPU-offloaded, and torchao fp8 is not applied.
+_I2V_OFFLOAD_VRAM_GB = 120
+
+
+def i2v_cpu_offload(device: Device) -> bool:
+    """True iff `i2v_pipeline` will CPU-offload the inactive Wan 2.2 expert on this card. ONE source
+    of truth: the loader and the plan both read it, so what the plan says about offload cannot drift
+    from what the load does."""
+    return bool(device.vram_gb) and device.vram_gb < _I2V_OFFLOAD_VRAM_GB
+
+
+def i2v_fp8_active(device: Device, env: dict | None = None) -> bool:
+    """True iff the Wan i2v experts END UP in fp8 on this card: the card supports fp8, the pipe is
+    not CPU-offloading, and VJ_I2V_FP8 is not turned off. Mirrors `i2v_pipeline`'s `fp8_enabled`
+    expression exactly (and is the value that expression now reads), so the plan and the load cannot
+    disagree. Pure; `env` defaults to os.environ."""
+    e = env if env is not None else os.environ
+    return bool(device.supports_fp8 and not i2v_cpu_offload(device)
+                and str(e.get("VJ_I2V_FP8", "1")) != "0")
+
+
+def loaded_quant_for(family: ModelFamily, device: Device, env: dict | None = None) -> Quant:
+    """The precision `family` ACTUALLY lands at under this module's loaders, read off the loaders
+    rather than off the card table. Pure, no GPU touched.
+
+      AUX        -- adapters / LoRAs / detectors attach at the base dtype: bf16.
+      SDXL_UNET  -- keyframe_pipeline and instantid_pipeline call from_pretrained at bfloat16 and
+                    never call a quantizer, because peft cannot attach a dynamic per-scene character
+                    LoRA to a torchao-quantized linear (#12535). The card's fp8 ceiling is real and
+                    deliberately unused, so bf16 is the honest answer on every card.
+      VIDEO_DIT  -- fp8 iff `i2v_fp8_active` (baked fp8 weights and a runtime torchao quantize both
+                    land there); bf16 otherwise, which is what a CPU-offloading card gets.
+      DIT        -- has no loader in this module (the documented future FLUX/Qwen option, absent from
+                    DEFAULT_SPECS), so there is no loaded precision to report and the card ceiling is
+                    the only answer available. Unreachable through DEFAULT_SPECS.
+    """
+    if family is ModelFamily.AUX:
+        return Quant.BF16
+    if family is ModelFamily.SDXL_UNET:
+        return Quant.BF16
+    if family is ModelFamily.VIDEO_DIT:
+        return Quant.FP8 if i2v_fp8_active(device, env) else Quant.BF16
+    return quant_for(family, device)
+
+
+# --------------------------------------------------------------------- onnx provider attestation
+#
+# The InstantID face path ran entirely on CPU through backend-v1.0.9, .10 and .11. Every build was
+# green, every render succeeded, and nothing anywhere failed, because `face_analyzer` passes
+# CPUExecutionProvider as a fallback: a dead CUDA EP and a successful render coexist BY DESIGN
+# (#346). The only thing in the estate that could detect it was pulling a 104 GB image onto a GPU box
+# and instantiating the provider by hand.
+#
+# What follows records the providers ONNX actually ATTACHED. Recording the REQUESTED list would
+# reproduce the defect exactly rather than detect it: the request said
+# [CUDAExecutionProvider, CPUExecutionProvider] for the entire time every session was on CPU.
+
+
+def attached_onnx_providers(analyzer) -> dict[str, list[str]]:
+    """The execution providers ATTACHED to each of an insightface FaceAnalysis' ONNX sessions, read
+    from `session.get_providers()` -- never from the `providers=` argument that was passed in.
+
+    Available is not attached and attached is not executed; this closes the first of those two gaps,
+    which is the one that hid #346. A model with no reachable session maps to `[]` rather than being
+    dropped, so a partially constructed analyzer cannot look like a fully CUDA-attached one. Pure
+    over anything shaped like a FaceAnalysis, so it tests with a fake and no onnxruntime."""
+    out: dict[str, list[str]] = {}
+    for name, model in sorted((getattr(analyzer, "models", None) or {}).items()):
+        session = getattr(model, "session", None)
+        getter = getattr(session, "get_providers", None)
+        try:
+            out[str(name)] = [str(p) for p in getter()] if callable(getter) else []
+        except Exception:  # noqa: BLE001 -- a probe failure reports as "nothing attached", not a crash
+            out[str(name)] = []
+    return out
+
+
+def onnx_provider_facts(per_model: dict[str, list[str]]) -> dict:
+    """Summarise attached providers into the record a render carries.
+
+    `all_cuda` is the honest health signal, not `cuda_attached`: one session on CUDA and the rest on
+    CPU is the shape #346 would have taken if the fallback had been partial, and an any() would have
+    called that healthy. An EMPTY analyzer is `all_cuda: False`, because nothing measured is not the
+    same as everything fine."""
+    attached = sorted({p for providers in per_model.values() for p in providers})
+    return {
+        "per_model": per_model,
+        "attached": attached,
+        "cuda_attached": "CUDAExecutionProvider" in attached,
+        "all_cuda": bool(per_model) and all(
+            "CUDAExecutionProvider" in providers for providers in per_model.values()),
+    }
+
+
+class I2VPrecisionMismatch(RuntimeError):
+    """The loaded Wan i2v weights are NOT at the dtype the load asked for. Raised instead of
+    rendering, because the alternative is a worker whose plan, whose logs and whose weights on disk
+    all say one precision while the resident model holds another, and the failure then surfaces as
+    an OOM or a quality drift far from its cause."""
+
+
+def dtype_histogram(module) -> dict[str, int]:
+    """Count `module`'s parameters by dtype, e.g. `{"bfloat16": 2626}`.
+
+    A single `next(module.parameters()).dtype` reading is not evidence ABOUT the module: diffusers
+    deliberately keeps named submodules in fp32 (`_keep_in_fp32_modules`), so the first parameter can
+    be a minority dtype and still answer confidently for the whole model. Counting every parameter is
+    what makes "this model is bf16" a claim the reading can actually support. Pure over anything
+    exposing `.parameters()`, so it tests with a fake and no torch."""
+    hist: dict[str, int] = {}
+    for param in module.parameters():
+        name = str(getattr(param, "dtype", "unknown")).replace("torch.", "")
+        hist[name] = hist.get(name, 0) + 1
+    return hist
+
+
+def merge_histograms(hists) -> dict[str, int]:
+    """Sum several dtype histograms into one (the two MoE experts read as a single model)."""
+    total: dict[str, int] = {}
+    for hist in hists:
+        for name, count in hist.items():
+            total[name] = total.get(name, 0) + count
+    return total
+
+
+def dominant_dtype(hist: dict[str, int]) -> str | None:
+    """The dtype holding the most parameters, or None for an empty histogram. None is the honest
+    answer for "nothing was measured" and is deliberately NOT a dtype string, so a caller cannot
+    mistake an unmeasured model for a correctly loaded one. Ties break on the dtype name so the
+    answer is deterministic."""
+    if not hist:
+        return None
+    return sorted(hist.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+
+
+def i2v_precision_facts(pipe, *, requested_dtype: str, repo_id: str,
+                        weights_are_fp8: bool, runtime_quantized: bool) -> dict:
+    """The `model_precision` @event payload: the RESIDENT dtype of the loaded Wan experts, MEASURED
+    off the modules, alongside the dtype the load requested.
+
+    This is the event `deploy/runpod_verify.py`'s BAK-4 gate reads. Until it was emitted, that gate
+    consumed a signal nothing sent, so the one check that exists to catch a wrong baked precision had
+    never evaluated a real precision (#364). `matches_request` is the load-bearing field: requested
+    and resident silently disagreeing IS the defect, so the comparison is recorded rather than left
+    for a reader to make. Pure over any object exposing `transformer` / `transformer_2`."""
+    experts: dict[str, dict[str, int]] = {}
+    for name in ("transformer", "transformer_2"):
+        module = getattr(pipe, name, None)
+        if module is not None:
+            experts[name] = dtype_histogram(module)
+    resident = dominant_dtype(merge_histograms(experts.values()))
+    return {
+        "i2v_dtype": resident,
+        "requested_dtype": requested_dtype,
+        "matches_request": resident is not None and resident == requested_dtype,
+        "repo_id": repo_id,
+        "weights_are_fp8": bool(weights_are_fp8),
+        "runtime_quantized": bool(runtime_quantized),
+        "experts": experts,
+    }
+
+
 def _select_i2v_weights(spec, *, baked: bool, final_tier: bool, fp8_present: bool):
     """Pick (repo_id, weights_are_fp8, pull_from_r2) for the Wan i2v load. PURE -- no I/O, no GPU --
     so CI exercises the offline weight-source decision with no weights present (the coverage gap that
@@ -222,11 +397,20 @@ class ModelServer:
         self.specs = {**DEFAULT_SPECS, **(specs or {})}
         self._cache: dict[str, Any] = {}
 
-    def plan(self) -> dict[str, str]:
-        """The precision each role WILL load at on this card, no GPU touched. Drives logging
-        and lets tests assert the matrix."""
+    def plan(self, env: dict | None = None) -> dict[str, str]:
+        """The precision each role ACTUALLY loads at on this card, read off the loaders (see
+        `loaded_quant_for`), no GPU touched. Drives logging and lets tests assert the matrix.
+
+        It used to report `quant_for`, the CARD CEILING, which answers a different question: on every
+        Blackwell and Hopper worker it claimed fp8 for keyframe roles that load bf16 and never
+        quantize, out of images holding zero fp8 weight files (#360). No render was wrong, the
+        loaders degrade correctly, but anyone reasoning about VRAM headroom, throughput or cost from
+        this dict was reasoning from a number nothing produced.
+
+        `env` defaults to os.environ (VJ_I2V_FP8); pass one to assert the matrix under a given
+        configuration."""
         return {
-            role.value: quant_for(spec.family, self.device).value
+            role.value: loaded_quant_for(spec.family, self.device, env).value
             for role, spec in self.specs.items()
         }
 
@@ -310,8 +494,24 @@ class ModelServer:
             app = FaceAnalysis(name="antelopev2", root=root,
                                providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
         app.prepare(ctx_id=0, det_size=(640, 640))
+        # Read back what onnxruntime ATTACHED, not what we asked for. See attached_onnx_providers:
+        # the requested list above says CUDA on a worker whose every session is on CPU, which is how
+        # a CPU-bound face path shipped through three green releases (#346/#350). Cached on the
+        # analyzer AND emitted, so it reaches both the render record and the worker log.
+        facts = onnx_provider_facts(attached_onnx_providers(app))
+        app._vj_onnx_providers = facts
+        import json as _json
+        print("@event onnx_providers " + _json.dumps(facts, sort_keys=True), flush=True)
         self._cache["face_analyzer"] = app
         return app
+
+    def onnx_provider_facts(self) -> dict | None:
+        """The attached-provider record for the face analyzer, or None if it was never loaded on
+        this worker. None means "the identity path did not run", which is deliberately distinct from
+        a loaded analyzer reporting CPU: a render record that cannot tell those apart is the gap
+        #350 is about. Never triggers a load."""
+        app = self._cache.get("face_analyzer")
+        return getattr(app, "_vj_onnx_providers", None) if app is not None else None
 
     def instantid_pipeline(self):
         """InstantID single-character pipeline: a plain SDXL base whose UNet cross-attention is
@@ -385,7 +585,7 @@ class ModelServer:
         the sm_120 de-risk hit: the old code always asked for the -fp8 repo, which the bf16 seed lacks."""
         if "i2v" in self._cache:
             return self._cache["i2v"]
-        import os
+        import json
         import torch
         from diffusers import WanImageToVideoPipeline
         from .harness.models_mirror import ensure_i2v_models, is_baked, repo_in_hf_cache
@@ -400,12 +600,43 @@ class ModelServer:
         repo, weights_are_fp8, pull_from_r2 = _select_i2v_weights(
             spec, baked=baked, final_tier=final_tier, fp8_present=fp8_present)
         if pull_from_r2:
-            ensure_i2v_models()
+            # force=True: the SELECTION above already decided this tier needs shards fetched from R2,
+            # and on a baked image ensure_i2v_models' default guard would silently swallow the pull
+            # its own caller asked for, leaving from_pretrained to fail deep against a cache holding
+            # the other repo (the #339 B seam). The decision owns the pull; the guard is the default
+            # for callers that have not decided, not an override of one that has.
+            ensure_i2v_models(force=True)
 
         load_dtype = torch.float8_e4m3fn if weights_are_fp8 else torch.bfloat16
         pipe = WanImageToVideoPipeline.from_pretrained(
             repo, torch_dtype=load_dtype, local_files_only=True)
-        offload = bool(self.device.vram_gb) and self.device.vram_gb < 120
+
+        # ATTEST the precision rather than assume it (#360 / #364). Two things happen here:
+        #
+        # 1. `model_precision` is EMITTED. The BAK-4 release gate in deploy/runpod_verify.py has
+        #    always consumed this event and nothing in src/ ever sent it, so the one check that
+        #    exists to catch a wrong baked precision had never evaluated a real precision.
+        # 2. Requested-versus-resident is ASSERTED. Under the pinned diffusers, asking a
+        #    WanTransformer3DModel for float8_e4m3fn silently yields fp32: the class sets
+        #    _keep_in_fp32_modules, which makes use_keep_in_fp32_modules true, which both skips the
+        #    default-dtype set at instantiation AND gates off the post-load cast. Neither step
+        #    honors the request and nothing raises. 117.5 GiB of fp32 experts does not fit the
+        #    139.8 GiB card the prod pool includes, so the symptom would be an OOM a long way from
+        #    its cause. Unreachable while no fp8 repo is baked; this makes its ARRIVAL loud.
+        requested = str(load_dtype).replace("torch.", "")
+        precision = i2v_precision_facts(
+            pipe, requested_dtype=requested, repo_id=repo,
+            weights_are_fp8=weights_are_fp8,
+            runtime_quantized=(not weights_are_fp8 and i2v_fp8_active(self.device)))
+        print("@event model_precision " + json.dumps(precision, sort_keys=True), flush=True)
+        if not precision["matches_request"]:
+            raise I2VPrecisionMismatch(
+                f"i2v weights from {repo!r} loaded at {precision['i2v_dtype']!r}, not the requested "
+                f"{requested!r} (parameter dtypes: {precision['experts']}). A load that ignores its "
+                "requested dtype without raising is the diffusers keep-in-fp32 path, not a precision "
+                "choice; refusing to render rather than report a precision this worker does not hold.")
+
+        offload = i2v_cpu_offload(self.device)
         if not offload:
             pipe.to("cuda")
 
@@ -418,8 +649,7 @@ class ModelServer:
             pipe._vj_i2v_distill_loaded = False
             pipe._vj_i2v_distill_fused = False
 
-        fp8_enabled = (self.device.supports_fp8 and not offload
-                       and os.environ.get("VJ_I2V_FP8", "1") != "0")
+        fp8_enabled = i2v_fp8_active(self.device)
         if weights_are_fp8:
             # Baked weights are already fp8_e4m3fn; apply dynamic-activation fp8 over them (no quantize_
             # of bf16). Card-agnostic: e4m3fn storage loads on Hopper + Blackwell; the activation
