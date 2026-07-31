@@ -1,0 +1,153 @@
+name: requirements resolve
+
+# deploy/requirements.txt is resolved in exactly ONE place today: when the runtime BASE image is
+# baked (deploy/runtime.Dockerfile, dispatch-gated runtime-build.yml). It is NOT installed by
+# deploy/Dockerfile, so a src-only backend release never re-resolves pip, and no check on this repo
+# ever touched this file. Consequence, twice this month: an uninstallable pin merged green and
+# stayed green. dcb25ec (2026-07-23) set numpy==2.5.1 (Requires-Python >=3.12; the conda env is
+# 3.11) and tokenizers==0.23.1 (ResolutionImpossible against transformers 5.14.1), leaving the
+# comments forbidding both changes standing directly above them. main was unbuildable for eight
+# days and nothing went red. See backend#355, #351, #346.
+#
+# This workflow adds two resolve gates. They are deliberately NOT the same check:
+#
+#   resolve-hosted   PR gate. ubuntu-latest, plain CPython 3.11, fork-safe. Runs on every PR that
+#                    touches the file.
+#   resolve-in-base  Authoritative gate. Runs INSIDE the runtime base image deploy/Dockerfile
+#                    currently pins, which is the environment the bake actually resolves in.
+#
+# WHY resolve-in-base CANNOT BE THE PR GATE (do not "fix" this by moving the trigger):
+# it needs the ~239 GB runtime base, so it must run on Plane C [self-hosted, gpu] (org runner group
+# vivijure-gpu-builds), and that group is restricted_to_workflows with EXACT ref pins. A
+# pull_request run has ref refs/pull/N/merge, which matches no allowlist entry, so a PR-triggered
+# job on that group never schedules -- it queues until it times out. push-to-main is the earliest
+# trigger Plane C can serve. That is why both jobs exist: the hosted one gates the merge, the
+# in-base one is the truth, minutes after merge instead of eight days later.
+#
+# NO GPU IS REQUIRED FOR A PIP RESOLVE. resolve-in-base is on [self-hosted, gpu] only because that
+# is where the base image lives. Do not "optimize" it onto a hosted runner: a hosted runner cannot
+# pull a 239 GB base, and resolving against a stand-in environment is exactly the gap this closes.
+#
+# WHAT THESE GATES DO NOT COVER, stated plainly so a green tick is not read as more than it is:
+#   * They do not prove the image BUILDS. apt, the basicsr compat patches, the RIFE clone and the
+#     HF config bake all live in the Dockerfiles and are not exercised here.
+#   * They do not prove the stack RUNS. A perfectly resolvable pin can still be wrong at runtime:
+#     backend#346 shipped an onnxruntime-gpu wheel that resolved, installed, imported, advertised
+#     CUDAExecutionProvider, and then ran the face path on CPU for three releases. Resolution
+#     cannot see that. The smoke steps in release.yml / runtime-build.yml are what look for it.
+#   * resolve-hosted additionally resolves torch/torchvision/torchaudio from PyPI, because
+#     requirements.txt deliberately omits them (the Dockerfile installs them from the cu128 index).
+#     So it proves the pins are mutually satisfiable metadata under Python 3.11; it does not prove
+#     they are satisfiable against the exact torch line the image ships. resolve-in-base does.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - deploy/requirements.txt
+      - .github/workflows/requirements-resolve.yml
+  push:
+    branches: [main]
+    paths:
+      - deploy/requirements.txt
+      - .github/workflows/requirements-resolve.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: requirements-resolve-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ------------------------------------------------------------------ PR gate (hosted, fork-safe)
+  resolve-hosted:
+    name: resolve (hosted, python 3.11)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      # 3.11 because the runtime base conda env is 3.11.x. If the base ever moves off 3.11, this
+      # pin moves with it; resolve-in-base is the authority and would disagree loudly first.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: pip resolve deploy/requirements.txt
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet --upgrade pip
+          echo "Resolving deploy/requirements.txt against $(python -V) (no install, metadata only)."
+          pip install --dry-run --ignore-installed -r deploy/requirements.txt
+
+      - name: What this job did not prove
+        if: always()
+        run: |
+          echo "Resolved metadata only, on plain CPython 3.11, with torch from PyPI rather than the"
+          echo "cu128 index the image uses. It does NOT prove the image builds, does NOT prove the"
+          echo "stack runs on a GPU, and does NOT prove resolution against the shipped torch line."
+          echo "resolve-in-base (push to main, Plane C) is the authoritative resolve."
+
+  # ------------------------------------------------- authoritative gate (inside the pinned base)
+  resolve-in-base:
+    name: resolve (inside the pinned runtime base)
+    if: github.event_name != 'pull_request'
+    # Plane C. Present ONLY because the runtime base image lives here. No GPU is used by this job.
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      # Read the base from deploy/Dockerfile rather than hardcoding it, so this gate can never
+      # drift from what ships. Assert the anchor matched BEFORE using it: a grep that returns empty
+      # would otherwise turn into a silently wrong docker reference.
+      - name: Resolve the pinned runtime base
+        id: base
+        run: |
+          set -euo pipefail
+          n="$(grep -c '^ARG RUNTIME_REF_BF16=' deploy/Dockerfile || true)"
+          if [ "${n}" != "1" ]; then
+            echo "::error::expected exactly 1 'ARG RUNTIME_REF_BF16=' line in deploy/Dockerfile, found ${n}"
+            exit 1
+          fi
+          REF="$(sed -n 's|^ARG RUNTIME_REF_BF16=||p' deploy/Dockerfile)"
+          case "${REF}" in
+            *@sha256:0000000000000000000000000000000000000000000000000000000000000000)
+              echo "::error::RUNTIME_REF_BF16 is still the all-zero placeholder digest"; exit 1 ;;
+            ghcr.io/*@sha256:*) ;;
+            *) echo "::error::RUNTIME_REF_BF16 is not a digest-pinned ghcr.io reference: ${REF}"; exit 1 ;;
+          esac
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "Resolving against ${REF}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Warm on the Plane C boxes; a cold runner pays a one-time pull (SLOW, never WRONG).
+      - name: Pull the runtime base if absent
+        run: docker image inspect '${{ steps.base.outputs.ref }}' >/dev/null 2>&1 || docker pull '${{ steps.base.outputs.ref }}'
+
+      # The real gate. pip resolves against the env the bake resolves in: same Python, same conda
+      # env, same already-installed torch line. Non-zero exit fails the run.
+      - name: pip resolve inside the runtime base
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}/deploy/requirements.txt:/req.txt:ro" \
+            '${{ steps.base.outputs.ref }}' \
+            conda run --no-capture-output -n vivijure pip install --dry-run -r /req.txt
+
+      - name: What this job did not prove
+        if: always()
+        run: |
+          echo "Resolved deps only. It does NOT prove the image builds (apt, the basicsr compat"
+          echo "patches, the RIFE clone, the HF config bake) and does NOT prove the stack runs:"
+          echo "backend#346 was a wheel that resolved, installed and imported cleanly and still ran"
+          echo "the face path on CPU. Only the GPU smoke and a pod render look for that."

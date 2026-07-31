@@ -19,6 +19,22 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: deps
+    # Two pins in deploy/requirements.txt cannot move by a bare version bump, and this repo learned
+    # that the expensive way: dcb25ec (the 2026-07-23 pip-minor-patch group PR) bumped both and left
+    # main unbuildable for eight days, because deploy/requirements.txt resolves only at runtime-base
+    # bake time and no check on this repo installed it (backend#355, #351).
+    #   numpy      >=2.5.0 is Requires-Python >=3.12; the runtime base conda env is 3.11.15.
+    #              Moving it requires moving the env off 3.11, re-validated.
+    #   tokenizers >0.22.2 breaks against transformers 5.14.1, which caps tokenizers<=0.23.0, and
+    #              PyPI never shipped a 0.23.0 stable. It can only move PAIRED with transformers.
+    # vivijure-audio-upscale carries the same numpy ignore for the same class of reason (its pin sits
+    # under a numba/llvmlite ceiling). Removing either entry means bumping its partner deliberately,
+    # not accepting a bare bump.
+    ignore:
+      - dependency-name: "numpy"
+        versions: [">=2.5.0"]
+      - dependency-name: "tokenizers"
+        versions: [">0.22.2"]
     groups:
       pip-minor-patch:
         patterns: ["*"]
