@@ -5,6 +5,7 @@ from vivijure_backend.models import ModelFamily, ModelRole, ModelServer, quant_f
 
 B200 = Device.classify((10, 0), "NVIDIA B200")
 H200 = Device.classify((9, 0), "NVIDIA H200")
+RTX6000 = Device.classify((12, 0), "NVIDIA RTX PRO 6000 Blackwell Server Edition")
 CPU = Device.classify((0, 0), "cpu")
 
 
@@ -40,9 +41,12 @@ def test_only_dit_is_fp4_capable():
 
 
 def test_model_server_plan_needs_no_gpu():
-    plan = ModelServer(device=B200).plan()
-    assert plan[ModelRole.KEYFRAME_BASE.value] == "fp8"   # SDXL
-    assert plan[ModelRole.I2V.value] == "fp8"             # Wan video DiT
+    # plan() reports what the LOADERS produce, not the card ceiling. keyframe_base was asserted here
+    # as "fp8" for as long as this test existed; keyframe_pipeline loads bfloat16 and never calls a
+    # quantizer, so that assertion encoded the #360 fiction rather than catching it.
+    plan = ModelServer(device=B200).plan(env={})
+    assert plan[ModelRole.KEYFRAME_BASE.value] == "bf16"   # SDXL: bf16 load, no quantize (#12535)
+    assert plan[ModelRole.I2V.value] == "fp8"              # Wan video DiT, 192GB card, fp8 on
     assert plan[ModelRole.CONTROLNET_POSE.value] == "bf16"  # aux
     # every default role is represented
     assert set(plan) == {r.value for r in ModelRole}
@@ -241,3 +245,120 @@ def test_facexlib_manifest_pins_match_the_runtime_weight_set():
     fx = next(fd for fd in m["finish_dirs"] if fd["dir"] == "facexlib")
     pinned = {f["name"] for f in fx["files"]}
     assert pinned == set(_FACEXLIB_WEIGHTS), (pinned, set(_FACEXLIB_WEIGHTS))
+
+
+# ------------------------------------------------- loaded precision vs card ceiling (#360 / #364)
+#
+# The card ceiling (quant_for) and what the loaders produce (loaded_quant_for) are separate
+# questions, and conflating them is what let plan() report fp8 for roles that load bf16 out of an
+# image holding zero fp8 weight files. These assert the SECOND question against the loader bodies.
+
+from vivijure_backend.models import (  # noqa: E402 -- grouped with the block that uses them
+    dominant_dtype, dtype_histogram, i2v_cpu_offload, i2v_fp8_active, i2v_precision_facts,
+    loaded_quant_for, merge_histograms,
+)
+
+
+def test_sdxl_loads_bf16_on_every_card_despite_the_fp8_ceiling():
+    # The ceiling is genuinely fp8 and is genuinely never used: peft cannot attach a per-scene
+    # character LoRA to a torchao-quantized linear, so the keyframe pipes stay bf16.
+    for dev in (B200, H200, RTX6000):
+        assert quant_for(ModelFamily.SDXL_UNET, dev) is Quant.FP8       # what the card could do
+        assert loaded_quant_for(ModelFamily.SDXL_UNET, dev, {}) is Quant.BF16  # what the loader does
+
+
+def test_i2v_is_bf16_when_the_card_offloads():
+    # A 96GB card CPU-offloads the inactive expert, and i2v_pipeline skips fp8 entirely on that path.
+    # The card ceiling says fp8 on this card, so this is exactly where the two answers must differ.
+    assert i2v_cpu_offload(RTX6000) is True
+    assert quant_for(ModelFamily.VIDEO_DIT, RTX6000) is Quant.FP8
+    assert loaded_quant_for(ModelFamily.VIDEO_DIT, RTX6000, {}) is Quant.BF16
+
+
+def test_i2v_is_bf16_when_fp8_is_turned_off():
+    assert loaded_quant_for(ModelFamily.VIDEO_DIT, H200, {}) is Quant.FP8
+    assert loaded_quant_for(ModelFamily.VIDEO_DIT, H200, {"VJ_I2V_FP8": "0"}) is Quant.BF16
+    assert i2v_fp8_active(H200, {"VJ_I2V_FP8": "0"}) is False
+    assert i2v_fp8_active(CPU, {}) is False  # no fp8 engine at all
+
+
+def test_plan_tracks_the_env_that_the_loader_reads():
+    off = ModelServer(device=H200).plan(env={"VJ_I2V_FP8": "0"})
+    assert off[ModelRole.I2V.value] == "bf16"
+    on = ModelServer(device=H200).plan(env={})
+    assert on[ModelRole.I2V.value] == "fp8"
+
+
+# ------------------------------------------------------------- resident dtype measurement (#364)
+
+class _Param:
+    def __init__(self, dtype):
+        self.dtype = dtype
+
+
+class _Module:
+    """Minimal stand-in for a diffusers module: just `.parameters()`."""
+
+    def __init__(self, dtypes):
+        self._params = [_Param(d) for d in dtypes]
+
+    def parameters(self):
+        return iter(self._params)
+
+
+class _Pipe:
+    def __init__(self, transformer=None, transformer_2=None):
+        if transformer is not None:
+            self.transformer = transformer
+        if transformer_2 is not None:
+            self.transformer_2 = transformer_2
+
+
+def test_dtype_histogram_counts_every_parameter_not_just_the_first():
+    # The first parameter is a keep-in-fp32 minority; a next(parameters()).dtype reading would
+    # answer "float32" for a model that is overwhelmingly bf16. THAT is the failure mode.
+    mod = _Module(["torch.float32"] + ["torch.bfloat16"] * 9)
+    hist = dtype_histogram(mod)
+    assert hist == {"float32": 1, "bfloat16": 9}
+    assert dominant_dtype(hist) == "bfloat16"
+
+
+def test_dominant_dtype_of_nothing_is_none_not_a_dtype():
+    # An unmeasured model must not be indistinguishable from a correctly loaded one.
+    assert dominant_dtype({}) is None
+    assert dominant_dtype(merge_histograms([])) is None
+
+
+def test_dominant_dtype_breaks_ties_deterministically():
+    assert dominant_dtype({"float32": 4, "bfloat16": 4}) == "bfloat16"
+
+
+def test_precision_facts_report_a_bf16_load_as_matching():
+    pipe = _Pipe(_Module(["torch.bfloat16"] * 5), _Module(["torch.bfloat16"] * 5))
+    facts = i2v_precision_facts(pipe, requested_dtype="bfloat16", repo_id="org/wan",
+                                weights_are_fp8=False, runtime_quantized=True)
+    assert facts["i2v_dtype"] == "bfloat16"
+    assert facts["matches_request"] is True
+    assert facts["runtime_quantized"] is True
+    assert set(facts["experts"]) == {"transformer", "transformer_2"}
+
+
+def test_precision_facts_catch_the_float8_request_that_silently_yields_fp32():
+    # The latent trap: diffusers keeps WanTransformer3DModel out of the float8 cast, so the model
+    # is instantiated at the process default and NOTHING raises. The measurement is the only thing
+    # that can tell requested from resident.
+    pipe = _Pipe(_Module(["torch.float32"] * 8), _Module(["torch.float32"] * 8))
+    facts = i2v_precision_facts(pipe, requested_dtype="float8_e4m3fn", repo_id="org/wan-fp8",
+                                weights_are_fp8=True, runtime_quantized=False)
+    assert facts["i2v_dtype"] == "float32"
+    assert facts["matches_request"] is False
+
+
+def test_precision_facts_do_not_pass_when_nothing_was_measured():
+    # A pipe with no transformer attribute at all: resident is None, so matches_request is False.
+    # Absence must never read as agreement.
+    facts = i2v_precision_facts(_Pipe(), requested_dtype="bfloat16", repo_id="org/wan",
+                                weights_are_fp8=False, runtime_quantized=False)
+    assert facts["i2v_dtype"] is None
+    assert facts["matches_request"] is False
+    assert facts["experts"] == {}

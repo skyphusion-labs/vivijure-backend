@@ -243,6 +243,49 @@ def test_ensure_i2v_skips_when_no_r2_creds(tmp_path):
     assert ensure_i2v_models(env=env, log=lambda *_: None) is False
 
 
+# ------------------------------------------------- the baked guard vs the B final-tier seam (#339)
+#
+# These test the CALLER'S DECISION reaching the mirror, not the decision function. A second pure
+# test of _select_i2v_weights would re-encode the same assumption that produced the seam: the
+# decision says "pull", the mirror silently declines, and both halves pass in isolation.
+
+def _baked(tmp_path):
+    (tmp_path / BAKED_SENTINEL).write_text("precision=bf16\n")
+    return {"VJ_MODELS_ROOT": str(tmp_path)}
+
+
+def test_ensure_i2v_baked_guard_declines_the_pull_by_default(tmp_path):
+    env = _baked(tmp_path)
+    lines = []
+    assert ensure_i2v_models(env=env, log=lines.append) is False
+    # POSITIVE CONTROL for the negative test below: the guard really is the thing that fired here.
+    assert any("skipping i2v R2 pull" in ln for ln in lines), lines
+    assert not any("forced an i2v R2 pull" in ln for ln in lines), lines
+
+
+def test_ensure_i2v_force_gets_past_the_baked_guard(tmp_path):
+    # force=True must reach the NEXT decision point (no creds here, so it still returns False) rather
+    # than being swallowed by the baked early-return. The observable difference is which reason the
+    # mirror gives, so the assertion is on the reason, not on the return value the two share.
+    env = _baked(tmp_path)
+    lines = []
+    assert ensure_i2v_models(env=env, log=lines.append, force=True) is False
+    assert any("forced an i2v R2 pull" in ln for ln in lines), lines
+    assert not any("skipping i2v R2 pull" in ln for ln in lines), lines
+    assert any("no R2 creds" in ln for ln in lines), lines  # it got to the creds gate
+
+
+def test_ensure_i2v_force_does_not_override_the_warm_sentinel(tmp_path):
+    # force overrides the BAKED guard only. A warm worker with the current sentinel is a STATE, not
+    # a decision, and force must not turn it into a re-pull.
+    env = _baked(tmp_path)
+    env["R2_ACCESS_KEY_ID"] = "x"
+    (tmp_path / I2V_SENTINEL).write_text(_DEFAULT_MODEL_VERSION + "\n")
+    lines = []
+    assert ensure_i2v_models(env=env, log=lines.append, force=True) is False
+    assert any("already mirrored" in ln for ln in lines), lines
+
+
 # --------------------------------------------------------- eager i2v prefetch (perf #1)
 
 def test_mirror_cmd_includes_multi_thread_flags():
