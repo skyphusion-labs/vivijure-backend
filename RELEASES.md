@@ -38,6 +38,8 @@ gh api "/orgs/skyphusion-labs/packages/container/vivijure-backend/versions" \
 (or the GHCR Packages UI.) Take the highest published semver, pick the next FREE one above it, and
 cut `backend-v<that>`. Do NOT assume the next number after the latest git tag is free.
 
+**Snapshot (2026-07-31):** git tag **`backend-v1.0.12`** / GHCR **`:1.0.12`** InstantID face path back on the GPU (#346). Runtime repinned to `runtime-1-bf16-t5`; prod repinned by the verify+promote gate (run 30644063094).
+
 **Snapshot (2026-07-23):** git tag **`backend-v1.0.10`** / GHCR **`:1.0.10`** cast-registry `pretrained_loras` (#332). Src-only assemble; pin RunPod after verify+promote.
 
 **Snapshot (2026-07-23):** git tag **`backend-v1.0.7`** / GHCR **`:1.0.7`** src-only assemble (#324 tenant R2 key binding). Next free semver: re-check GHCR before the next cut.
@@ -86,6 +88,7 @@ policy: `docs/weights-base-and-snapshots.md`.
 
 | git tag | GHCR image | source commit | built | notes |
 |---|---|---|---|---|
+| backend-v1.0.12 | 1.0.12 | 470edd8 | 2026-07-31 (GHA) | **InstantID face path restored to the GPU (#346).** onnxruntime-gpu capped `>=1.21.0,<1.27.0`, CPU-wheel purge/repair, build-time provider gate (#347); two pins that could not resolve on py3.11 (#351); runtime repinned to `runtime-1-bf16-t5@sha256:0f3c9bd6` (#357). Verified by an InstantID render EXECUTED on B200 sm_100, not by the merge; prod repinned by verify+promote run 30644063094. |
 | backend-v1.0.10 | 1.0.10 | (tag SHA) | 2026-07-23 (GHA) | **Cast-registry pretrained_loras (#332).** Accept `loras/cast-{id}/…` and `loras/lora-{slug}-…/…`; bundle_key tenancy unchanged. Src-only assemble; pin RunPod after verify+promote. |
 | backend-v1.0.7 | 1.0.7 | (tag SHA) | 2026-07-23 (GHA) | **KF3 tenant R2 key binding (#324).** Harness scopes `bundle_key` / `keyframe_key` / `clip_key` / `pretrained_loras` to job project slug. Src-only assemble; no runtime rebuild. |
 | backend-v1.0.6 | 1.0.6 | (tag SHA) | 2026-07-22 (GHA) | **HF repo_id allowlist at cold start (#317).** Pin RunPod after verify+promote. |
