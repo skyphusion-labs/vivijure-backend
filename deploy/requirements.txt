@@ -18,7 +18,7 @@ transformers==5.14.1
 # scrubs the tree cache so the check stays dormant; this pin stops silent behaviour drift (the
 # tested-with-pin doctrine). In-bounds for the stack: transformers 5.10.2 needs <2.0,>=1.5.0,
 # diffusers 0.38.0 needs >=0.34.0. Bump deliberately + re-validate on the pod, never by drift.
-huggingface_hub==1.24.0
+huggingface_hub==1.25.1
 # transformers 5.13.1 requires tokenizers<=0.23.0; PyPI never shipped 0.23.0 stable,
 # so 0.22.2 is the newest installable pin that satisfies the constraint.
 # Do NOT Dependabot-bump tokenizers to 0.23.1 while transformers stays on a
