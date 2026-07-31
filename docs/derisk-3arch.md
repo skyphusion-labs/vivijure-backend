@@ -82,43 +82,57 @@ leaves a pod billing silently.
 - prod **promote** of the serverless endpoint (separate task) needs Conrad's explicit word -- it touches
   prod / downtime. Everything up to the promote is GO on the authorized spend.
 
-## Canonical start command + read path (committed)
+## Canonical start command + read path
 
-The pod start command is committed at **`deploy/derisk_pod_start.sh`** -- deploy it byte-faithfully by
-base64-ing that file into `runpodctl --args` (see its header). It self-runs the de-risk and provides its
-own observability, because:
+The pod start command is committed at **`deploy/derisk_pod_start.sh`**; it self-runs the de-risk. As of
+2026-07-31 there is a default read path that needs no credentials in the pod, plus a fallback that does.
 
-- RunPod pod container stdout is **not** API/CLI-readable (console websocket only; `runpodctl` has no
-  `logs`, the MCP `get-pod` returns status only), and
-- this image ships **no** openssh-server.
+**Default path (verified against the live RunPod MCP tooling, not inferred):**
 
-So the deploy wraps the committed inner in a **boto3 -> R2** observability scaffold: it tees output to
-`/workspace/out/derisk.log` and uploads it to `r2:vivijure/derisk/<label>/derisk.log` every ~15s; the
-operator polls R2 to read the @event stream. boto3 ONLY (never rclone, so the tripwire stays clean), and
-a `derisk_boot` marker self-proves the read path within ~15s of boot, BEFORE any GPU render spend. The
-log is seeded with `@event derisk_meta {pod_id, fire_ts, boot_utc, label}` as its first line so every
-uploaded object carries the run identity (a reader matches `pod_id`/`fire_ts` against the fire), and the
-uploader clears any stale object for the key at boot -- together these make a stale-log read structurally
-impossible to mistake for a live one.
-Inject ONLY `R2_S3_*` creds (the exfil key), never the backend's `R2_*` names -- then the baked backend
-has no model-pull creds at all. The boto3 client must match `src/vivijure_backend/harness/r2.py`:
-`signature_version="s3v4"`, `region_name="auto"`, no path-style. (An sshd read path was prototyped and
-dropped: this image has no openssh-server and pod ssh was uncertain; boto3->R2 is guaranteed.)
+1. `create-template` with `dockerStartCmd` set to the base64-materialized inner script (see the
+   script header). The MCP persists `dockerStartCmd` as the template `args` field verbatim; it does
+   not drop it.
+2. `create-pod` with `templateId` pointed at that template. The MCP deploys the pod using the
+   template image, start command, ports, env, and disk as defaults.
+3. Read progress with `stream-pod-logs`: it returns real container (and system) stdout over
+   Server-Sent Events, tailed or live, timestamped -- no console session and no relay needed.
 
-The driver `deploy/vj_derisk.py` is INJECTED, not fetched: the deploy gzip+base64s the committed driver
-into `DERISK_DRIVER_B64`, the inner materializes it and sha256-gates it (`@event driver_integrity` on pass,
-`@event driver_corrupt` -> $0 pre-GPU stop on mismatch) before any GPU work. The inner used to curl the
-driver by pinned SHA, but raw.githubusercontent served STALE bytes in the post-#151/#152-merge propagation
-window (2026-06-30) and the pod ran the old driver; injection removes the network/CDN dependency so the pod
-runs EXACTLY the reviewed code.
+Nothing in this path touches R2, so the pod never holds `R2_S3_*` or any other credential it does not
+need for the render itself. The driver `deploy/vj_derisk.py` stays INJECTED (gzip+base64 into the start
+command, sha256-gated before any GPU work) for the reason it always was: the pod used to curl it by
+pinned SHA, and raw.githubusercontent served STALE bytes in the post-#151/#152-merge propagation window
+(2026-06-30), so injection removes the network/CDN dependency and guarantees the pod runs exactly the
+reviewed code. That part of the mechanism is unchanged by this section.
 
-### Open mechanism follow-ups (#146)
+**Fallback (boto3 -> R2, needs `R2_S3_*` credentials in the pod):** the observability scaffold this
+section used to describe as the only option is still committed (`deploy/derisk_read_wrapper.sh`) and
+still works: tee to `/workspace/out/derisk.log`, upload to `r2:vivijure/derisk/<label>/derisk.log`
+every ~15s, a `derisk_boot` marker self-proving the read path, `derisk_meta` carrying run identity so a
+stale object cannot be mistaken for a live one. Use it only when `stream-pod-logs` genuinely cannot
+serve (for example a run that outlives an interactive session watching it). It is not the default,
+because on the one axis that matters here it is strictly worse: it puts R2 write credentials into a GPU
+pod that no longer needs them to be observable. Do not reach for it out of habit.
 
-The RunPod MCP cannot deploy a custom-start-command pod: `create-pod` exposes no `dockerStartCmd`/
-`templateId`; `create-template` silently drops `dockerStartCmd` (`args` stays empty); there is no MCP
-template-to-pod deploy; and no pod-log API. Hence the runpodctl/console + boto3->R2 read path. #9 (the
-automated regression engine) needs an MCP enhancement or a runpodctl/GraphQL shim in
-`runpod_verify.py`'s PodClient seam, and a baked debug-entrypoint in the image.
+### Mechanism status (#146)
+
+Re-verified 2026-07-31 with a read-back probe against the live RunPod MCP (create a template with a
+trivial start command, read it back, confirm the start command survived), plus real templates already
+in the account carrying persisted, non-trivial start commands, rather than by reasoning about it. All
+three constraints this section used to state as blocking are now false:
+
+- `create-template` persists `dockerStartCmd` as the template `args` field verbatim; it does not drop
+  it.
+- `create-pod` accepts `templateId` and deploys from that template start command.
+- Pod container stdout is readable over the MCP via `stream-pod-logs` (Server-Sent Events), not
+  console-websocket-only.
+
+What is still true: `runpodctl` (the CLI the Per-card procedure below drives) has no `logs` subcommand,
+confirmed against the installed CLI, and the MCP `get-pod` returns pod status and metadata only, no log
+content; `stream-pod-logs` is a separate tool. So a pure-CLI fire through `runpodctl` still has no
+built-in log read path of its own; only an MCP-driven fire gets one for free. #9 (the automated
+regression engine) can drop the "needs an MCP enhancement" framing for its `PodClient` seam: the
+enhancement it was waiting on now exists. Whether #9 should move onto it, versus keep its current
+transport, is a separate call for whoever owns that issue.
 
 ## backend-v0.3.1 artifact evidence (registry-proven, #14)
 
@@ -140,8 +154,18 @@ the first command (`arch-gate`) on the canary.
 
 ## Per-card deploy commands (Strummer, infra -- locked + reproducible)
 
-Driven from a checkout of this repo (`~/vivijure-backend`) via `runpodctl` (the RunPod MCP cannot set a
-pod start command). Every op runs in Strummer's own **login** shell (`sudo -u strummer bash -l ...`) so
+**Status note (2026-07-31):** this procedure predates the `templateId` + `stream-pod-logs` path
+described in "Canonical start command + read path" above and is kept here as a FALLBACK, not the
+default. It is the tested, spend-authorized live procedure for an actual 3-arch sweep (the DC placement
+empirics, the exact `--gpu-id` strings, and the TTL and disk-floor numbers below are all specific to
+this `runpodctl` flow), and none of that has been re-verified against the newer MCP path end to end;
+migrating it is separate work, not done here. If you are starting a NEW de-risk run and do not need
+everything this section already proves out, start with the canonical section above instead.
+
+Driven from a checkout of this repo (`~/vivijure-backend`) via `runpodctl`; this section, unlike the MCP
+path above, still needs `runpodctl` because it drives DC-placement probing and TTL flags this doc has not
+re-verified through the MCP (see the status note above). Every op runs in Strummer's own **login**
+shell (`sudo -u strummer bash -l ...`) so
 the per-identity `RUNPOD_API_KEY` loads -- `runpodctl pod create` errors `api key not found` from a
 non-login shell. The start command is the committed `deploy/derisk_pod_start.sh` wrapped in the committed
 boto3->R2 read-path outer `deploy/derisk_read_wrapper.sh`, base64-transported so it survives the shell ->

@@ -181,13 +181,25 @@ jobs:
           python deploy/bake_layers.py verify-image --image "${IMG}" --ceiling-gb 10.0
 
       # Import smoke AFTER build, BEFORE push: a missing runtime dep fails here in seconds rather than
-      # after a 33-min GPU render. CPU-only; touches no GPU. (The baked weights' RENDER correctness is
-      # validated separately on a GPU pod by runpod-verify.yml -- the staging gate before prod.)
-      - name: Import smoke (CPU, no GPU)
+      # after a 33-min GPU render. (The baked weights' RENDER correctness is validated separately on a
+      # GPU pod by runpod-verify.yml -- the staging gate before prod.)
+      #
+      # --gpus all IS LOAD-BEARING (backend#349). smoke_imports.py upgrades itself the moment a GPU is
+      # visible: without one it prints a loud SKIP and exits 0, and that SKIP is what CI executed on
+      # every release until now. A provider NAME is not a working provider -- onnxruntime-gpu 1.28.0
+      # imports cleanly, advertises CUDAExecutionProvider, and still hands back a CPU session against
+      # this CUDA 12.8 base. Only creating a real session catches it, and that needs a real GPU. This
+      # job already runs on Plane C [self-hosted, gpu], so the hardware was under the job the whole
+      # time; the flag is what lets the check reach it. Both Plane C boxes have the nvidia container
+      # runtime registered in dockerd (verified 2026-07-31), so either can serve this step.
+      #
+      # What this step still does NOT cover: it proves the face-embedding wheel initialises its CUDA
+      # EP, not that a render is correct. Output correctness is runpod-verify.yml on a pod.
+      - name: Import smoke + CUDA EP session (GPU)
         run: |
           set -eu
           IMG="${REGISTRY}/${OWNER}/${WORKER_IMAGE}:${{ steps.cfg.outputs.version }}"
-          docker run --rm "${IMG}" \
+          docker run --rm --gpus all "${IMG}" \
             conda run --no-capture-output -n vivijure \
             python /opt/vivijure/smoke_imports.py
 

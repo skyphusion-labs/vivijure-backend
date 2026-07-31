@@ -205,15 +205,38 @@ jobs:
           BASE='${{ steps.cfg.outputs.overlay_from }}'
           python deploy/bake_layers.py assert-shared-diff-ids --image "${IMG}" --base "${BASE}" --min-shared-gb 90
 
-      # Toolchain import smoke (CPU, no GPU, no app): catch a torch/CUDA ABI break in the runtime here,
-      # in seconds, rather than at the end of a 33-min GPU render. The APP import smoke runs in the
-      # consuming release build (it needs COPY src).
-      - name: Toolchain import smoke (CPU, no GPU)
+      # Toolchain import smoke (no app): catch a torch/CUDA ABI break in the runtime here, in seconds,
+      # rather than at the end of a 33-min GPU render. The APP import smoke runs in the consuming
+      # release build (it needs COPY src).
+      - name: Toolchain import smoke
         run: |
           set -eu
           IMG="${REGISTRY}/${OWNER}/${RUNTIME_IMAGE}:${{ steps.cfg.outputs.tag }}"
           docker run --rm "${IMG}" conda run --no-capture-output -n vivijure \
             python -c "import torch, torchvision, diffusers, transformers, safetensors; print('runtime import smoke OK:', torch.__version__)"
+
+      # Session-level CUDA execution-provider check, ON A REAL GPU (backend#349). This is the layer
+      # where the deps are actually installed, so it is where a bad onnxruntime wheel is born; catching
+      # it here is earlier than catching it in the consuming release.
+      #
+      # The import smoke above cannot catch this class. A provider NAME is not a working provider:
+      # onnxruntime-gpu 1.28.0 imports cleanly, advertises CUDAExecutionProvider, and then silently
+      # hands back a CPU session against this CUDA 12.8 base. That is what put the InstantID face path
+      # on CPU across backend-v1.0.9/1.0.10/1.0.11 without one build going red. Only creating a real
+      # session catches it, and that needs a GPU attached to the container, not merely present on the
+      # host. deploy/smoke_cuda_ep.py FAILS rather than skips when no GPU is visible, so a --gpus all
+      # that quietly did not attach cannot read as a pass.
+      #
+      # The script is mounted rather than baked: the base image carries no app code, and this keeps the
+      # check editable without a rebuild. Both Plane C boxes have the nvidia container runtime
+      # registered in dockerd (verified 2026-07-31), so either can serve this step.
+      - name: CUDA EP session check (GPU)
+        run: |
+          set -eu
+          IMG="${REGISTRY}/${OWNER}/${RUNTIME_IMAGE}:${{ steps.cfg.outputs.tag }}"
+          docker run --rm --gpus all \
+            -v "${GITHUB_WORKSPACE}/deploy/smoke_cuda_ep.py:/tmp/smoke_cuda_ep.py:ro" \
+            "${IMG}" conda run --no-capture-output -n vivijure python /tmp/smoke_cuda_ep.py
 
       - name: Push tags to GHCR
         id: push

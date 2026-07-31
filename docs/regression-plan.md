@@ -191,16 +191,41 @@ Expected paths (resolved from `VJ_MODELS_ROOT`):
 
 **Assertions:** `all_present == True`. Any `False` field is named in the failure reason.
 
-### BAK-4: FP8 precision
-**New event:**
+### BAK-4: i2v precision
+
+**Event** (emitted by `models.ModelServer.i2v_pipeline` on every worker, not only under
+`VJ_REGRESSION`, so a normal render attests its own precision too):
 ```
-@event model_precision {"i2v_dtype": str}
+@event model_precision {"i2v_dtype": str, "requested_dtype": str, "matches_request": bool,
+                        "repo_id": str, "weights_are_fp8": bool, "runtime_quantized": bool,
+                        "experts": {module: {dtype: param_count}}}
 ```
-Where `i2v_dtype` is the string representation of the loaded i2v model's parameter dtype.
-**Assertion:** `i2v_dtype in {"float8_e4m3fn", "bfloat16"}` -- fp8 or the bf16 fallback
-(both are valid baked precisions; pure fp32 is not). If fp8 is expected and bfloat16 is
-seen, log a warning but do not fail (precision fallback is non-fatal; a hard fp8-only
-assertion would be wrong if the baked image legitimately ships bf16 weights).
+`i2v_dtype` is the RESIDENT dtype of the loaded Wan experts, measured by
+`models.i2v_precision_facts` off the modules themselves: the dtype holding the most
+parameters across `transformer` and `transformer_2`. It is never the plan's opinion of the
+precision, which is the whole distinction this gate exists to enforce. A single
+`next(parameters()).dtype` reading is not used, because diffusers keeps named submodules in
+fp32 and the first parameter can be a minority dtype.
+
+**Three assertions, all failing CLOSED:**
+
+1. `bak4_precision_reported` -- the event was emitted at all. An absent event means nothing
+   measured the bake, which is a FAILURE and not a pass. This is reported separately from
+   the value check because "never measured" and "measured something invalid" are different
+   facts and an operator has to be able to tell them apart. From the gate's introduction
+   until backend#364 this was its actual state: nothing in `src/` emitted the event, so the
+   check had no input on any real run.
+2. `bak4_precision_valid` -- `i2v_dtype in {"float8_e4m3fn", "bfloat16"}`. Both are valid
+   baked precisions; pure fp32 is not. A valid-but-unexpected precision (fp8 where prod
+   expects bf16) WARNS and does not fail: a legitimately bf16 image must not trip a hard
+   fp8-only assertion.
+3. `bak4_precision_matches_request` -- `matches_request is True`. Requested and resident
+   silently disagreeing is its own defect, independent of whether the resident value is
+   valid: under the pinned diffusers, asking a `WanTransformer3DModel` for
+   `float8_e4m3fn` yields fp32 with no error, because `_keep_in_fp32_modules` both skips
+   the default-dtype set and gates off the post-load cast. The worker refuses to render on
+   that mismatch (`models.I2VPrecisionMismatch`), so the harness gate is the second line;
+   a payload missing the field fails this check rather than passing on `None`.
 
 ### BAK-5: VRAM headroom
 Already in the existing harness: `vram_free_gb >= 8.0` after model load. No change needed.
