@@ -79,7 +79,13 @@ class KeyframeParams:
 @dataclass
 class KeyframeResult:
     """The outcome of rendering one shot's keyframe: where the PNG landed, which slots and engine
-    path it used, and the prompt and seed that produced it."""
+    path it used, and the prompt and seed that produced it.
+
+    `identity_requested` and `identity_path` are recorded SEPARATELY and on purpose. The configured
+    identity method is a request, and the InstantID path silently falls back to the shared
+    IP-Adapter pipe whenever insightface finds no face in the reference, so the two genuinely
+    differ on real renders. A record holding only one of them cannot answer which code path ran,
+    and a record that cannot say which path ran cannot answer whether that path is healthy (#350)."""
     shot_id: str
     path: Path
     slots: list[str]
@@ -87,6 +93,19 @@ class KeyframeResult:
     prompt: str
     seed: int
     engine: str                      # "single" | "regional"
+    identity_requested: str = ""     # what the config ASKED for: "instantid" | "ip_adapter"
+    identity_path: str = ""          # what actually RAN: see IDENTITY_PATHS
+
+
+# The identity paths a keyframe render can actually take. Named here so the render record, the
+# progress channel and any history query share one vocabulary.
+IDENTITY_PATHS: tuple[str, ...] = (
+    "instantid",            # insightface embedded a real face and drove the InstantID IP attn
+    "ip_adapter",           # single subject, a reference image conditioned the shared pipe
+    "regional_ip_adapter",  # multi-character masked path, one reference per region
+    "lora_only",            # a character LoRA bound, no reference image
+    "none",                 # no character identity in this shot at all
+)
 
 
 # ------------------------------------------------------------------------- prompt building
@@ -142,6 +161,18 @@ def region_boxes(width: int, height: int, n: int, *, orientation: str = "vertica
     return boxes
 
 
+def single_identity_path(slot: "str | None", *, has_ref_image: bool, has_lora: bool) -> str:
+    """Which identity path a single-subject render actually took. PURE, so the classification is
+    asserted on CPU rather than inferred from a GPU body: a slot with no usable reference image
+    renders from its LoRA alone and produces a perfectly good keyframe, so the difference is
+    invisible from the outside unless it is recorded (#350)."""
+    if slot and has_ref_image:
+        return "ip_adapter"
+    if slot and has_lora:
+        return "lora_only"
+    return "none"
+
+
 def engine_for(scene: Scene, params: KeyframeParams) -> str:
     """Which path this scene takes: 'regional' (the masked multi-identity, anti-bleed path) for a
     two-plus-character shot within the slot cap, else 'single'."""
@@ -186,24 +217,29 @@ def render_keyframe(
     # default IP-Adapter single path, and all multi-character shots) takes the shared keyframe pipe.
     if engine == "single" and cfg.identity_method == "instantid" and single_slot is not None \
             and _ref_images(cast, single_slot, count=1):
-        image = _render_instantid(server, prompt, scene, cast, cfg, loras, single_slot)
+        image, identity_path = _render_instantid(server, prompt, scene, cast, cfg, loras, single_slot)
     else:
         pipe = server.keyframe_pipeline()
         _apply_scheduler(pipe, cfg)
         generator = torch.Generator(device="cuda").manual_seed(cfg.seed)
         if engine == "single":
-            image = _render_single(pipe, prompt, scene, cast, cfg, loras, generator)
+            image, identity_path = _render_single(pipe, prompt, scene, cast, cfg, loras, generator)
         else:
-            image = _render_regional(pipe, prompt, scene, cast, cfg, loras, generator, pose_image)
+            image, identity_path = _render_regional(
+                pipe, prompt, scene, cast, cfg, loras, generator, pose_image)
 
     image.save(out_path)
     return KeyframeResult(shot_id=scene.id or "shot", path=out_path, slots=slots,
-                          multi_char=(engine == "regional"), prompt=prompt, seed=cfg.seed, engine=engine)
+                          multi_char=(engine == "regional"), prompt=prompt, seed=cfg.seed,
+                          engine=engine, identity_requested=cfg.identity_method,
+                          identity_path=identity_path)
 
 
 def _render_single(pipe, prompt, scene, cast, cfg, loras, generator):
     """One character (or none): the slot's LoRA bound, identity from a single IP-Adapter image.
-    The plain SDXL identity path."""
+    The plain SDXL identity path. Returns `(image, identity_path)`: which of the three single-subject
+    identity paths this render actually took is not derivable from the outside, because a slot with
+    no usable reference image silently renders from the LoRA alone."""
     slot = scene.character_slots[0] if scene.character_slots else None
     _bind_loras(pipe, {slot: loras[slot]} if (slot and slot in loras) else {}, cfg.lora_scale,
                 few_step=cfg.few_step)
@@ -217,7 +253,9 @@ def _render_single(pipe, prompt, scene, cast, cfg, loras, generator):
     # The shared keyframe pipe is a ControlNet pipeline; a single subject wants no pose control, so
     # hand it a blank control image at conditioning_scale 0.0 -> the ControlNet is inert (zero
     # residual) and this path renders exactly like plain SDXL.
-    return pipe(
+    identity_path = single_identity_path(slot, has_ref_image=bool(ip_images),
+                                         has_lora=bool(slot and slot in loras))
+    image = pipe(
         prompt=prompt, negative_prompt=cfg.negative_prompt,
         num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
         height=cfg.height, width=cfg.width, generator=generator,
@@ -225,12 +263,14 @@ def _render_single(pipe, prompt, scene, cast, cfg, loras, generator):
         controlnet_conditioning_scale=0.0,
         **({"ip_adapter_image": ip_images[0]} if ip_images else {}),
     ).images[0]
+    return image, identity_path
 
 
 def _render_regional(pipe, prompt, scene, cast, cfg, loras, generator, pose_image):
     """Two characters, no bleed: each slot's identity is confined to its own region with a
     per-region IP-Adapter mask, each LoRA bound at the moderate per-slot scale, and (when on)
-    OpenPose conditioning planting two bodies. The masks are what keep one face off the other."""
+    OpenPose conditioning planting two bodies. The masks are what keep one face off the other.
+    Returns `(image, identity_path)`."""
     from diffusers.image_processor import IPAdapterMaskProcessor
 
     slots = scene.character_slots[:cfg.max_slots]
@@ -262,7 +302,7 @@ def _render_regional(pipe, prompt, scene, cast, cfg, loras, generator, pose_imag
     else:
         control = _blank_control(w, h)
         cn_scale = 0.0
-    return pipe(
+    image = pipe(
         prompt=prompt, negative_prompt=cfg.negative_prompt,
         num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
         height=h, width=w, generator=generator,
@@ -271,6 +311,7 @@ def _render_regional(pipe, prompt, scene, cast, cfg, loras, generator, pose_imag
         image=control,
         controlnet_conditioning_scale=cn_scale,
     ).images[0]
+    return image, "regional_ip_adapter"
 
 
 def _render_instantid(server, prompt, scene, cast, cfg, loras, slot):
@@ -280,7 +321,11 @@ def _render_instantid(server, prompt, scene, cast, cfg, loras, slot):
 
     Identity tokens reach the UNet through the IP attn processors' side channel (`proc.id_embeds`), so
     the prompt embeds stay clean. Uses the identity IP-Adapter only (no IdentityNet ControlNet -- see
-    models.instantid_pipeline). GPU body, validated on a pod."""
+    models.instantid_pipeline). GPU body, validated on a pod.
+
+    Returns `(image, identity_path)`. The no-face branch below falls back to the shared IP-Adapter
+    pipe and returns THAT path, so a render whose config asked for InstantID and did not get it says
+    so in its own record instead of being indistinguishable from one that did (#350)."""
     import torch
     from . import instantid as _iid
 
@@ -295,7 +340,7 @@ def _render_instantid(server, prompt, scene, cast, cfg, loras, slot):
     if analyzed is None:  # no face detected: fall back to the shared keyframe pipe's IP-Adapter path
         kpipe = server.keyframe_pipeline()
         _apply_scheduler(kpipe, cfg)
-        return _render_single(kpipe, prompt, scene, cast, cfg, loras, generator)
+        return _render_single(kpipe, prompt, scene, cast, cfg, loras, generator)  # reports its own path
     embedding = analyzed[0]
     id_tokens = _iid.faceid_tokens(pipe._vj_image_proj, embedding)  # (1, num_tokens, 2048)
 
@@ -310,7 +355,7 @@ def _render_instantid(server, prompt, scene, cast, cfg, loras, slot):
             prompt=prompt, negative_prompt=cfg.negative_prompt,
             num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
             height=cfg.height, width=cfg.width, generator=generator,
-        ).images[0]
+        ).images[0], "instantid"
     finally:
         for proc in pipe._vj_id_attn.values():
             proc.id_embeds = None  # clear so a later render on the warm pipe never reuses them

@@ -202,8 +202,13 @@ class StubPipeline(GpuPipeline):
 
     def _render_keyframe(self, scene, cast, storyboard, out_path, lora_paths):
         from pathlib import Path
+        from vivijure_backend.keyframe import KeyframeResult
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(out_path).write_bytes(b"x"); return Path(out_path)
+        Path(out_path).write_bytes(b"x")
+        return KeyframeResult(shot_id=scene.id, path=Path(out_path),
+                              slots=list(scene.character_slots), multi_char=False, prompt="p",
+                              seed=0, engine="single", identity_requested="instantid",
+                              identity_path="lora_only")
 
     def _animate(self, scene, keyframe_path, prompt, out_path):
         from pathlib import Path

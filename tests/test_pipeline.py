@@ -155,10 +155,14 @@ class StubPipeline(GpuPipeline):
         f = out_dir / "lora.safetensors"; f.write_bytes(b"x"); return f
 
     def _render_keyframe(self, scene, cast, storyboard, out_path, lora_paths):
+        from vivijure_backend.keyframe import KeyframeResult
         self.keyframed.append(scene.id)
         self.keyframe_loras[scene.id] = sorted(lora_paths)
         out_path = Path(out_path); out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_bytes(b"x"); return out_path
+        out_path.write_bytes(b"x")
+        return KeyframeResult(shot_id=scene.id, path=out_path, slots=list(scene.character_slots),
+                              multi_char=False, prompt="p", seed=0, engine="single",
+                              identity_requested="ip_adapter", identity_path="ip_adapter")
 
     def _animate(self, scene, keyframe_path, prompt, out_path):
         assert Path(keyframe_path).exists(), "animating from a keyframe that was never staged"
@@ -514,3 +518,71 @@ def test_execute_emits_informational_plan_tier_not_a_mismatch_warning(tmp_path):
     assert isinstance(pt["actual"], str) and pt["actual"]        # the card that actually ran
     assert isinstance(pt["planned"], list) and pt["planned"]     # the tier(s) the planner targeted
     assert pt["planned"] == sorted(pt["planned"])                # deterministic ordering
+
+
+# -------------------------------------------- the render record says which identity path ran (#350)
+
+def test_keyframe_done_records_the_identity_path_and_the_provider_facts():
+    """A render record that cannot say which code path ran cannot answer whether that path is
+    healthy. These assert both halves reach the progress channel."""
+    from vivijure_backend.keyframe import IDENTITY_PATHS
+
+    class _Server:
+        def onnx_provider_facts(self):
+            return {"per_model": {"detection": ["CPUExecutionProvider"]},
+                    "attached": ["CPUExecutionProvider"],
+                    "cuda_attached": False, "all_cuda": False}
+
+    events = []
+
+    class _Progress:
+        def emit(self, event, **fields):
+            events.append((event, fields))
+
+        def __getattr__(self, _name):
+            return lambda *a, **k: (lambda *aa, **kk: None)
+
+    from vivijure_backend.keyframe import KeyframeResult
+
+    class _Pipe:
+        server = _Server()
+        progress = _Progress()
+
+        def _render_keyframe(self, *_a, **_kw):
+            return KeyframeResult(shot_id="s0", path=Path("/tmp/x.png"), slots=["a"],
+                                  multi_char=False, prompt="p", seed=0, engine="single",
+                                  identity_requested="instantid", identity_path="ip_adapter")
+
+    from vivijure_backend.pipeline import GpuPipeline
+    pipe = _Pipe()
+    kf = pipe._render_keyframe()
+    GpuPipeline._onnx_provider_facts(pipe)  # the accessor is best-effort and must not raise
+    pipe.progress.emit("keyframe_done", shot="s0",
+                       identity_requested=kf.identity_requested,
+                       identity_path=kf.identity_path,
+                       onnx_providers=GpuPipeline._onnx_provider_facts(pipe))
+
+    name, fields = events[-1]
+    assert name == "keyframe_done"
+    # The configured method and the executed path DIFFER here: InstantID was asked for and the
+    # no-face fallback ran. A record holding only one of the two cannot express that.
+    assert fields["identity_requested"] == "instantid"
+    assert fields["identity_path"] == "ip_adapter"
+    assert fields["identity_path"] in IDENTITY_PATHS
+    assert fields["onnx_providers"]["all_cuda"] is False
+
+
+def test_onnx_provider_accessor_never_fails_a_render():
+    from vivijure_backend.pipeline import GpuPipeline
+
+    class _NoServer:
+        server = None
+
+    class _Angry:
+        class server:  # noqa: N801
+            @staticmethod
+            def onnx_provider_facts():
+                raise RuntimeError("model server is unhappy")
+
+    assert GpuPipeline._onnx_provider_facts(_NoServer()) is None
+    assert GpuPipeline._onnx_provider_facts(_Angry()) is None

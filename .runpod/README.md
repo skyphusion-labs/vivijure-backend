@@ -35,6 +35,25 @@ listing checklist detects them. The image `CMD` still runs `python -m vivijure_b
 `.runpod/tests.json` sends `{ "action": "health" }` on an H200. That probe does not need R2
 credentials. A full render still needs the four R2 vars above.
 
+The response ATTESTS which build answered it, rather than leaving a caller to infer it from the
+endpoint pin:
+
+```json
+{"ok": true, "action": "health", "torch_cuda": true, "kernel_ok": true,
+ "vj_baked": true, "weights_on_disk": true,
+ "vram_free_gb": 139.07, "vram_total_gb": 139.8, "device_name": "NVIDIA H200",
+ "baked": {"baked_utc": "...", "precision": "bf16", "model_version": "1",
+           "overlay": "deps-overlay", "base_runtime": "ghcr.io/...@sha256:..."}}
+```
+
+`vj_baked` is unchanged and still only says the `.vj-baked` sentinel exists. `baked` is that
+sentinel's CONTENTS: bake time, precision, model version and the runtime base digest the image was
+built on, self-reported by the running worker. `null` means no stamp (an unbaked image); `{}` means
+a stamp that yielded nothing readable, which is a different condition and stays distinguishable.
+
+The probe still short-circuits before the harness import: no R2, no model load, no render, which is
+why it answers on an image too broken to render.
+
 ## Operator checklist (listing status)
 
 1. GitHub release exists for the image you want Hub to index (currently `backend-v1.0.5` / `:1.0.5`).
