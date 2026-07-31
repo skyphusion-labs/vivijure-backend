@@ -91,6 +91,20 @@ jobs:
           echo "stack runs on a GPU, and does NOT prove resolution against the shipped torch line."
           echo "resolve-in-base (push to main, Plane C) is the authoritative resolve."
 
+          echo ""
+          echo "READ THE onnxruntime LINE CORRECTLY. This resolve reports:"
+          echo "    Would install onnxruntime-1.28.0"
+          echo "That is the CPU wheel, and it is NOT what ships. insightface hard-depends on a bare"
+          echo "'onnxruntime', so any resolve of this file names it; the two wheels share one"
+          echo "onnxruntime/ package directory and whichever lands last owns the native module."
+          echo "deploy/ensure_onnxruntime_gpu.py runs immediately after pip install in"
+          echo "runtime.Dockerfile and runtime-overlay.Dockerfile: it purges the CPU wheel, force-"
+          echo "reinstalls onnxruntime-gpu, and HARD-FAILS the build unless a fresh interpreter"
+          echo "reports CUDAExecutionProvider. A dry-run cannot exercise that purge, so this line is"
+          echo "EXPECTED here and is not a return of backend#346 defect A."
+          echo "The version on that line is the CPU wheel's and is unconstrained. What keeps the GPU"
+          echo "wheel on the CUDA-12 line is the cap onnxruntime-gpu>=1.21.0,<1.27.0 in the file."
+
   # ------------------------------------------------- authoritative gate (inside the pinned base)
   resolve-in-base:
     name: resolve (inside the pinned runtime base)
@@ -151,3 +165,17 @@ jobs:
           echo "patches, the RIFE clone, the HF config bake) and does NOT prove the stack runs:"
           echo "backend#346 was a wheel that resolved, installed and imported cleanly and still ran"
           echo "the face path on CPU. Only the GPU smoke and a pod render look for that."
+
+          echo ""
+          echo "READ THE onnxruntime LINE CORRECTLY. This resolve reports:"
+          echo "    Would install onnxruntime-1.28.0"
+          echo "That is the CPU wheel, and it is NOT what ships. insightface hard-depends on a bare"
+          echo "'onnxruntime', so any resolve of this file names it; the two wheels share one"
+          echo "onnxruntime/ package directory and whichever lands last owns the native module."
+          echo "deploy/ensure_onnxruntime_gpu.py runs immediately after pip install in"
+          echo "runtime.Dockerfile and runtime-overlay.Dockerfile: it purges the CPU wheel, force-"
+          echo "reinstalls onnxruntime-gpu, and HARD-FAILS the build unless a fresh interpreter"
+          echo "reports CUDAExecutionProvider. A dry-run cannot exercise that purge, so this line is"
+          echo "EXPECTED here and is not a return of backend#346 defect A."
+          echo "The version on that line is the CPU wheel's and is unconstrained. What keeps the GPU"
+          echo "wheel on the CUDA-12 line is the cap onnxruntime-gpu>=1.21.0,<1.27.0 in the file."
