@@ -7,6 +7,70 @@ releases are summarized below from that history.
 
 ## Unreleased
 
+## [1.0.12] -- 2026-07-31
+
+**Fix: the InstantID face-embedding path runs on the GPU again.** PATCH.
+
+The face-embedding path has been executing entirely on CPU on GPU workers. Renders succeeded, no
+build failed, and nothing in the logs said so. This release puts it back on the CUDA execution
+provider. Known affected: **1.0.9, 1.0.10 and 1.0.11**, which share one pip layer by digest, so
+rolling back within that range is not a mitigation. No bisect was run to find where the provider
+was first lost, so earlier releases may also be affected.
+
+**No output was corrupted, and nothing needs re-rendering.** Verified rather than assumed: every
+antelopev2 model was run on byte-identical seeded input under both providers and compared. The
+recognition embedding that InstantID actually conditions on, `glintr100`, matched at
+`cosine(CPU, CUDA) = 0.999998`, and `scrfd_10g_bnkps` (the source of the keypoints) at a max
+relative delta of 1.8e-03. Those are ordinary CPU-versus-GPU kernel differences, not corruption.
+Honest limit on that measurement: the inputs were seeded random tensors rather than real faces, so
+relative deltas on models running outside their normal input distribution are inflated.
+
+**The cost was time only, and it was small.** One face-analysis pass measured 483 ms on CPU versus
+14 ms on CUDA, a 469 ms delta, and `analyze_face` runs once per single-character keyframe with the
+analyzer cached per worker. Against renders measured in tens of minutes that is well under one
+percent. This is a correctness fix, not a cost recovery, and it is not a plausible driver of any
+timeout or failure-rate symptom.
+
+- **fix(deploy): restore the CUDA execution provider (#347).** Two stacked defects, the first
+  masking the second. `insightface` hard-depends on the bare CPU `onnxruntime` wheel, which shares
+  the `onnxruntime/` package directory with `onnxruntime-gpu`, so whichever pip installs last owns
+  the native module; the CPU build has no CUDA provider compiled in, so `CUDAExecutionProvider` was
+  not failing to start, it was absent, and the CPU fallback in `face_analyzer()` swallowed it.
+  Separately, `onnxruntime-gpu` moved its default wheel to a CUDA 13 build at 1.27.0, which cannot
+  import against this deliberately CUDA 12.8 base. Capped to `>=1.21.0,<1.27.0`, added
+  `deploy/ensure_onnxruntime_gpu.py` to purge the CPU wheel and repair the GPU one after
+  requirements install, and added a build-time gate that fails the bake if
+  `CUDAExecutionProvider` is missing.
+- **fix(deploy): restore two requirements pins that cannot resolve on py3.11 (#351).** `numpy==2.5.1`
+  requires Python >= 3.12 against a 3.11 conda env, and `tokenizers==0.23.1` is unsatisfiable
+  against transformers 5.14.1, which caps it at `<=0.23.0` (a version PyPI never shipped stable).
+  Both arrived in one dependabot group bump and both had an adjacent comment forbidding exactly
+  that change, left standing above the violation. **`main` could not build at all for eight days**
+  and no check noticed, because `deploy/requirements.txt` is resolved only when the runtime base is
+  baked, never by CI. Process fix tracked as #355.
+- **build(bake): repin `RUNTIME_REF_BF16` to `runtime-1-bf16-t5` (#357),**
+  `@sha256:0f3c9bd6818f9dc7d5d1f21f6e0b7ebd59c9e88b7d49682f4a2964d28d57f5f2`, in both
+  `deploy/Dockerfile` and `.runpod/Dockerfile`. Built as a deps-only overlay on t4, so the weight
+  layers are inherited by blob identity: the dedup gate confirmed 48 of 48 RootFS layers shared,
+  and no worker cold-pulls the ~100 GB weight set for this release.
+
+**Verification.** The build gate asserts `get_available_providers()`, which cannot prove a session
+because the docker build has no GPU, so attachment was checked on real hardware with a controlled
+pair: same script, same `src`, same GPU, only the image differs.
+
+| image | onnxruntime | attached providers |
+|---|---|---|
+| `1.0.11` (control) | 1.27.0 | 5 of 5 models `[CPUExecutionProvider]` |
+| `runtime-1-bf16-t5` | 1.26.0 | 5 of 5 models `[CUDAExecutionProvider, CPUExecutionProvider]` |
+
+Asserted on `session.get_providers()`, the providers actually attached, never the requested list;
+`face_analyzer()` has requested `CUDAExecutionProvider` for the entire time it ran on CPU. Models
+covered: detection, genderage, landmark_2d_106, landmark_3d_68, recognition. The control ran first
+and reproduces the defect on the shipped production image.
+
+Closes #346, which closes on this release rather than on the merges above, because
+`deploy/requirements.txt` installs in the runtime base and the merges alone shipped nothing.
+
 ## [1.0.11] -- 2026-07-25
 
 - **chore(deps):** `av` (PyAV) 13.1.0 -> 18.0.0, a deliberate major bump (backend#313; the prior
