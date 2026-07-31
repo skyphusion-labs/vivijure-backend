@@ -127,6 +127,55 @@ def gpu_probe_payload(facts: dict) -> dict:
     return {k: facts.get(k, defaults[k]) for k in GPU_PROBE_KEYS}
 
 
+# The `.vj-baked` build stamp. Written by deploy/runtime.Dockerfile (and re-stamped by the overlay)
+# as `key=value` lines: baked_utc, precision, model_version, and on an overlay build also overlay and
+# base_runtime. Bounds are defensive, not cosmetic: this file is read into a health response, so a
+# corrupted or oversized stamp must degrade to a short dict, never to an unbounded payload.
+BAKE_STAMP_NAME = ".vj-baked"
+_STAMP_MAX_BYTES = 8192
+_STAMP_MAX_KEYS = 32
+_STAMP_MAX_VALUE = 256
+
+
+def read_bake_stamp(env: dict | None = None) -> dict | None:
+    """Parse the `.vj-baked` build stamp into a dict, or None when the file is ABSENT.
+
+    The distinction is load-bearing and is why this does not just return `{}` on failure:
+
+      None  -- no stamp: this image was not baked (or the models root is wrong).
+      {}    -- a stamp exists and yielded no readable key. Present but mute is a DIFFERENT
+               condition from absent, and a health response that collapses them cannot tell an
+               operator whether the image is unbaked or the stamp is corrupt.
+
+    A boolean `vj_baked` can only ever say the file is there, which is exactly why a worker running
+    it could not answer "which build are you" (#363). Pure apart from one read; unreadable content
+    yields `{}` rather than raising, because a health probe must answer."""
+    from pathlib import Path
+    e = env if env is not None else os.environ
+    path = Path(e.get("VJ_MODELS_ROOT", "/opt/models")) / BAKE_STAMP_NAME
+    try:
+        if not path.is_file():
+            return None
+        raw = path.read_bytes()[:_STAMP_MAX_BYTES].decode("utf-8", "replace")
+    except OSError:
+        return None
+    return parse_bake_stamp(raw)
+
+
+def parse_bake_stamp(raw: str) -> dict:
+    """Parse `key=value` stamp text. Pure, so the shape is asserted without a baked image. Lines
+    without a `=`, and lines with an empty key, are skipped rather than guessed at; values are
+    truncated and the key count is capped so a corrupt file cannot become an unbounded payload."""
+    out: dict[str, str] = {}
+    for line in raw.splitlines():
+        key, sep, value = line.partition("=")
+        key = key.strip()
+        if not sep or not key or len(out) >= _STAMP_MAX_KEYS:
+            continue
+        out[key] = value.strip()[:_STAMP_MAX_VALUE]
+    return out
+
+
 def collect_gpu_facts(env: dict | None = None) -> dict:
     """RUN ON THE POD (deferred torch import). Probes the insight a serverless worker hides: torch
     sees the GPU, the cu128 kernel actually loads on THIS card (a tiny cuda matmul -- the
@@ -138,7 +187,7 @@ def collect_gpu_facts(env: dict | None = None) -> dict:
     e = env if env is not None else os.environ
     facts = dict(gpu_probe_payload({}))  # start from the falsey defaults
     models_root = Path(e.get("VJ_MODELS_ROOT", "/opt/models"))
-    facts["vj_baked"] = (models_root / ".vj-baked").exists()
+    facts["vj_baked"] = (models_root / BAKE_STAMP_NAME).exists()
     facts["weights_on_disk"] = (models_root / "hf-cache" / "hub").is_dir()
     try:
         import torch

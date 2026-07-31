@@ -369,3 +369,31 @@ def test_full_step_keeps_real_cfg():
     the distilled path."""
     assert _guidance(KeyframeParams(few_step=False, guidance_scale=5.0)) == 5.0
     assert _guidance(KeyframeParams(few_step=False, guidance_scale=7.5)) == 7.5
+
+
+# ----------------------------------------------- which identity path a single render took (#350)
+
+def test_single_identity_path_distinguishes_paths_that_all_produce_a_keyframe():
+    from vivijure_backend.keyframe import IDENTITY_PATHS, single_identity_path
+
+    assert single_identity_path("a", has_ref_image=True, has_lora=True) == "ip_adapter"
+    assert single_identity_path("a", has_ref_image=True, has_lora=False) == "ip_adapter"
+    # A slot with a LoRA and no usable reference renders fine and is NOT the IP-Adapter path.
+    assert single_identity_path("a", has_ref_image=False, has_lora=True) == "lora_only"
+    assert single_identity_path("a", has_ref_image=False, has_lora=False) == "none"
+    # No slot at all is never an identity path, whatever else is lying around.
+    assert single_identity_path(None, has_ref_image=True, has_lora=True) == "none"
+    for slot in ("a", None):
+        for ref in (True, False):
+            for lora in (True, False):
+                assert single_identity_path(slot, has_ref_image=ref, has_lora=lora) in IDENTITY_PATHS
+
+
+def test_keyframe_result_defaults_do_not_claim_an_identity_path():
+    # An unset field must not read as a path that ran.
+    from pathlib import Path as _Path
+    from vivijure_backend.keyframe import IDENTITY_PATHS, KeyframeResult
+    res = KeyframeResult(shot_id="s", path=_Path("x"), slots=[], multi_char=False,
+                         prompt="p", seed=0, engine="single")
+    assert res.identity_path == ""
+    assert res.identity_path not in IDENTITY_PATHS

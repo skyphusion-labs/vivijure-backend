@@ -453,3 +453,63 @@ def test_channel_surfaces_a_real_failure_to_evaluate():
     result = rv.evaluate(events, rv.VerifyConfig(image="ghcr.io/x:test"))
     assert not result.passed
     assert not result.checks["sharpness_parity"]
+
+
+# ------------------------------------------------- the .vj-baked build stamp in health (#363)
+#
+# A boolean vj_baked can only say the sentinel file exists. It cannot say WHICH build a worker is
+# running, which is the first thing anyone wants when something is wrong, and it is why an H200
+# health result could only ever be an inference from the endpoint pin rather than an attestation.
+
+def test_read_bake_stamp_absent_is_none_not_empty(tmp_path):
+    # None (unbaked) and {} (a stamp that says nothing) are different conditions and must stay
+    # distinguishable in the health payload.
+    assert verify.read_bake_stamp({"VJ_MODELS_ROOT": str(tmp_path)}) is None
+
+
+def test_read_bake_stamp_present_but_mute_is_empty_dict(tmp_path):
+    (tmp_path / verify.BAKE_STAMP_NAME).write_text("no separators here\n\n")
+    assert verify.read_bake_stamp({"VJ_MODELS_ROOT": str(tmp_path)}) == {}
+
+
+def test_read_bake_stamp_reports_the_build(tmp_path):
+    (tmp_path / verify.BAKE_STAMP_NAME).write_text(
+        "baked_utc=2026-07-31T15:09:32Z\nprecision=bf16\nmodel_version=1\n"
+        "overlay=deps-overlay\nbase_runtime=ghcr.io/example/runtime@sha256:abc\n")
+    stamp = verify.read_bake_stamp({"VJ_MODELS_ROOT": str(tmp_path)})
+    assert stamp["precision"] == "bf16"
+    assert stamp["model_version"] == "1"
+    assert stamp["base_runtime"].endswith("sha256:abc")
+    assert stamp["overlay"] == "deps-overlay"
+
+
+def test_parse_bake_stamp_is_bounded_and_skips_junk():
+    raw = "".join("k%d=v%d\n" % (i, i) for i in range(100)) + "=novalue\nbare\n"
+    parsed = verify.parse_bake_stamp(raw)
+    assert len(parsed) <= verify._STAMP_MAX_KEYS
+    assert "" not in parsed          # an empty key is skipped, never guessed at
+    assert "bare" not in parsed      # a line with no separator is skipped
+    assert verify.parse_bake_stamp("k=" + "x" * 9999)["k"] == "x" * verify._STAMP_MAX_VALUE
+
+
+def test_health_attests_the_build_and_keeps_the_old_contract(tmp_path, monkeypatch):
+    from vivijure_backend import worker
+    (tmp_path / verify.BAKE_STAMP_NAME).write_text("precision=bf16\nmodel_version=1\n")
+    monkeypatch.setenv("VJ_MODELS_ROOT", str(tmp_path))
+    res = worker.handler({"input": {"action": "health"}})
+    assert res["action"] == "health"
+    assert res["vj_baked"] is True                     # the old boolean is unchanged
+    assert res["baked"] == {"precision": "bf16", "model_version": "1"}
+    assert set(verify.GPU_PROBE_KEYS) <= set(res)      # the gpu_probe contract is intact
+    # ok is still computed from exactly the four facts it always was; on a CPU box torch_cuda is
+    # False, so this asserts the composition rather than a green result.
+    assert res["ok"] == bool(res["torch_cuda"] and res["kernel_ok"]
+                             and res["vj_baked"] and res["weights_on_disk"])
+
+
+def test_health_on_an_unbaked_image_says_so(tmp_path, monkeypatch):
+    from vivijure_backend import worker
+    monkeypatch.setenv("VJ_MODELS_ROOT", str(tmp_path))
+    res = worker.handler({"input": {"action": "health"}})
+    assert res["vj_baked"] is False
+    assert res["baked"] is None

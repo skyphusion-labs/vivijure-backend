@@ -249,6 +249,55 @@ def loaded_quant_for(family: ModelFamily, device: Device, env: dict | None = Non
     return quant_for(family, device)
 
 
+# --------------------------------------------------------------------- onnx provider attestation
+#
+# The InstantID face path ran entirely on CPU through backend-v1.0.9, .10 and .11. Every build was
+# green, every render succeeded, and nothing anywhere failed, because `face_analyzer` passes
+# CPUExecutionProvider as a fallback: a dead CUDA EP and a successful render coexist BY DESIGN
+# (#346). The only thing in the estate that could detect it was pulling a 104 GB image onto a GPU box
+# and instantiating the provider by hand.
+#
+# What follows records the providers ONNX actually ATTACHED. Recording the REQUESTED list would
+# reproduce the defect exactly rather than detect it: the request said
+# [CUDAExecutionProvider, CPUExecutionProvider] for the entire time every session was on CPU.
+
+
+def attached_onnx_providers(analyzer) -> dict[str, list[str]]:
+    """The execution providers ATTACHED to each of an insightface FaceAnalysis' ONNX sessions, read
+    from `session.get_providers()` -- never from the `providers=` argument that was passed in.
+
+    Available is not attached and attached is not executed; this closes the first of those two gaps,
+    which is the one that hid #346. A model with no reachable session maps to `[]` rather than being
+    dropped, so a partially constructed analyzer cannot look like a fully CUDA-attached one. Pure
+    over anything shaped like a FaceAnalysis, so it tests with a fake and no onnxruntime."""
+    out: dict[str, list[str]] = {}
+    for name, model in sorted((getattr(analyzer, "models", None) or {}).items()):
+        session = getattr(model, "session", None)
+        getter = getattr(session, "get_providers", None)
+        try:
+            out[str(name)] = [str(p) for p in getter()] if callable(getter) else []
+        except Exception:  # noqa: BLE001 -- a probe failure reports as "nothing attached", not a crash
+            out[str(name)] = []
+    return out
+
+
+def onnx_provider_facts(per_model: dict[str, list[str]]) -> dict:
+    """Summarise attached providers into the record a render carries.
+
+    `all_cuda` is the honest health signal, not `cuda_attached`: one session on CUDA and the rest on
+    CPU is the shape #346 would have taken if the fallback had been partial, and an any() would have
+    called that healthy. An EMPTY analyzer is `all_cuda: False`, because nothing measured is not the
+    same as everything fine."""
+    attached = sorted({p for providers in per_model.values() for p in providers})
+    return {
+        "per_model": per_model,
+        "attached": attached,
+        "cuda_attached": "CUDAExecutionProvider" in attached,
+        "all_cuda": bool(per_model) and all(
+            "CUDAExecutionProvider" in providers for providers in per_model.values()),
+    }
+
+
 class I2VPrecisionMismatch(RuntimeError):
     """The loaded Wan i2v weights are NOT at the dtype the load asked for. Raised instead of
     rendering, because the alternative is a worker whose plan, whose logs and whose weights on disk
@@ -445,8 +494,24 @@ class ModelServer:
             app = FaceAnalysis(name="antelopev2", root=root,
                                providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
         app.prepare(ctx_id=0, det_size=(640, 640))
+        # Read back what onnxruntime ATTACHED, not what we asked for. See attached_onnx_providers:
+        # the requested list above says CUDA on a worker whose every session is on CPU, which is how
+        # a CPU-bound face path shipped through three green releases (#346/#350). Cached on the
+        # analyzer AND emitted, so it reaches both the render record and the worker log.
+        facts = onnx_provider_facts(attached_onnx_providers(app))
+        app._vj_onnx_providers = facts
+        import json as _json
+        print("@event onnx_providers " + _json.dumps(facts, sort_keys=True), flush=True)
         self._cache["face_analyzer"] = app
         return app
+
+    def onnx_provider_facts(self) -> dict | None:
+        """The attached-provider record for the face analyzer, or None if it was never loaded on
+        this worker. None means "the identity path did not run", which is deliberately distinct from
+        a loaded analyzer reporting CPU: a render record that cannot tell those apart is the gap
+        #350 is about. Never triggers a load."""
+        app = self._cache.get("face_analyzer")
+        return getattr(app, "_vj_onnx_providers", None) if app is not None else None
 
     def instantid_pipeline(self):
         """InstantID single-character pipeline: a plain SDXL base whose UNet cross-attention is
