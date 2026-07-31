@@ -19,6 +19,12 @@ and asserts on them (machine-readable state channel, GMCP-style `@event <name> {
       Pod-only INSIGHT you cannot get on serverless: torch sees the GPU, the cu128 kernel actually
       LOADS on THIS card (the Blackwell/sm_120 "no kernel image" class), `.vj-baked` present, weights
       on disk, VRAM headroom.
+  @event model_precision {"i2v_dtype": str, "requested_dtype": str, "matches_request": bool,
+                          "repo_id": str, "weights_are_fp8": bool, "runtime_quantized": bool,
+                          "experts": {module: {dtype: param_count}}}
+      BAK-4. The RESIDENT dtype of the loaded Wan experts, measured off the modules by
+      `models.i2v_precision_facts` at load time -- never the plan's opinion of it, which is the
+      distinction the gate exists to enforce. An absent event FAILS the gate.
   @event mirror_complete {...}        OPTIONAL. Its PRESENCE on a baked image is a FAILURE: the
       `.vj-baked` early-return should have skipped every R2 pull. (See models_mirror.)
   @event mirror_skipped {"reason": "baked"}   The baked-sentinel HIT we want instead.
@@ -561,13 +567,31 @@ def evaluate_regression(events: list[tuple[str, dict]], cfg: VerifyConfig) -> Ve
     gate("bak3_all_models_present", bool(inv.get("all_present")) and not missing,
          "BAK-3 baked model inventory incomplete: missing " + (", ".join(missing) or "model_inventory event"))
 
-    # ---- BAK-4: precision is a VALID baked dtype (fp8 or bf16); fp32 fails, mismatch only WARNS ----
-    prec = find_event(events, "model_precision") or {}
-    dtype = prec.get("i2v_dtype")
+    # ---- BAK-4: precision is REPORTED, is a VALID baked dtype, and MATCHES what the load asked for.
+    # Three gates, not one. "No worker measured the precision" and "a worker measured a bad
+    # precision" are different facts, and a single check that renders both as
+    # `precision None is not valid` cannot tell an operator which one happened. Absence is the more
+    # serious of the two -- it means nothing evaluated the bake at all, which is exactly the state
+    # this gate sat in for its whole life, since nothing in src/ emitted `model_precision` (#364) --
+    # so it gets its own named check and its own reason. Every one of the three fails CLOSED: an
+    # absent event, an absent field and a stale payload without the field all evaluate to False.
+    # fp32 fails; a valid-but-unexpected precision only WARNS.
+    prec = find_event(events, "model_precision")
+    dtype = (prec or {}).get("i2v_dtype")
     metrics["i2v_dtype"] = dtype
+    metrics["i2v_requested_dtype"] = (prec or {}).get("requested_dtype")
+    metrics["i2v_precision_reported"] = prec is not None
+    gate("bak4_precision_reported", prec is not None,
+         "BAK-4 no model_precision event was emitted: the resident i2v dtype was never measured, so "
+         "this gate had no input. An absent measurement is a FAILURE, never a pass")
     gate("bak4_precision_valid", dtype in rc.valid_precisions,
          f"BAK-4 i2v precision {dtype!r} is not a valid baked precision "
          f"{sorted(rc.valid_precisions)} (fp32 is never a valid bake)")
+    gate("bak4_precision_matches_request",
+         prec is not None and prec.get("matches_request") is True,
+         f"BAK-4 the resident i2v dtype {dtype!r} does not match the dtype the load requested "
+         f"({(prec or {}).get('requested_dtype')!r}); a load that ignores its requested dtype "
+         "without raising is the keep-in-fp32 trap, not a precision choice")
     if dtype in rc.valid_precisions and dtype != rc.expected_precision:
         warnings.append(f"BAK-4 i2v precision {dtype!r} differs from the expected baked precision "
                         f"{rc.expected_precision!r} (valid, non-fatal)")
@@ -1605,7 +1629,10 @@ class _DryRunClient:
             lines[1:1] = [
                 format_event("model_inventory", {"sdxl": True, "wan22": True, "rife_flownet": True,
                                                  "gfpgan": True, "all_present": True}),
-                format_event("model_precision", {"i2v_dtype": "bfloat16"}),
+                format_event("model_precision", {
+                    "i2v_dtype": "bfloat16", "requested_dtype": "bfloat16",
+                    "matches_request": True, "repo_id": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+                    "weights_are_fp8": False, "runtime_quantized": True}),
                 format_event("keyframe_done", {"shot_id": "s0", "key": "kf/s0.png", "width": 1280,
                                                "height": 720, "format": "PNG", "bytes": 820_000,
                                                "elapsed_s": 31.0}),

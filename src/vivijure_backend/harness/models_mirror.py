@@ -61,7 +61,8 @@ _INCOMPLETE_GLOB = "**/*.incomplete"
 SENTINEL = ".vj-mirror-complete"
 
 # Baked-image marker: present at VJ_MODELS_ROOT/.vj-baked when the model weights are BAKED INTO THE
-# IMAGE (the fp8-diffusers bake; later the bf16 bake). It is written by the Dockerfile at build time,
+# IMAGE. The marker says BAKED and nothing about which precision was baked; that lives in the stamp's
+# own `precision=` line, which is the only thing entitled to answer it. It is written at build time,
 # NOT by any pull. When present, every mirror entry point early-returns BEFORE touching the volume
 # resolve or the R2 pull: a baked worker carries its weights, so it is datacenter-agnostic (no network
 # volume pinning it to a provisioned DC) and never pays the R2 cold-pull tax. The R2 mirror stays the
@@ -363,8 +364,9 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     e = env if env is not None else os.environ
     model_version = e.get("VJ_MODEL_VERSION") or _DEFAULT_MODEL_VERSION
 
-    # Baked image: weights are in the image at VJ_MODELS_ROOT; never touch a volume or R2. This is
-    # the fp8-diffusers bake (datacenter-agnostic, no volume pinning, no cold-pull tax). Checked
+    # Baked image: weights are in the image at VJ_MODELS_ROOT; never touch a volume or R2 (a baked
+    # image is datacenter-agnostic: no volume pinning, no cold-pull tax). Which precision was baked
+    # is the `.vj-baked` stamp's business, not this guard's. Checked
     # FIRST so a baked worker short-circuits before the volume-resolve / R2 path entirely.
     if is_baked(e):
         log("models_mirror: baked image (.vj-baked present); skipping volume + R2 (weights baked in).")
@@ -458,13 +460,20 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
 
 
 def ensure_i2v_models(*, env: dict | None = None, log: Callable[[str], None] = print,
-                      repos: tuple[str, ...] = I2V_LAZY_REPOS) -> bool:
+                      repos: tuple[str, ...] = I2V_LAZY_REPOS, force: bool = False) -> bool:
     """Lazily mirror the heavy i2v models (Wan I2V + the Lightning distill) from R2 on first i2v use.
 
     Called from models.ModelServer.i2v_pipeline before the Wan weights load. A keyframe/preview
     worker never calls it, so it skips ~120GB at cold start (those repos are in DEFAULT_SKIP_REPOS).
     Idempotent via its own sentinel; returns True if a pull ran, False if skipped (warm, or no R2
     creds so weights are assumed pre-provisioned). Raises on a hard failure, same as ensure_models.
+
+    `force` overrides the BAKED early-return ONLY. It exists for the one caller that has already
+    decided a pull is required despite the image being baked: the FINAL-tier B seam in
+    `models._select_i2v_weights`, which selects the bf16 repo on an fp8-baked image and needs those
+    shards fetched. Without it the guard silently swallowed the pull its own caller had asked for and
+    the load failed deep against a cache holding the other repo (#339). It does NOT override the warm
+    sentinel or the missing-creds path: those are states, not decisions.
     """
     global _i2v_prefetch_thread
     e = env if env is not None else os.environ
@@ -473,12 +482,23 @@ def ensure_i2v_models(*, env: dict | None = None, log: Callable[[str], None] = p
     bucket = e.get("R2_BUCKET", "vivijure")
     sentinel = models_root / I2V_SENTINEL
 
-    # Baked image: the fp8 i2v weights are in the image; never pull. (The B final-tier path that DOES
-    # want bf16 calls the dedicated R2 fetch directly with a tier flag, not this default entry point.)
-    if is_baked(e):
-        log("models_mirror: baked image (.vj-baked present); skipping i2v R2 pull (fp8 weights baked in).")
+    # Baked image: the i2v weights this image was baked with are already on disk, so the DEFAULT is
+    # never to pull. The only exception is an explicit `force` from a caller that has decided
+    # otherwise (the B final-tier seam, #339).
+    #
+    # The old line here claimed "fp8 weights baked in". Nothing checks that, and the shipping bake is
+    # bf16, so every cold start on every production worker printed an fp8 claim about an image that
+    # contains no fp8 weight file (#364). The sentinel proves the image is BAKED and nothing more, so
+    # that is all this line now says; the precision an operator wants is in the `.vj-baked` stamp and
+    # in the `model_precision` event the i2v load emits.
+    if is_baked(e) and not force:
+        log("models_mirror: baked image (.vj-baked present); skipping i2v R2 pull "
+            "(the weights this image was baked with are already on disk).")
         log(_skip_event("baked", event="i2v_mirror_skipped"))
         return False
+    if is_baked(e) and force:
+        log("models_mirror: baked image, but the caller forced an i2v R2 pull (final-tier bf16 seam); "
+            "not skipping.")
 
     # Join the background prefetch thread (if started by start_i2v_prefetch) before checking
     # the sentinel so its result is visible. If the thread failed, fall through to pull normally.
