@@ -58,8 +58,23 @@ PyYAML>=6.0               # contract.py storyboard parse (no version sensitivity
 # face-keypoints ControlNet + image-projection are in code. These deps put insightface (antelopev2
 # face embedding + landmarks) and its ONNX runtime in the image so the path can be pod-validated.
 # insightface may compile from source on build; pin/prebuild if the build gets slow.
+# insightface pulls in a bare `onnxruntime` (the CPU build) as a hard dependency. That wheel
+# shares the SAME `onnxruntime/` package directory as onnxruntime-gpu, so whichever pip lands
+# last owns the native module -- and the CPU build has no CUDA execution provider compiled in.
+# deploy/ensure_onnxruntime_gpu.py removes it and repairs onnxruntime-gpu AFTER this file is
+# installed; do not drop that step (backend#346 defect A).
 insightface>=1.0.1
-onnxruntime-gpu>=1.27.0
+# CAPPED UNDER THE CUDA-13 SWITCH (backend#346 defect B). onnxruntime-gpu moved its DEFAULT
+# wheel from a CUDA 12.8 build to a CUDA 13.0 build at 1.27.0, and the CUDA/cuDNN packages it
+# names are optional extras we do not install, so the wheel relies on the system CUDA matching
+# its build ABI. This image is deliberately CUDA 12.8 (deploy/runtime.Dockerfile, the
+# Blackwell-safe cu128 line -- NEVER downgrade it), so a 1.27.x wheel cannot even be imported
+# here: `ImportError: libcudart.so.13`. Measured on a real GPU inside backend-v1.0.11, not
+# inferred. 1.26.0 is the newest CUDA-12 build and it initialises the CUDA EP correctly.
+# Raising this cap REQUIRES moving the runtime base to CUDA 13 and re-validating the whole
+# pipeline (torch/torchvision/torchaudio off the cu128 index, InstantID, finish) on a pod.
+# CI has no GPU, so CI can never prove that for you.
+onnxruntime-gpu>=1.21.0,<1.27.0
 # sentencepiece / protobuf are unneeded by the SDXL + Wan stack (transformers ran without them in
 # the validated env); add only if a future tokenizer requires them.
 
