@@ -29,7 +29,9 @@ def _pass_lines():
     return [
         fe("model_inventory", {"sdxl": True, "wan22": True, "rife_flownet": True,
                                "gfpgan": True, "all_present": True}),
-        fe("model_precision", {"i2v_dtype": "bfloat16"}),
+        fe("model_precision", {"i2v_dtype": "bfloat16", "requested_dtype": "bfloat16",
+                               "matches_request": True, "repo_id": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+                               "weights_are_fp8": False, "runtime_quantized": True}),
         rv.emit_gpu_probe({"torch_cuda": True, "kernel_ok": True, "vj_baked": True,
                            "weights_on_disk": True, "vram_free_gb": 120.0, "vram_total_gb": 141.0,
                            "device_name": "NVIDIA H200"}),
@@ -138,9 +140,56 @@ def test_evaluate_regression_model_missing():
     assert any("rife_flownet" in r for r in res.reasons)
 
 
+def test_evaluate_regression_precision_absent_fails_with_its_own_reason():
+    # An ABSENT model_precision event and a BAD one are different facts. Before this split, absence
+    # was reported as "precision None is not a valid baked precision", which reads as a measured bad
+    # value; nothing in src/ emitted the event at all, so that was the state the gate lived in.
+    lines = _without(_pass_lines(), "model_precision")
+    res = _eval(lines)
+    assert res.passed is False
+    assert res.checks["bak4_precision_reported"] is False
+    assert res.checks["bak4_precision_matches_request"] is False
+    assert res.metrics["i2v_precision_reported"] is False
+    assert any("never measured" in r for r in res.reasons), res.reasons
+
+
+def test_evaluate_regression_precision_reported_gate_passes_when_it_is_reported():
+    # POSITIVE CONTROL: the reported-gate is not stuck False. Without this, the test above would
+    # pass against a gate hardcoded to fail.
+    res = _eval(_pass_lines())
+    assert res.checks["bak4_precision_reported"] is True
+    assert res.checks["bak4_precision_matches_request"] is True
+
+
+def test_evaluate_regression_precision_resident_not_matching_request_fails():
+    # The keep-in-fp32 trap seen from the harness side: the load asked for float8 and the resident
+    # model is fp32. Both fields are present and each looks plausible alone; only the comparison
+    # catches it.
+    lines = _replace(_pass_lines(), "model_precision",
+                     {"i2v_dtype": "float32", "requested_dtype": "float8_e4m3fn",
+                      "matches_request": False})
+    res = _eval(lines)
+    assert res.passed is False
+    assert res.checks["bak4_precision_matches_request"] is False
+    assert res.checks["bak4_precision_valid"] is False  # fp32 is never a valid bake either
+
+
+def test_evaluate_regression_precision_stale_payload_without_the_field_fails_closed():
+    # An emitter predating `matches_request` must not read as agreement. A missing field is an
+    # unanswered question, and `.get()` returning None is exactly how that becomes a silent pass.
+    lines = _replace(_pass_lines(), "model_precision", {"i2v_dtype": "bfloat16"})
+    res = _eval(lines)
+    assert res.checks["bak4_precision_reported"] is True   # the event WAS emitted
+    assert res.checks["bak4_precision_valid"] is True      # and the dtype IS valid
+    assert res.checks["bak4_precision_matches_request"] is False  # but nothing confirmed the match
+    assert res.passed is False
+
+
 def test_evaluate_regression_precision_fp8_warns_not_fails():
     # fp8 is a VALID baked precision; prod expects bf16, so fp8 WARNS but the run still passes.
-    lines = _replace(_pass_lines(), "model_precision", {"i2v_dtype": "float8_e4m3fn"})
+    lines = _replace(_pass_lines(), "model_precision",
+                     {"i2v_dtype": "float8_e4m3fn", "requested_dtype": "float8_e4m3fn",
+                      "matches_request": True})
     res = _eval(lines)
     assert res.checks["bak4_precision_valid"] is True
     assert res.passed is True
@@ -149,7 +198,9 @@ def test_evaluate_regression_precision_fp8_warns_not_fails():
 
 def test_evaluate_regression_precision_fp32_fails():
     # fp32 is never a valid bake -> BAK-4 hard fail (not a warn).
-    lines = _replace(_pass_lines(), "model_precision", {"i2v_dtype": "float32"})
+    lines = _replace(_pass_lines(), "model_precision",
+                     {"i2v_dtype": "float32", "requested_dtype": "float32",
+                      "matches_request": True})
     res = _eval(lines)
     assert res.passed is False
     assert res.checks["bak4_precision_valid"] is False
