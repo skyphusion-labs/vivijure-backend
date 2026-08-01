@@ -141,6 +141,83 @@ The first five actions ride the `RenderRequest` shape above and the render pipel
 `finish_clip` are sibling job types: the harness routes each directly to a standalone pass that needs
 no bundle or planner, so each carries its own input/output shape, documented below.
 
+## Tenant R2 credential (all job types)
+
+The backend uses R2 for **two unrelated purposes**, and they have opposite sharing requirements:
+
+1. **The models mirror** (`harness/models_mirror.py`) pulls shared weights (~120GB for Wan i2v) from
+   OUR bucket. Every tenant pulls identical bytes. Correctly shared.
+2. **Tenant job I/O** (bundle in, film out, LoRAs, keyframes, clips, manifest, progress and error
+   snapshots) belongs to THE TENANT's bucket.
+
+They are split by purpose. The models mirror reads `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` /
+`R2_ENDPOINT` / `R2_BUCKET` from the endpoint environment, **always**, whatever a job carries. Tenant
+job I/O takes an **optional per-job credential block** in the job input, which is what lets ONE
+pooled RunPod endpoint serve many tenants without any of them sharing a credential or a bucket.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `r2.endpoint` | str | yes | The tenant's R2 S3 endpoint. |
+| `r2.access_key_id` | str | yes | |
+| `r2.secret_access_key` | str | yes | |
+| `r2.bucket` | str | yes | The tenant's bucket. |
+| `r2.session_token` | str | no | Set for R2 temporary access credentials, which issue one; omit for a static R2 API token. |
+
+```json
+{
+  "input": {
+    "action": "render",
+    "project": "the-long-walk-home",
+    "bundle_key": "bundles/the-long-walk-home/abc123.tar.gz",
+    "r2": {
+      "endpoint": "https://<account>.r2.cloudflarestorage.com",
+      "access_key_id": "...",
+      "secret_access_key": "...",
+      "bucket": "tenant-bucket-name"
+    }
+  }
+}
+```
+
+Rules the backend guarantees (`R2Config.from_payload_or_env`, `harness/r2.py`):
+
+1. **Block absent -> the endpoint environment**, byte-identical to the behaviour before the block
+   existed. A dedicated endpoint keeps working unchanged; backward compatibility here is
+   load-bearing, not a courtesy.
+2. **Block present and valid -> used for every tenant job I/O**, for that job only.
+3. **Block present but malformed -> the job FAILS.** It does NOT fall back to the environment. This
+   is the safety property of the whole split: a silent fallback would run a tenant's job against our
+   bucket under our credential, the precise failure the per-job credential exists to prevent. For the
+   same reason an explicit `"r2": null` is REFUSED rather than read as absent -- **omit the key**, do
+   not send a null.
+4. The models mirror ignores the block. This is structural, not policy: `models_mirror` builds its
+   own rclone environment from `os.environ` and is never handed the store or the payload.
+5. Refusal messages name **fields only, never values**, because the handler mirrors a config failure
+   into the R2 progress channel and stdout.
+6. The block is consumed at the handler boundary and **stripped from the payload** before anything
+   downstream sees it, so no emitter, manifest, or error path can echo it.
+
+### Why not presigned URLs
+
+Presigned URLs are the right shape for a fixed, single-artifact flow, and that is where we already
+use them (the video-finish tier and the `film-titles` module are credentialless by construction). They
+do not fit this backend:
+
+- `ProgressEmitter` writes `renders/<slug>/progress/<job_id>.ndjson` and `.json`
+  (`harness/keys.py`), and `job_id` is **RunPod's**, assigned when RunPod accepts the job. The
+  submitter learns it only after the payload is sealed, so those keys cannot be presigned.
+- The incremental-reuse path runs **negative probes** (`store.exists()` per cast slot and per shot,
+  plus hash-sidecar reads) over a slot/shot set the worker derives from the storyboard it extracts
+  from the bundle, not from the payload.
+
+Presigning would force the producer to enumerate every key the backend might touch, including keys
+that may not exist, which inverts the ownership `harness/keys.py` exists to hold and makes every
+future key a breaking two-repo change.
+
+Stated plainly: a per-job credential is **weaker** than credentialless-by-construction. It is bounded
+by tenant and by job lifetime rather than absent. It is still strictly better than the alternative it
+replaces, a single long-lived credential in the RunPod template shared by every job on the endpoint.
+
 ## Render result (response)
 
 `RenderResult` (`contract.py`), returned as a dict. The control plane polls for `output_key`
