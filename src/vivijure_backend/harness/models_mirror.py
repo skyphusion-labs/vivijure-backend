@@ -73,6 +73,59 @@ SENTINEL = ".vj-mirror-complete"
 BAKED_SENTINEL = ".vj-baked"
 
 
+# --------------------------------------------------------------------------- mirror credential
+#
+# The mirror's credential is NOT the tenant's. The backend uses R2 for two unrelated purposes with
+# OPPOSITE sharing requirements: this mirror pulls identical shared weights from OUR bucket, while
+# tenant job I/O (harness/r2.py) reads and writes THE TENANT's bucket.
+#
+# They used to be the same four environment names, which meant one credential and one bucket doing
+# both jobs. That is not merely untidy. The control plane's `templateEnv` (vivijure-control-plane
+# src/runpod.ts) sets `R2_BUCKET` to the TENANT's bucket, so on a provisioned tenant endpoint the
+# weights mirror is pointed at a bucket with no `models/` prefix. It is masked today by the baked
+# image and volume sentinels short-circuiting before any pull, not by being correct.
+#
+# So the mirror reads its OWN namespaced names first, and falls back to the legacy shared names for
+# endpoints provisioned before the split. The legacy fallback is TRANSITIONAL and its removal is
+# tracked: while it exists, an endpoint that carries the legacy names still has a usable tenant
+# job-I/O credential in its environment, which is the fallback path a pooled endpoint must not have.
+MIRROR_ENV = ("MODELS_R2_ENDPOINT", "MODELS_R2_ACCESS_KEY_ID", "MODELS_R2_SECRET_ACCESS_KEY",
+              "MODELS_R2_BUCKET")
+LEGACY_ENV = ("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET")
+
+# The one name whose PRESENCE marks an endpoint as provisioned after the credential split. See
+# `harness.r2.R2Config.from_payload_or_env`: on such an endpoint the tenant job-I/O fallback to the
+# environment is refused, because the endpoint may serve more than one tenant.
+MIRROR_MARKER_ENV = "MODELS_R2_ACCESS_KEY_ID"
+
+
+def uses_namespaced_mirror_creds(env: dict | None = None) -> bool:
+    """True iff this endpoint carries the mirror's OWN credential, i.e. it was provisioned after the
+    credential split. Read by the tenant job-I/O config to decide whether an environment fallback is
+    still allowed; see `harness.r2.R2Config.from_payload_or_env`."""
+    e = env if env is not None else os.environ
+    return bool(e.get(MIRROR_MARKER_ENV))
+
+
+def mirror_env(env: dict | None = None) -> dict:
+    """The environment the mirror should read, with its own credential resolved under the LEGACY
+    names so every downstream reader (`rclone_env`, the bucket reads, the presence gates) is
+    unchanged.
+
+    `MODELS_R2_*` wins field by field; each field falls back to its legacy `R2_*` counterpart. The
+    fallback deliberately preserves today's behaviour on an endpoint that has not been repinned,
+    INCLUDING the tenant-bucket defect described above: silently repointing a live endpoint's weights
+    pull at a different bucket would be an unrequested behaviour change on production. The defect is
+    fixed by setting `MODELS_R2_BUCKET`, not by this function guessing."""
+    e = env if env is not None else os.environ
+    out = dict(e)
+    for own, legacy in zip(MIRROR_ENV, LEGACY_ENV):
+        value = e.get(own) or e.get(legacy)
+        if value:
+            out[legacy] = value
+    return out
+
+
 def is_baked(env: dict | None = None) -> bool:
     """True iff the model weights are baked into the image (the BAKED_SENTINEL marker is present at
     VJ_MODELS_ROOT). Pure: a filesystem check, no I/O beyond stat. Callers use it to skip every
@@ -361,7 +414,7 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     Returns True if a pull ran, False if it was skipped (warm worker, or no R2 creds so weights
     are assumed pre-provisioned). Raises on a hard failure (missing rclone, failed pull).
     """
-    e = env if env is not None else os.environ
+    e = mirror_env(env)
     model_version = e.get("VJ_MODEL_VERSION") or _DEFAULT_MODEL_VERSION
 
     # Baked image: weights are in the image at VJ_MODELS_ROOT; never touch a volume or R2 (a baked
@@ -476,7 +529,7 @@ def ensure_i2v_models(*, env: dict | None = None, log: Callable[[str], None] = p
     sentinel or the missing-creds path: those are states, not decisions.
     """
     global _i2v_prefetch_thread
-    e = env if env is not None else os.environ
+    e = mirror_env(env)
     hf_home = Path(e.get("HF_HOME", "/opt/models/hf-cache"))
     models_root = Path(e.get("VJ_MODELS_ROOT", "/opt/models"))
     bucket = e.get("R2_BUCKET", "vivijure")
@@ -561,7 +614,7 @@ def start_i2v_prefetch(*, env: dict | None = None, log: Callable[[str], None] = 
     if _i2v_prefetch_thread is not None:
         return _i2v_prefetch_thread
 
-    e = env if env is not None else os.environ
+    e = mirror_env(env)
     models_root = Path(e.get("VJ_MODELS_ROOT", "/opt/models"))
     if (models_root / I2V_SENTINEL).exists() or not e.get("R2_ACCESS_KEY_ID"):
         return None

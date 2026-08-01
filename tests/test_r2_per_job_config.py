@@ -272,16 +272,159 @@ def test_models_mirror_reads_its_credential_from_the_environment():
 
 
 def test_models_mirror_has_no_code_path_to_the_per_job_credential():
-    """The split is STRUCTURAL, not policy: `models_mirror` builds its own rclone environment from
-    `os.environ` and is never handed the store or the payload, so a tenant credential cannot reach
-    the shared-weights pull however the handler changes.
+    """The mirror must not be able to REACH a tenant credential, however the handler changes.
 
-    A grep that finds nothing proves nothing on its own, so each token is first asserted PRESENT in
-    `r2.py`, where it genuinely lives. Without that control this test would pass against a typo."""
-    mirror_src = Path(models_mirror.__file__).read_text()
-    r2_src = Path(r2_mod.__file__).read_text()
-    for token in ("PAYLOAD_KEY", "from_payload_block", "from_payload_or_env", "R2Config"):
-        assert token in r2_src, f"CONTROL FAILED: {token!r} absent from r2.py, so the check below is vacuous"
-        assert token not in mirror_src, (
-            f"models_mirror references {token!r}: the shared-weights pull must never see a "
-            f"per-job tenant credential")
+    Checked on the parsed AST, not on the source text. The first version of this test matched raw
+    tokens and went red the moment `models_mirror` gained a COMMENT naming
+    `R2Config.from_payload_or_env` as a cross-reference. A doc reference is not a code path, and a
+    check that cannot tell the two apart either blocks correct documentation or, worse, gets relaxed
+    until it stops testing anything. The AST does not see comments or docstrings at all."""
+    import ast
+
+    def code_references(source: str) -> set:
+        """Every name actually referenced in code: imports, attributes, and bare names."""
+        found = set()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.ImportFrom):
+                found.add(node.module or "")
+                found.update(a.name for a in node.names)
+            elif isinstance(node, ast.Import):
+                found.update(a.name for a in node.names)
+            elif isinstance(node, ast.Attribute):
+                found.add(node.attr)
+            elif isinstance(node, ast.Name):
+                found.add(node.id)
+        return found
+
+    # CONTROL: the instrument must actually detect what it is looking for. Without this the
+    # assertion below would pass just as happily against a broken parser or a typo'd name.
+    control = code_references(
+        "from .r2 import R2Config\ncfg = R2Config.from_payload_or_env(payload)\n")
+    assert {"R2Config", "from_payload_or_env", "r2"} <= control, (
+        f"CONTROL FAILED: the AST scan missed references it must catch: {control}")
+
+    mirror_refs = code_references(Path(models_mirror.__file__).read_text())
+    for token in ("R2Config", "from_payload_block", "from_payload_or_env"):
+        assert token not in mirror_refs, (
+            f"models_mirror references {token!r} in code: the shared-weights pull must never see "
+            f"a per-job tenant credential")
+    assert "r2" not in mirror_refs, "models_mirror imports the tenant job-I/O module"
+
+    # And the dependency runs one way only: r2 reads the marker from the mirror, never the reverse.
+    r2_refs = code_references(Path(r2_mod.__file__).read_text())
+    assert "uses_namespaced_mirror_creds" in r2_refs
+
+
+# ============================================================ the mirror credential is its OWN
+#
+# The section above proves the mirror has no code path to the PAYLOAD credential. That is true and
+# it is not the whole claim: until the mirror had its own environment names, the mirror and tenant
+# job I/O read the SAME four variables, so the code paths were separate while the credential and the
+# bucket were one. These tests hold the credential separation itself.
+
+MIRROR_ENV_FULL = {
+    "MODELS_R2_ENDPOINT": "https://models.r2.cloudflarestorage.com",
+    "MODELS_R2_ACCESS_KEY_ID": "models-key-id",
+    "MODELS_R2_SECRET_ACCESS_KEY": "models-secret-value",
+    "MODELS_R2_BUCKET": "vivijure",
+}
+
+
+def test_mirror_prefers_its_own_namespaced_credential():
+    resolved = models_mirror.mirror_env({**ENV, **MIRROR_ENV_FULL})
+    assert resolved["R2_ACCESS_KEY_ID"] == "models-key-id"
+    assert resolved["R2_ENDPOINT"] == "https://models.r2.cloudflarestorage.com"
+    assert resolved["R2_ACCESS_KEY_ID"] != ENV["R2_ACCESS_KEY_ID"]
+
+
+def test_mirror_bucket_comes_from_its_own_name_not_the_tenant_bucket():
+    """The latent defect this namespacing fixes. `templateEnv` (control plane, src/runpod.ts) sets
+    `R2_BUCKET` to the TENANT's bucket, so before the split a cold non-baked worker on a provisioned
+    tenant endpoint would mirror weights from `r2:<tenant-bucket>/models/...`, a prefix that does not
+    exist there. It was masked by the baked-image and volume sentinels short-circuiting before the
+    pull, not by being correct."""
+    resolved = models_mirror.mirror_env({**MIRROR_ENV_FULL, "R2_BUCKET": "some-tenant-bucket"})
+    assert resolved["R2_BUCKET"] == "vivijure"
+
+
+def test_mirror_falls_back_to_the_legacy_names_for_un_repinned_endpoints():
+    """Transitional, and deliberately preserves today's behaviour rather than silently repointing a
+    live endpoint's weights pull. Its removal is tracked and gating; see the PR."""
+    resolved = models_mirror.mirror_env(dict(ENV))
+    assert resolved["R2_ACCESS_KEY_ID"] == ENV["R2_ACCESS_KEY_ID"]
+    assert resolved["R2_BUCKET"] == ENV["R2_BUCKET"]
+
+
+def test_mirror_and_job_io_resolve_to_DIFFERENT_credentials_from_one_environment():
+    """The claim the code-path test does not make: one environment plus one job payload yields two
+    credentials against two buckets, neither borrowing from the other."""
+    env = {**ENV, **MIRROR_ENV_FULL}
+    job = R2Config.from_payload_or_env({"r2": dict(BLOCK)}, env)
+    mirror = models_mirror.mirror_env(env)
+
+    assert job.bucket == "tenant-bucket"
+    assert mirror["R2_BUCKET"] == "vivijure"
+    assert job.access_key_id != mirror["R2_ACCESS_KEY_ID"]
+    assert job.secret_access_key != mirror["R2_SECRET_ACCESS_KEY"]
+    # And neither is the legacy shared credential that used to serve both.
+    assert job.access_key_id != ENV["R2_ACCESS_KEY_ID"]
+    assert mirror["R2_ACCESS_KEY_ID"] != ENV["R2_ACCESS_KEY_ID"]
+
+
+# ==================================================== an endpoint that may serve more than one tenant
+
+def test_absent_block_is_REFUSED_on_an_endpoint_carrying_the_mirror_marker():
+    """The hole the payload block alone does not close.
+
+    On a POOLED endpoint an absent block must not fall back to the environment: the render would
+    succeed into whatever bucket the shared template names, the endpoint would report healthy, and
+    isolation would be gone with nothing failing.
+
+    The legacy `R2_*` set is COMPLETE and usable in this env on purpose. A pooled template is
+    supposed to carry none, which would make `from_env` raise by itself, but that is a convention a
+    maintainer can undo by adding the names back. The refusal has to hold when the fallback would
+    have worked."""
+    env = {**ENV, **MIRROR_ENV_FULL}
+    with pytest.raises(RuntimeError, match="job R2 config required"):
+        R2Config.from_payload_or_env({"project": "p", "action": "render"}, env)
+
+
+def test_the_same_env_accepts_a_job_that_carries_its_block():
+    """Positive control for the refusal above: the endpoint is not simply broken."""
+    env = {**ENV, **MIRROR_ENV_FULL}
+    assert R2Config.from_payload_or_env({"r2": dict(BLOCK)}, env).bucket == "tenant-bucket"
+
+
+def test_a_legacy_endpoint_still_falls_back(monkeypatch):
+    """Backward compatibility, stated as a test rather than an intention: an endpoint provisioned
+    before the split has no marker, so the environment fallback stays live and prod keeps working
+    through this change unchanged."""
+    assert not models_mirror.uses_namespaced_mirror_creds(ENV)
+    assert R2Config.from_payload_or_env({"project": "p"}, ENV).bucket == "vivijure"
+
+
+def test_the_two_refusals_are_distinguishable():
+    """A malformed block on a pooled endpoint must report the MALFORMATION, not the missing block.
+    One error string for two different operator mistakes would send the reader to the wrong repo."""
+    env = {**ENV, **MIRROR_ENV_FULL}
+    with pytest.raises(RuntimeError) as exc:
+        R2Config.from_payload_or_env({"r2": {"bucket": "tenant-bucket"}}, env)
+    msg = str(exc.value)
+    assert "job R2 config incomplete" in msg
+    assert "job R2 config required" not in msg
+
+
+def test_handler_refuses_an_absent_block_on_a_pooled_endpoint(monkeypatch):
+    """The refusal at the real entry point, with the marker in the process environment where a
+    pooled worker would actually find it."""
+    handler_mod, seen = _stub_handler_deps(monkeypatch)
+    for k, v in MIRROR_ENV_FULL.items():
+        monkeypatch.setenv(k, v)
+    for k, v in ENV.items():
+        monkeypatch.setenv(k, v)
+
+    with pytest.raises(RuntimeError, match="job R2 config required"):
+        handler_mod.handler({"id": "job-1", "input": {
+            "project": "p", "action": "render", "bundle_key": "bundles/p.tar.gz",
+        }})
+    assert seen == [], "a job ran on a pooled endpoint without a tenant credential"

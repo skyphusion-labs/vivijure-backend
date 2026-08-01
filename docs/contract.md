@@ -190,12 +190,61 @@ Rules the backend guarantees (`R2Config.from_payload_or_env`, `harness/r2.py`):
    bucket under our credential, the precise failure the per-job credential exists to prevent. For the
    same reason an explicit `"r2": null` is REFUSED rather than read as absent -- **omit the key**, do
    not send a null.
-4. The models mirror ignores the block. This is structural, not policy: `models_mirror` builds its
-   own rclone environment from `os.environ` and is never handed the store or the payload.
+4. The models mirror ignores the block; it reads its own namespaced names (below). `models_mirror`
+   builds its own rclone environment and is never handed the store or the payload.
 5. Refusal messages name **fields only, never values**, because the handler mirrors a config failure
    into the R2 progress channel and stdout.
 6. The block is consumed at the handler boundary and **stripped from the payload** before anything
    downstream sees it, so no emitter, manifest, or error path can echo it.
+
+### The mirror has its own environment names
+
+The two purposes used to read the SAME four variables, which meant one credential and one bucket
+doing both jobs. Separate code paths, one credential. The mirror now reads its own names:
+
+| Mirror (OUR bucket) | Tenant job I/O |
+|---|---|
+| `MODELS_R2_ENDPOINT` | the payload `r2` block |
+| `MODELS_R2_ACCESS_KEY_ID` | |
+| `MODELS_R2_SECRET_ACCESS_KEY` | |
+| `MODELS_R2_BUCKET` | |
+
+Each falls back to its legacy `R2_*` counterpart for endpoints provisioned before the split. **That
+fallback is transitional and its removal is GATING for the shared tier** (backend issue #395): while
+it exists, an endpoint may legitimately carry the legacy names, and those are the same names the
+tenant job-I/O fallback reads.
+
+This also fixes a latent defect independent of pooling. `templateEnv`
+(`vivijure-control-plane/src/runpod.ts`) sets `R2_BUCKET` to the TENANT's bucket, so a cold
+non-baked worker on a provisioned tenant endpoint would mirror weights from
+`r2:<tenant-bucket>/models/...`, a prefix that does not exist there. It was masked by the baked-image
+and volume sentinels short-circuiting before the pull, not by being correct. Setting
+`MODELS_R2_BUCKET` fixes it; `mirror_env` deliberately does NOT guess, because silently repointing a
+live endpoint's weights pull would be an unrequested behaviour change on production.
+
+### An endpoint that may serve more than one tenant
+
+Rule 1 above (absent block -> environment) is correct for a DEDICATED endpoint and required for
+backward compatibility. On a POOLED endpoint it is a silent cross-tenant write: a job arriving
+without the block would get whatever credential and bucket the pooled template holds, the render
+would succeed, the endpoint would report healthy, and isolation would be gone with nothing failing.
+
+So an absent block is REFUSED, with its own error string, on any endpoint carrying
+`MODELS_R2_ACCESS_KEY_ID`. Presence of the mirror's own credential marks an endpoint provisioned
+after the split, which may serve more than one tenant, so there is no "the" tenant for it to fall
+back to.
+
+Keying the refusal on the marker rather than on the absence of `R2_*` is deliberate. A pooled
+template is supposed to carry no tenant `R2_*` at all, which would make the environment path raise on
+its own, but that is a convention a maintainer can undo by adding the names back for consistency.
+The marker means a pooled endpoint refuses **even if a complete and usable tenant credential is
+sitting in its environment**.
+
+Consequence for the producing side, and it is a deploy-ordering constraint: once a template carries
+`MODELS_R2_*`, every job to that endpoint must carry the block, dedicated or pooled. The safe order
+is (1) the control plane starts sending the block on every submit, (2) the backend image ships,
+(3) templates are repinned with `MODELS_R2_*`. Each step is safe on its own; an old image ignores an
+unknown payload key, and a new image without the marker still falls back.
 
 ### Why not presigned URLs
 

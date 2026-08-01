@@ -20,6 +20,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from .models_mirror import uses_namespaced_mirror_creds
+
 
 # The optional per-job tenant R2 block in the job payload, and its required fields. Named here
 # rather than inline so the handler, the tests, and the control plane all read one definition.
@@ -94,12 +96,33 @@ class R2Config:
 
         A PRESENT but malformed block FAILS the job; it never degrades to the environment. That is
         the load-bearing rule, not a style choice: falling back would run a tenant's job against
-        OUR bucket under OUR credential, the precise failure this split exists to prevent. For the
-        same reason ABSENT means the key is absent -- an explicit `"r2": null` is a producer
-        defect and is refused, because the one thing a null must not do is silently select the
-        shared credential."""
+        the WRONG bucket under the WRONG credential, the precise failure this split exists to
+        prevent. For the same reason ABSENT means the key is absent -- an explicit `"r2": null` is
+        a producer defect and is refused, because the one thing a null must not do is silently
+        select whatever credential the endpoint happens to hold.
+
+        An ABSENT block is refused too on any endpoint that carries the mirror's own namespaced
+        credential (`MODELS_R2_ACCESS_KEY_ID`). Such an endpoint was provisioned after the
+        credential split and may serve MORE THAN ONE TENANT, so there is no such thing as "the"
+        tenant for it: falling back to the environment would write one tenant's work into whatever
+        bucket the shared template happens to name, and nothing would fail. The render succeeds,
+        the endpoint reports healthy, and isolation is quietly gone.
+
+        This marker is what makes the refusal structural rather than conventional. A pooled template
+        is SUPPOSED to carry no tenant `R2_*` at all, which would make `from_env` raise on its own,
+        but that is a convention a future maintainer can undo by adding the names back "for
+        consistency". Keying on the marker means a pooled endpoint refuses EVEN IF a complete and
+        usable tenant credential is sitting in its environment."""
         if isinstance(payload, dict) and PAYLOAD_KEY in payload:
             return cls.from_payload_block(payload[PAYLOAD_KEY])
+        if uses_namespaced_mirror_creds(env):
+            raise RuntimeError(
+                "job R2 config required: this endpoint carries the namespaced models-mirror "
+                "credential, so it may serve more than one tenant and has no tenant job-I/O "
+                f"credential of its own. The job payload must carry an {PAYLOAD_KEY!r} block. "
+                "Refusing rather than falling back to the endpoint environment, which on a pooled "
+                "endpoint would write one tenant's work into another tenant's bucket without "
+                "failing.")
         return cls.from_env(env)
 
     @staticmethod
