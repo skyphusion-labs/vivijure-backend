@@ -105,6 +105,27 @@ jobs:
           echo "The version on that line is the CPU wheel's and is unconstrained. What keeps the GPU"
           echo "wheel on the CUDA-12 line is the cap onnxruntime-gpu>=1.21.0,<1.27.0 in the file."
 
+          echo ""
+          echo "WHICH PIN HAS ACTUALLY BEEN SEEN TO TURN THIS RED (backend#381). This gate has been"
+          echo "proven red on real broken content three times, and EVERY ONE WAS A NUMPY RED."
+          echo "numpy==2.5.1 fails resolution first in every run, so pip never reaches the"
+          echo "tokenizers==0.23.1 conflict and this gate HAS NEVER DEMONSTRATED that it catches it."
+          echo "That fixing numpy alone surfaces the tokenizers conflict next was established BY HAND,"
+          echo "not end to end by this job. So a green here is not evidence that both pins are"
+          echo "independently covered; one of them has never been the thing that failed."
+          echo "The dependabot ignores for numpy >=2.5.0 and tokenizers >0.22.2 mean neither is"
+          echo "currently proposed. The moment this matters is the first deliberate tokenizers move"
+          echo "paired with a transformers bump, which is when to prove it rather than assume it."
+
+          echo ""
+          echo "A GREEN HERE DOES NOT MEAN A DEPENDENCY FIX IS LIVE. deploy/requirements.txt is"
+          echo "installed in the RUNTIME BASE (runtime.Dockerfile / runtime-overlay.Dockerfile),"
+          echo "NOT in deploy/Dockerfile. A src-only backend release never re-resolves pip, so"
+          echo "MERGING A REQUIREMENTS CHANGE SHIPS NOTHING until someone rebuilds the base and"
+          echo "repins it in BOTH deploy/Dockerfile and .runpod/Dockerfile. This job is a"
+          echo "future-build guard. Rollback is not a mitigation either: backend-v1.0.9, 1.0.10 and"
+          echo "1.0.11 all pinned the same base by digest and carried the identical pip layer."
+
   # ------------------------------------------------- authoritative gate (inside the pinned base)
   resolve-in-base:
     name: resolve (inside the pinned runtime base)
@@ -179,3 +200,24 @@ jobs:
           echo "EXPECTED here and is not a return of backend#346 defect A."
           echo "The version on that line is the CPU wheel's and is unconstrained. What keeps the GPU"
           echo "wheel on the CUDA-12 line is the cap onnxruntime-gpu>=1.21.0,<1.27.0 in the file."
+
+          echo ""
+          echo "WHICH PIN HAS ACTUALLY BEEN SEEN TO TURN THIS RED (backend#381). This gate has been"
+          echo "proven red on real broken content three times, and EVERY ONE WAS A NUMPY RED."
+          echo "numpy==2.5.1 fails resolution first in every run, so pip never reaches the"
+          echo "tokenizers==0.23.1 conflict and this gate HAS NEVER DEMONSTRATED that it catches it."
+          echo "That fixing numpy alone surfaces the tokenizers conflict next was established BY HAND,"
+          echo "not end to end by this job. So a green here is not evidence that both pins are"
+          echo "independently covered; one of them has never been the thing that failed."
+          echo "The dependabot ignores for numpy >=2.5.0 and tokenizers >0.22.2 mean neither is"
+          echo "currently proposed. The moment this matters is the first deliberate tokenizers move"
+          echo "paired with a transformers bump, which is when to prove it rather than assume it."
+
+          echo ""
+          echo "A GREEN HERE DOES NOT MEAN A DEPENDENCY FIX IS LIVE. deploy/requirements.txt is"
+          echo "installed in the RUNTIME BASE (runtime.Dockerfile / runtime-overlay.Dockerfile),"
+          echo "NOT in deploy/Dockerfile. A src-only backend release never re-resolves pip, so"
+          echo "MERGING A REQUIREMENTS CHANGE SHIPS NOTHING until someone rebuilds the base and"
+          echo "repins it in BOTH deploy/Dockerfile and .runpod/Dockerfile. This job is a"
+          echo "future-build guard. Rollback is not a mitigation either: backend-v1.0.9, 1.0.10 and"
+          echo "1.0.11 all pinned the same base by digest and carried the identical pip layer."
