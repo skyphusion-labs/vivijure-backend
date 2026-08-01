@@ -137,3 +137,5 @@ the structured progress channel, and the failure modes -- is in
 [../docs/operations.md](../docs/operations.md).
 
 # probe base for backend#374, delete me
+
+# stacked child for backend#374, delete me
