@@ -76,9 +76,11 @@ env:
 
 jobs:
   build-and-push:
-    # The SNAPSHOT runner (built from vivijure-bake-snapshot, which pre-pulls the seed): `FROM seed`
-    # is a warm local cache hit here, so a runtime rebuild skips the ~87 GB seed pull. Same runner
-    # release.yml uses; both bakes are dispatch-gated + infrequent, so no meaningful contention.
+    # Plane C `[self-hosted, gpu]` (org runner group vivijure-gpu-builds, id 9; propagandhi + fatmike,
+    # fc#754): a host-persistent JIT runner, so the local docker image store survives across jobs and
+    # `FROM seed` is a warm local cache hit on a repeat bake, skipping the ~87 GB seed pull (a cold
+    # runner pays it once). Same runner release.yml uses; both bakes are dispatch-gated + infrequent,
+    # so no meaningful contention.
     runs-on: [self-hosted, gpu]
     timeout-minutes: 180
     steps:
@@ -142,9 +144,9 @@ jobs:
           echo "Building ${RUNTIME_IMAGE}:${TAG} (mode=${MODE})."
 
       # Use the DOCKER driver (not the default docker-container driver): its build cache IS the daemon
-      # image store, so the seed pre-pulled by the snapshot runner is a warm local hit for `FROM seed`
-      # instead of a re-pull. Same pull-half fix release.yml uses. Single-platform amd64 needs no
-      # docker-container features (#537 pull win).
+      # image store, so the seed already cached on this Plane C GPU host from a prior bake is a warm
+      # local hit for `FROM seed` instead of a re-pull. Same pull-half fix release.yml uses.
+      # Single-platform amd64 needs no docker-container features (#537 pull win).
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
         with:

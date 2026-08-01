@@ -19,15 +19,17 @@ name: Release worker image to GHCR (baked)
 # runtime-build.yml (from the seed image, which stages R2 once per weight version); see
 # docs/deploy.md for the release contract and docs/weights-base-and-snapshots.md for the chain.
 #
-# Runner: the enterprise SNAPSHOT runner, label "vivijure-bake-snap" (Vivijure Bake enterprise group,
-# org-scoped to skyphusion-labs, allow-public). vivijure-backend is a PUBLIC repo, so a self-hosted
-# FLEET runner is off the table (a fork PR could run untrusted code on a fleet box); this is a dedicated
-# enterprise runner, NOT a fleet box, and access is gated by the label + the backend-v* tag ruleset
-# (backend-release-tags, id 18524678) -- a fork PR cannot create a backend-v* tag, so untrusted code
-# never reaches it. The custom runner image (vivijure-bake-snapshot) ships the runtime base pre-pulled
-# into the docker daemon store (runner-snapshot.yml), so the FROM is a fast local cache hit and the bake
-# is assemble+push only. A stale or absent snapshot degrades to a one-time docker pull of the base --
-# SLOW, never WRONG. (Tag-push / dispatch only; a fork PR cannot create a backend-v* tag.)
+# Runner: Plane C `[self-hosted, gpu]` (org runner group vivijure-gpu-builds, id 9; propagandhi +
+# fatmike, fc#754), the sole vivijure image-bake lane -- enterprise heavy/bake runners are RETIRED.
+# vivijure-backend is a PUBLIC repo, so a fleet Plane B runner is off the table (a fork PR could run
+# untrusted code on a fleet box); Plane C is dedicated GPU iron, NOT a fleet box, allow-public ON,
+# and access is gated by the runner-group allowlist (sync-vivijure-gpu-builds-allowlist.sh) plus the
+# backend-v* tag ruleset (backend-release-tags, id 18524678) -- a fork PR cannot create a backend-v*
+# tag, so untrusted code never reaches it. The runtime base is `FROM`'d from a pinned GHCR digest
+# (#537); on a Plane C host that already cached it from a prior bake the FROM is a fast local hit,
+# and the bake is assemble+push only. A cold or stale local cache degrades to a one-time docker pull
+# of the base -- SLOW, never WRONG. (Tag-push / dispatch only; a fork PR cannot create a backend-v*
+# tag.)
 
 on:
   push:
@@ -85,11 +87,11 @@ jobs:
   build-and-push:
     needs: sync-gpu-allowlist
     if: always() && (needs.sync-gpu-allowlist.result == 'success' || needs.sync-gpu-allowlist.result == 'skipped')
-    # vivijure-bake-snap = the enterprise snapshot runner; the runtime base is pre-pulled into the
-    # runner image docker daemon store, so the FROM is a local cache hit (assemble+push only, no cold
-    # base pull). Access control = this label + the backend-v* tag ruleset (backend-release-tags); a
-    # fork PR cannot create a backend-v* tag. A stale or absent snapshot degrades to a one-time base
-    # pull -- SLOW, never WRONG. Accelerator only; identical output.
+    # Plane C `[self-hosted, gpu]`: a host-persistent JIT runner, so a runtime base already pulled on
+    # a prior bake is a local cache hit (assemble+push only, no cold base pull). Access control = the
+    # vivijure-gpu-builds runner-group allowlist + the backend-v* tag ruleset (backend-release-tags);
+    # a fork PR cannot create a backend-v* tag. A cold or stale local cache degrades to a one-time
+    # base pull -- SLOW, never WRONG. Accelerator only; identical output.
     runs-on: [self-hosted, gpu]
     timeout-minutes: 180
     steps:
@@ -134,8 +136,9 @@ jobs:
           echo "Building ${WORKER_IMAGE}:${VER} (precision=${PREC}; FROM the pinned runtime base)."
 
       # Use the DOCKER driver (not the default docker-container driver): its build cache IS the daemon
-      # image store, so a warm runtime base (from the runtime build / snapshot runner) is a local hit
-      # instead of a re-pull. Single-platform amd64 needs no docker-container features (#537 pull win).
+      # image store, so a runtime base already cached on this Plane C GPU host from a prior bake is a
+      # local hit instead of a re-pull. Single-platform amd64 needs no docker-container features
+      # (#537 pull win).
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
         with:
@@ -153,8 +156,8 @@ jobs:
 
       # Build context is the repo ROOT (COPY src/ resolves). deploy/Dockerfile is `FROM the pinned
       # runtime base` + COPY src, selected by VJ_BAKE_PRECISION -- NO R2 stage, NO bin-pack, NO weight
-      # COPY here. On the snapshot runner the runtime base is pre-cached (assemble+push only); on a
-      # cold or stale runner it is a one-time docker pull (SLOW, never WRONG). Load into the local daemon
+      # COPY here. On a warm Plane C host the runtime base is already cached (assemble+push only); on a
+      # cold or stale local cache it is a one-time docker pull (SLOW, never WRONG). Load into the local daemon
       # (not pushed) so the per-layer gate + app import smoke run before publish.
       - name: Build baked worker image
         uses: docker/build-push-action@v7
