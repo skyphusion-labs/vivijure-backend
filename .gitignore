@@ -37,3 +37,7 @@ hf-cache/
 
 # wrangler local dev state
 .wrangler/
+
+# coverage artifacts from the documented test gate (pytest --cov, .github/workflows/tests.yml)
+.coverage
+coverage.xml
