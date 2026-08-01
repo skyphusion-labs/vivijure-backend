@@ -18,7 +18,7 @@ transformers==5.14.1
 # scrubs the tree cache so the check stays dormant; this pin stops silent behaviour drift (the
 # tested-with-pin doctrine). In-bounds for the stack: transformers 5.10.2 needs <2.0,>=1.5.0,
 # diffusers 0.38.0 needs >=0.34.0. Bump deliberately + re-validate on the pod, never by drift.
-huggingface_hub==1.24.0
+huggingface_hub==1.25.1
 # transformers 5.14.1 requires tokenizers<=0.23.0; PyPI never shipped 0.23.0 stable,
 # so 0.22.2 is the newest installable pin that satisfies the constraint.
 # Do NOT Dependabot-bump tokenizers to 0.23.1 while transformers stays on a
@@ -29,7 +29,7 @@ tokenizers==0.22.2
 # pin that no environment could ever install. transformers 5.14.1 STILL caps
 # tokenizers<=0.23.0 and 0.23.0 has no PyPI distribution, so 0.23.1 is ResolutionImpossible.
 accelerate==1.14.0
-peft==0.19.1
+peft==0.20.0
 # diffusers 0.39.0 requires the stable safetensors 0.8.0 release; its 0.8.0rc1
 # predecessor does not satisfy >=0.8.0 and makes the runtime image unbuildable.
 safetensors==0.8.0
@@ -53,7 +53,7 @@ av==18.0.0                # PyAV: the imageio plugin="pyav" backend finish.py us
                           # pod render output-verify before this is trusted in prod (not done in
                           # this PR).
 ftfy==6.3.1               # Wan text prompt cleanup
-numpy==2.3.5              # py3.11 conda line. Do not jump to numpy 2.5.x (needs >=3.12).
+numpy==2.4.6              # py3.11 conda line. Do not jump to numpy 2.5.x (needs >=3.12).
                           # VIOLATED 2026-07-23 by dcb25ec, which bumped the pin to 2.5.1 and
                           # left this very comment in place. numpy 2.5.x is Requires-Python
                           # >=3.12; the conda env is 3.11.15, so the bake could not resolve.
