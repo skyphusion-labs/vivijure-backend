@@ -42,7 +42,6 @@ name: requirements resolve
 
 on:
   pull_request:
-    branches: [main]
     paths:
       - deploy/requirements.txt
       - .github/workflows/requirements-resolve.yml
