@@ -28,15 +28,30 @@ package semver therefore advances past the `backend-v*` git tags.
 with / overwrites the published image at that tag. So cutting `backend-v<X.Y.Z>` for a semver already
 on GHCR clobbers an existing image. Never do it.
 
-**The check (do this BEFORE `git tag`):**
+**GHCR is authoritative for this check; git tags legitimately trail it** (see "Why the drift
+exists" above) -- **the highest published GIT tag is never the input**, only the GHCR package
+versions are.
+
+**The check (do this BEFORE `git tag`):** first settle which release line you are on -- normally the
+same `MAJOR.MINOR` as the most recent release in the table below (right now `1.0`); changing lines is
+a deliberate MINOR/MAJOR bump, never an accident of what happens to be sitting on GHCR. Then query
+GHCR **scoped to that line, across the FULL version history** (`--paginate`; the endpoint defaults to
+the most recent 30 versions, and untagged runtime/snapshot builds can push an older semver-tagged
+version off that window):
 
 ```bash
-gh api "/orgs/skyphusion-labs/packages/container/vivijure-backend/versions" \
-  --jq ".[].metadata.container.tags[]" | grep -E "^[0-9]+\.[0-9]+\.[0-9]+$" | sort -V | tail
+LINE="1.0"   # the MAJOR.MINOR line you are releasing on
+gh api --paginate "/orgs/skyphusion-labs/packages/container/vivijure-backend/versions" \
+  --jq ".[].metadata.container.tags[]" | grep -E "^${LINE}\.[0-9]+$" | sort -V | tail
 ```
 
-(or the GHCR Packages UI.) Take the highest published semver, pick the next FREE one above it, and
-cut `backend-v<that>`. Do NOT assume the next number after the latest git tag is free.
+(or the GHCR Packages UI, filtered to the line.) Take the highest published semver **in that line**,
+pick the next FREE one above it, and cut `backend-v<that>`. Do NOT assume the next number after the
+latest git tag is free, and do NOT take the highest semver across every line on GHCR -- a tag outside
+the line you are releasing (a stray test artifact, an old line, a future line) must never shift where
+you cut.
+
+**Snapshot (2026-08-01):** git tag **`backend-v1.0.13`** / GHCR **`:1.0.13`**, digest `sha256:f2fc70241dcab951f0f25379bff4e9bc970d920a17a696ca0808ba05577a14c8`. Src-only (#393, the per-job tenant R2 consumer half).
 
 **Snapshot (2026-07-31):** git tag **`backend-v1.0.12`** / GHCR **`:1.0.12`** InstantID face path back on the GPU (#346). Runtime repinned to `runtime-1-bf16-t5`; prod repinned by the verify+promote gate (run 30644063094).
 
