@@ -23,7 +23,7 @@ huggingface_hub==1.24.0
 # so 0.22.2 is the newest installable pin that satisfies the constraint.
 # Do NOT Dependabot-bump tokenizers to 0.23.1 while transformers stays on a
 # <=0.23.0 constraint (ResolutionImpossible on the bake). Pair bumps deliberately.
-tokenizers==0.22.2
+tokenizers==0.23.1
 # VIOLATED 2026-07-23 by the pip-minor-patch group bump (dcb25ec) and only caught at the
 # t5 bake on 2026-07-31: this file resolves ONLY at runtime-base bake time, so CI merged a
 # pin that no environment could ever install. transformers 5.14.1 STILL caps
