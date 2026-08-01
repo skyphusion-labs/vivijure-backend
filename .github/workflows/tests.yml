@@ -10,7 +10,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
@@ -54,5 +53,41 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
+      # STACKED PRs ARE REFUSED HERE, LOUDLY (backend#374).
+      #
+      # Removing the `branches: [main]` filter above makes these checks RUN on a stacked PR, which
+      # is necessary and not sufficient: the branch ruleset requires `ci`, `coverage` and `CodeQL`
+      # only for PRs targeting ~DEFAULT_BRANCH, so on a stacked PR NOTHING is required and eight
+      # green ticks would still render the PR CLEAN.
+      #
+      # MEASURED live 2026-08-01 on two throwaway PRs against the same commit:
+      #   base=main                -> 8 checks, mergeStateStatus CLEAN
+      #   base=another branch      -> 3 checks (the CodeQL family only), mergeStateStatus CLEAN
+      # CLEAN there means "no required check failed": true, and worthless, because none ran. Three
+      # successes look like a passing PR, which is why this is worse than an empty check set.
+      #
+      # THIS STEP LIVES IN `ci` ON PURPOSE, because `ci` is one of the three REQUIRED contexts. A
+      # refusal in a job of its own would report red and merge anyway, which is the same
+      # control-that-cannot-block defect this issue is about.
+      #
+      # WHY REFUSE RATHER THAN ACCOMMODATE. Estate rule: branch off current `origin/main`, never
+      # target a PR at a non-main base. Measured on this repo: #367 merged at 21:07:24Z with
+      # `--delete-branch` and its dependent #371 was CLOSED at 21:07:26Z, two seconds later, by
+      # nobody. GitHub closes a dependent PR when its base branch is deleted; it does not retarget.
+      # Twelve files of reviewed work needed a fresh branch and a cherry-pick to recover.
+      #
+      # A conflict from branching off main fails loudly at a moment you choose. A stacked base fails
+      # at a moment you do not.
+      - name: Refuse a stacked PR (base must be main)
+        if: github.event_name == 'pull_request' && github.event.pull_request.base.ref != 'main'
+        run: |
+          echo "::error::This PR targets '${{ github.event.pull_request.base.ref }}', not 'main'."
+          echo "::error::Stacked PRs are refused here. The required checks (ci, coverage, CodeQL) are"
+          echo "::error::REQUIRED only for PRs targeting the default branch, so a stacked PR can render"
+          echo "::error::CLEAN with nothing gating it, and its parent merging with --delete-branch"
+          echo "::error::CLOSES it rather than retargeting it. See backend#374."
+          echo "::error::Fix: git rebase --onto origin/main <old-base> <branch>, then open a fresh PR."
+          exit 1
+
       - name: Require coverage
         run: test "${{ needs.coverage.result }}" = "success"
