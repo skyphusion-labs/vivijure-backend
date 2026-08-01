@@ -2,11 +2,27 @@
 
 The worker holds exactly one TENANT credential: an R2 API token scoped to one bucket, carried in
 the job payload (a pooled endpoint, one credential per tenant per job) or delivered as endpoint env
-vars (a dedicated endpoint), never baked into the image and never any skyphusion/Access secret.
-The shared models mirror is a SEPARATE credential on OUR bucket, read from the environment by
-`models_mirror` and never routed through here. It pulls
-the project bundle in at job start and pushes the rendered MP4 plus the project-state tarball
-back out at the end. R2 speaks S3, so boto3 drives it directly.
+vars (a dedicated endpoint), never baked into the image and never any skyphusion/Access secret. The
+store pulls the project bundle in at job start and pushes the rendered MP4 plus the project-state
+tarball back out at the end. R2 speaks S3, so boto3 drives it directly.
+
+The shared models mirror is a DIFFERENT purpose on OUR bucket and is never routed through this
+module. Be exact about how far that separation actually goes today, because the answer decides
+whether a pooled template may omit the tenant `R2_*` variables:
+
+  - COMPLETE at the PAYLOAD layer. A job's tenant credential arrives in the payload, and
+    `models_mirror` has no code path to it.
+  - At the ENV layer, only once `MODELS_R2_*` is set on the endpoint. `models_mirror.mirror_env`
+    prefers those names but falls back FIELD BY FIELD to the same legacy `R2_*` names `from_env`
+    reads, so on an endpoint that has not been repinned the mirror and tenant job I/O are still ONE
+    credential against ONE bucket. Separate clients and separate code paths; the credential is
+    separated by naming coincidence, not by design.
+
+So a pooled template CANNOT simply omit the tenant `R2_*` names while that fallback exists, because
+the mirror still needs them. That is why an absent payload block is refused outright on any endpoint
+carrying the mirror marker (see `R2Config.from_payload_or_env`) rather than being left to depend on
+how the template was built. Removing the legacy fallback is GATING for the shared tier and is
+tracked in #395; until it lands, treat the env-layer split as INCOMPLETE.
 
 boto3 is imported lazily inside `_client` so this module loads on a CPU box with no AWS deps;
 the worker image installs boto3. Bundle *parsing* is not here (that is `contract.Bundle`); this
@@ -40,8 +56,11 @@ class R2Config:
     access credentials, which issue one.
 
     This config is for tenant job I/O ONLY. The models mirror (`models_mirror`) pulls shared
-    weights from OUR bucket and reads its own credential straight from `os.environ`; it never
-    receives this object, so a per-job tenant credential structurally cannot reach it."""
+    weights from OUR bucket and never receives this object, so a PAYLOAD-supplied tenant credential
+    cannot reach it. That is the payload layer only: on an endpoint without `MODELS_R2_*` the mirror
+    still falls back to the same legacy env names `from_env` reads, and the two are one credential.
+    The module docstring states exactly how far the split goes; do not read this paragraph as more
+    than the payload half of it."""
     endpoint: str
     access_key_id: str
     secret_access_key: str
