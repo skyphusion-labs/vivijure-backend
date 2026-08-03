@@ -116,13 +116,30 @@ jobs:
             rclone version
             exit 0
           fi
-          curl -fsSL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
-          python3 - <<'PY2'
-          import zipfile
-          zipfile.ZipFile("/tmp/rclone.zip").extractall("/tmp")
+          # Extract into a job-scoped dir (RUNNER_TEMP), never shared /tmp: the download URL is
+          # rclone-current, so the extracted directory name carries whatever version upstream
+          # published that day, and a shared /tmp accumulates one more permanent match on the host
+          # with every rclone release. Observed on fatmike (run 30823292692): two extracted versions
+          # present, so `cp` received two sources and failed with `cp: target '.../bin/rclone': Not a
+          # directory` -- a diagnostic that blames the (innocent) destination.
+          EXTRACT_DIR="${RUNNER_TEMP}/rclone-extract"
+          rm -rf "${EXTRACT_DIR}"
+          mkdir -p "${EXTRACT_DIR}"
+          curl -fsSL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o "${RUNNER_TEMP}/rclone.zip"
+          python3 - "${RUNNER_TEMP}/rclone.zip" "${EXTRACT_DIR}" <<'PY2'
+          import sys, zipfile
+          zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])
           PY2
+          # Even in a clean directory, refuse to let a glob silently feed more than one source to cp:
+          # assert the match count and name what was actually found if it is ever not exactly one.
+          shopt -s nullglob
+          matches=( "${EXTRACT_DIR}"/rclone-*-linux-amd64/rclone )
+          if [ "${#matches[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one rclone binary under ${EXTRACT_DIR}, found ${#matches[@]}: ${matches[*]:-<none>}"
+            exit 1
+          fi
           mkdir -p "${HOME}/bin"
-          cp /tmp/rclone-*-linux-amd64/rclone "${HOME}/bin/rclone"
+          cp "${matches[0]}" "${HOME}/bin/rclone"
           chmod 755 "${HOME}/bin/rclone"
           echo "${HOME}/bin" >> "$GITHUB_PATH"
           "${HOME}/bin/rclone" version
