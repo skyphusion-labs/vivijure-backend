@@ -30,12 +30,19 @@ on:
         required: true
         default: '1'
         type: string
+      # Excluded on purpose, not an incomplete list:
+      #   - biafra: NEVER add. The only spinning-disk box in the fleet, the swarm manager
+      #     BECAUSE of that, and the bake floor's ROTA=1 check refuses it mechanically. A
+      #     choice entry here would be a promise the floor then has to break -- the dropdown
+      #     would offer a target that can never run a bake, and the resulting refusal would
+      #     read as a bug in the aiming rather than the floor doing its job.
+      #   - dischord, rancid: NEVER add. Crew boxes, categorically not CI runners.
       runner_host:
         description: 'Pin the bake to ONE Plane C host (per-host runner labels, fc#1470). "any" = normal scheduling, unchanged behaviour.'
         required: false
         default: any
         type: choice
-        options: [any, propagandhi, fatmike, jello, fugazi]
+        options: [any, propagandhi, fatmike, jello, fugazi, descendents, badbrains, damaged]
 
 permissions:
   contents: read
