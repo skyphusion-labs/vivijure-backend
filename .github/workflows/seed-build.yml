@@ -30,6 +30,12 @@ on:
         required: true
         default: '1'
         type: string
+      runner_host:
+        description: 'Pin the bake to ONE Plane C host (per-host runner labels, fc#1470). "any" = normal scheduling, unchanged behaviour.'
+        required: false
+        default: any
+        type: choice
+        options: [any, propagandhi, fatmike, jello, fugazi]
 
 permissions:
   contents: read
@@ -47,7 +53,23 @@ env:
 
 jobs:
   build-and-push:
-    runs-on: [self-hosted, gpu]
+    # runner_host pins this bake to a named Plane C host (per-host runner labels, fc#1470),
+    # so a fleet-infra job can target ONE box instead of "whichever gpu runner claims it".
+    #
+    # Written as a two-string ternary feeding exactly one fromJSON, not the idiomatic
+    # `cond && fromJSON(A) || fromJSON(B)`. That idiom depends on an ARRAY being truthy in
+    # the Actions expression language -- not verifiable by reading, and its failure mode is
+    # a silently wrong runner set. Here the ternary operates on two non-empty STRINGS, where
+    # truthiness is unambiguous, and there is exactly one fromJSON in the expression.
+    #
+    # inputs.runner_host == 'any' selects the literal string 'self-hosted' as the third label,
+    # yielding ["self-hosted","gpu","self-hosted"]. runs-on label matching is a set
+    # intersection, so a duplicate label is byte-identical in effect to today's
+    # [self-hosted, gpu] -- the default path is unchanged.
+    #
+    # type: choice (not free text) closes the JSON-injection path on the format() call below.
+    runs-on: ${{ fromJSON(format('["self-hosted","gpu","{0}"]',
+                  inputs.runner_host == 'any' && 'self-hosted' || inputs.runner_host)) }}
     timeout-minutes: 180
     steps:
       - name: Checkout repository
