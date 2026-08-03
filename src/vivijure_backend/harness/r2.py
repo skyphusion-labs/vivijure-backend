@@ -1,9 +1,28 @@
 """R2 (S3-compatible) object I/O for the worker.
 
-The worker holds exactly one credential: an R2 API token scoped to one bucket, delivered as
-endpoint env vars, never baked into the image and never any skyphusion/Access secret. It pulls
-the project bundle in at job start and pushes the rendered MP4 plus the project-state tarball
-back out at the end. R2 speaks S3, so boto3 drives it directly.
+The worker holds exactly one TENANT credential: an R2 API token scoped to one bucket, carried in
+the job payload (a pooled endpoint, one credential per tenant per job) or delivered as endpoint env
+vars (a dedicated endpoint), never baked into the image and never any skyphusion/Access secret. The
+store pulls the project bundle in at job start and pushes the rendered MP4 plus the project-state
+tarball back out at the end. R2 speaks S3, so boto3 drives it directly.
+
+The shared models mirror is a DIFFERENT purpose on OUR bucket and is never routed through this
+module. Be exact about how far that separation actually goes today, because the answer decides
+whether a pooled template may omit the tenant `R2_*` variables:
+
+  - COMPLETE at the PAYLOAD layer. A job's tenant credential arrives in the payload, and
+    `models_mirror` has no code path to it.
+  - At the ENV layer, only once `MODELS_R2_*` is set on the endpoint. `models_mirror.mirror_env`
+    prefers those names but falls back FIELD BY FIELD to the same legacy `R2_*` names `from_env`
+    reads, so on an endpoint that has not been repinned the mirror and tenant job I/O are still ONE
+    credential against ONE bucket. Separate clients and separate code paths; the credential is
+    separated by naming coincidence, not by design.
+
+So a pooled template CANNOT simply omit the tenant `R2_*` names while that fallback exists, because
+the mirror still needs them. That is why an absent payload block is refused outright on any endpoint
+carrying the mirror marker (see `R2Config.from_payload_or_env`) rather than being left to depend on
+how the template was built. Removing the legacy fallback is GATING for the shared tier and is
+tracked in #395; until it lands, treat the env-layer split as INCOMPLETE.
 
 boto3 is imported lazily inside `_client` so this module loads on a CPU box with no AWS deps;
 the worker image installs boto3. Bundle *parsing* is not here (that is `contract.Bundle`); this
@@ -17,26 +36,123 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from .models_mirror import uses_namespaced_mirror_creds
+
+
+# The optional per-job tenant R2 block in the job payload, and its required fields. Named here
+# rather than inline so the handler, the tests, and the control plane all read one definition.
+PAYLOAD_KEY = "r2"
+PAYLOAD_REQUIRED = ("endpoint", "access_key_id", "secret_access_key", "bucket")
+
 
 @dataclass(frozen=True)
 class R2Config:
-    """R2 connection settings: the endpoint, the access key pair, and the bucket. The worker's
-    only credential, supplied through the environment."""
+    """R2 connection settings for TENANT job I/O: the endpoint, the access key pair, the bucket,
+    and an optional session token.
+
+    Supplied either by the job payload (a pooled endpoint serving many tenants: each job carries
+    its own tenant's credential) or by the endpoint environment (a dedicated endpoint: one tenant,
+    one template). `session_token` is None for a static R2 API token and set for R2 temporary
+    access credentials, which issue one.
+
+    This config is for tenant job I/O ONLY. The models mirror (`models_mirror`) pulls shared
+    weights from OUR bucket and never receives this object, so a PAYLOAD-supplied tenant credential
+    cannot reach it. That is the payload layer only: on an endpoint without `MODELS_R2_*` the mirror
+    still falls back to the same legacy env names `from_env` reads, and the two are one credential.
+    The module docstring states exactly how far the split goes; do not read this paragraph as more
+    than the payload half of it."""
     endpoint: str
     access_key_id: str
     secret_access_key: str
     bucket: str
+    session_token: str | None = None
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "R2Config":
         """Build from `R2_ENDPOINT` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET`;
-        raise if any are missing."""
+        raise if any are missing. This is the dedicated-endpoint path, unchanged."""
         e = env if env is not None else os.environ
         missing = [k for k in ("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET")
                    if not e.get(k)]
         if missing:
             raise RuntimeError("R2 config incomplete; missing env: " + ", ".join(missing))
         return cls(e["R2_ENDPOINT"], e["R2_ACCESS_KEY_ID"], e["R2_SECRET_ACCESS_KEY"], e["R2_BUCKET"])
+
+    @classmethod
+    def from_payload_block(cls, block: object) -> "R2Config":
+        """Build from the payload's `r2` block. Raises on any malformation.
+
+        Every message names FIELDS only, never values: this object is a credential, and the
+        handler mirrors a config failure into the progress channel and stdout."""
+        if not isinstance(block, dict):
+            raise RuntimeError(
+                f"job R2 config: {PAYLOAD_KEY!r} must be an object, got {type(block).__name__}")
+        missing = [k for k in PAYLOAD_REQUIRED
+                   if not (isinstance(block.get(k), str) and block[k].strip())]
+        if missing:
+            raise RuntimeError(
+                "job R2 config incomplete; missing or blank fields: " + ", ".join(missing))
+        token = block.get("session_token")
+        if token is not None and not (isinstance(token, str) and token.strip()):
+            raise RuntimeError(
+                "job R2 config: session_token, when present, must be a non-empty string")
+        return cls(
+            endpoint=block["endpoint"].strip(),
+            access_key_id=block["access_key_id"].strip(),
+            secret_access_key=block["secret_access_key"].strip(),
+            bucket=block["bucket"].strip(),
+            session_token=token.strip() if isinstance(token, str) else None,
+        )
+
+    @classmethod
+    def from_payload_or_env(cls, payload: dict | None, env: dict | None = None) -> "R2Config":
+        """The tenant job-I/O credential for ONE job: the payload block when the job carries one,
+        the endpoint environment when it does not.
+
+        This is what lets one POOLED RunPod endpoint serve many tenants. A dedicated endpoint keeps
+        working unchanged: no block in the payload means the four `R2_*` env vars, exactly as
+        before.
+
+        A PRESENT but malformed block FAILS the job; it never degrades to the environment. That is
+        the load-bearing rule, not a style choice: falling back would run a tenant's job against
+        the WRONG bucket under the WRONG credential, the precise failure this split exists to
+        prevent. For the same reason ABSENT means the key is absent -- an explicit `"r2": null` is
+        a producer defect and is refused, because the one thing a null must not do is silently
+        select whatever credential the endpoint happens to hold.
+
+        An ABSENT block is refused too on any endpoint that carries the mirror's own namespaced
+        credential (`MODELS_R2_ACCESS_KEY_ID`). Such an endpoint was provisioned after the
+        credential split and may serve MORE THAN ONE TENANT, so there is no such thing as "the"
+        tenant for it: falling back to the environment would write one tenant's work into whatever
+        bucket the shared template happens to name, and nothing would fail. The render succeeds,
+        the endpoint reports healthy, and isolation is quietly gone.
+
+        This marker is what makes the refusal structural rather than conventional. A pooled template
+        is SUPPOSED to carry no tenant `R2_*` at all, which would make `from_env` raise on its own,
+        but that is a convention a future maintainer can undo by adding the names back "for
+        consistency". Keying on the marker means a pooled endpoint refuses EVEN IF a complete and
+        usable tenant credential is sitting in its environment."""
+        if isinstance(payload, dict) and PAYLOAD_KEY in payload:
+            return cls.from_payload_block(payload[PAYLOAD_KEY])
+        if uses_namespaced_mirror_creds(env):
+            raise RuntimeError(
+                "job R2 config required: this endpoint carries the namespaced models-mirror "
+                "credential, so it may serve more than one tenant and has no tenant job-I/O "
+                f"credential of its own. The job payload must carry an {PAYLOAD_KEY!r} block. "
+                "Refusing rather than falling back to the endpoint environment, which on a pooled "
+                "endpoint would write one tenant's work into another tenant's bucket without "
+                "failing.")
+        return cls.from_env(env)
+
+    @staticmethod
+    def strip_from_payload(payload: dict) -> dict:
+        """A COPY of `payload` with the credential block removed, for handing to everything
+        downstream of the store.
+
+        Nothing below the handler needs it (the store is dependency-injected), so removing it makes
+        a leak structurally impossible rather than merely absent today: no future emitter, manifest,
+        or error path can echo a field that is not in the dict it was given."""
+        return {k: v for k, v in payload.items() if k != PAYLOAD_KEY}
 
 
 class R2:
@@ -56,6 +172,8 @@ class R2:
                 endpoint_url=self.config.endpoint,
                 aws_access_key_id=self.config.access_key_id,
                 aws_secret_access_key=self.config.secret_access_key,
+                # None for a static R2 API token; set for R2 temporary access credentials.
+                aws_session_token=self.config.session_token,
                 config=Config(signature_version="s3v4",
                               retries={"max_attempts": 5, "mode": "standard"}),
                 region_name="auto",  # R2 ignores region; boto3 insists on one

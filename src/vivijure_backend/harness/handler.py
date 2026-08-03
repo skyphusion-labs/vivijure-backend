@@ -592,6 +592,13 @@ def handler(job: dict) -> dict:
     client, runs the job through the deployed GPU pipeline, returns the response. RunPod passes
     `{"input": {...}}`; the render request is the inner dict.
 
+    TWO R2 credentials, split by PURPOSE, because they have opposite sharing requirements. The
+    models mirror pulls identical shared weights from OUR bucket and reads its own credential from
+    the environment, always. Tenant job I/O (bundle in, film out, LoRAs, keyframes, clips, progress)
+    uses the per-job payload block when present, so ONE pooled endpoint can serve many tenants
+    without any of them sharing a credential or a bucket, and falls back to the endpoint env when
+    absent, which is what a dedicated endpoint keeps doing unchanged.
+
     The R2 client and the cold-start model mirror both run BEFORE run_job's own emitter exists,
     yet a failure there (a broken mirror / missing weight, the exact class the channel must
     surface) is the most opaque kind. So build the store first and wrap each gate with an emitter
@@ -613,10 +620,17 @@ def handler(job: dict) -> dict:
     # the same /job-done endpoint, so a straggler mirror can never race the finalization.
     try:
         try:
-            store = R2(R2Config.from_env())
+            # Tenant job I/O only. The payload block when the job carries one (a POOLED endpoint
+            # serving many tenants), the endpoint env when it does not (a dedicated endpoint,
+            # unchanged). A present-but-malformed block raises here rather than degrading to env:
+            # see R2Config.from_payload_or_env for why that must never be a fallback.
+            store = R2(R2Config.from_payload_or_env(payload))
         except Exception as e:
             ProgressEmitter(None, project, job_id, on_progress=on_progress).error("config", e)
             raise
+        # Everything below the store gets the payload WITHOUT the credential block, so no
+        # downstream emitter, manifest, or error path can echo it even by accident.
+        payload = R2Config.strip_from_payload(payload)
         # Register the run context (the live store + identity) so the SDK's job-done _transmit
         # patch can mirror a callback rejection into this run's R2 channel; the patch itself has
         # no run context (#90). Best-effort; a config failure above never reaches here (R2 is the
