@@ -17,14 +17,14 @@ name: requirements resolve
 #                    currently pins, which is the environment the bake actually resolves in.
 #
 # WHY resolve-in-base CANNOT BE THE PR GATE (do not "fix" this by moving the trigger):
-# it needs the ~239 GB runtime base, so it must run on Plane C [self-hosted, gpu] (org runner group
+# it needs the ~239 GB runtime base, so it must run on Plane C [self-hosted, bake-capable] (org runner group
 # vivijure-gpu-builds), and that group is restricted_to_workflows with EXACT ref pins. A
 # pull_request run has ref refs/pull/N/merge, which matches no allowlist entry, so a PR-triggered
 # job on that group never schedules -- it queues until it times out. push-to-main is the earliest
 # trigger Plane C can serve. That is why both jobs exist: the hosted one gates the merge, the
 # in-base one is the truth, minutes after merge instead of eight days later.
 #
-# NO GPU IS REQUIRED FOR A PIP RESOLVE. resolve-in-base is on [self-hosted, gpu] only because that
+# NO GPU IS REQUIRED FOR A PIP RESOLVE. resolve-in-base is on [self-hosted, bake-capable] only because that
 # is where the base image lives. Do not "optimize" it onto a hosted runner: a hosted runner cannot
 # pull a 239 GB base, and resolving against a stand-in environment is exactly the gap this closes.
 #
@@ -137,7 +137,7 @@ jobs:
     name: resolve (inside the pinned runtime base)
     if: github.event_name != 'pull_request'
     # Plane C. Present ONLY because the runtime base image lives here. No GPU is used by this job.
-    runs-on: [self-hosted, gpu]
+    runs-on: [self-hosted, bake-capable]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7

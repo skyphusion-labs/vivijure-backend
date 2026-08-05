@@ -19,7 +19,7 @@ name: Release worker image to GHCR (baked)
 # runtime-build.yml (from the seed image, which stages R2 once per weight version); see
 # docs/deploy.md for the release contract and docs/weights-base-and-snapshots.md for the chain.
 #
-# Runner: Plane C `[self-hosted, gpu]` (org runner group vivijure-gpu-builds, id 9; propagandhi +
+# Runner: Plane C `[self-hosted, bake-capable]` (org runner group vivijure-gpu-builds, id 9; propagandhi +
 # fatmike, fc#754), the sole vivijure image-bake lane -- enterprise heavy/bake runners are RETIRED.
 # vivijure-backend is a PUBLIC repo, so a fleet Plane B runner is off the table (a fork PR could run
 # untrusted code on a fleet box); Plane C is dedicated GPU iron, NOT a fleet box, allow-public ON,
@@ -87,12 +87,12 @@ jobs:
   build-and-push:
     needs: sync-gpu-allowlist
     if: always() && (needs.sync-gpu-allowlist.result == 'success' || needs.sync-gpu-allowlist.result == 'skipped')
-    # Plane C `[self-hosted, gpu]`: a host-persistent JIT runner, so a runtime base already pulled on
+    # Plane C `[self-hosted, bake-capable]`: a host-persistent JIT runner, so a runtime base already pulled on
     # a prior bake is a local cache hit (assemble+push only, no cold base pull). Access control = the
     # vivijure-gpu-builds runner-group allowlist + the backend-v* tag ruleset (backend-release-tags);
     # a fork PR cannot create a backend-v* tag. A cold or stale local cache degrades to a one-time
     # base pull -- SLOW, never WRONG. Accelerator only; identical output.
-    runs-on: [self-hosted, gpu]
+    runs-on: [self-hosted, bake-capable]
     timeout-minutes: 180
     steps:
       - name: Checkout repository
@@ -192,7 +192,7 @@ jobs:
       # every release until now. A provider NAME is not a working provider -- onnxruntime-gpu 1.28.0
       # imports cleanly, advertises CUDAExecutionProvider, and still hands back a CPU session against
       # this CUDA 12.8 base. Only creating a real session catches it, and that needs a real GPU. This
-      # job already runs on Plane C [self-hosted, gpu], so the hardware was under the job the whole
+      # job already runs on Plane C [self-hosted, bake-capable], so the hardware was under the job the whole
       # time; the flag is what lets the check reach it. Both Plane C boxes have the nvidia container
       # runtime registered in dockerd (verified 2026-07-31), so either can serve this step.
       #
