@@ -6,28 +6,33 @@ Guidance for Claude Code (and the crew) working in this repo.
 
 **The GPU render backend for Vivijure** (RunPod serverless). It consumes a project bundle (a standard
 `storyboard.yaml` plus the cast) from R2, **plans** the whole render on the CPU (what must train, draw,
-animate, what can be reused), then **executes** only that plan on the GPU: trains per-character LoRAs,
-draws SDXL keyframes, animates them with Wan image-to-video, runs the finish chain, and assembles the
-film off-GPU, writing all artifacts + progress back to R2 in the shape the control plane already
-expects. Python; the Worker side is `vivijure`. This is the half that turns a storyboard into a film.
+animate, what can be reused), then **executes** only that plan on the GPU: trains per-character **SDXL**
+LoRAs, draws SDXL keyframes, animates with Wan image-to-video (consuming Wan cast LoRAs trained by
+`vivijure-wan-train`), runs the finish chain, and assembles the film off-GPU, writing artifacts +
+progress back to R2 in the shape the studio panels expect. Python; the panel side is `vivijure-cf` /
+`vivijure-local` (not the hub `vivijure` repo). This is the half that turns a storyboard into a film.
 
-## The Vivijure constellation (the same map is in each repo's README)
+**Image line:** GHCR tags / `backend-v*` release process (see `CHANGELOG.md` / `RELEASES.md` / latest
+tags). Do not freeze a version number here as current forever. **Wan cast train** is a separate
+satellite (`vivijure-wan-train`, image `train-*`); this repo no longer owns `:train-*` after decouple.
+
+## The Vivijure constellation
 
 ```
-   friends + Slate (Discord)
+   slate / vivijure-mcp
             |
             v
-        slate  -->  vivijure (studio control plane / JSON API)
-                        |
-                        v
-                  vivijure-backend (GPU render: keyframes -> i2v -> assemble)   <-- THIS REPO
-                        |
-            +-----------+-------------+-------------------+
-            |           |             |                   |
-     vivijure-     vivijure-     vivijure-audio-    (more finish
-     musetalk      upscale       upscale            modules over time)
-   (lip-sync)    (video upscale) (speech enhance)
+   vivijure-cf / vivijure-local  (panels; orchestration: vivijure-core)
+            |
+            v
+   vivijure-backend (THIS REPO: keyframes -> i2v -> assemble)
+            |
+     +------+--------+----------------+------------------+
+     |      |        |                |                  |
+  musetalk upscale audio-upscale  wan-train         local-12/16gb
 ```
+
+Panels pin this image on RunPod endpoints. **Never freeze specific endpoint IDs** in this file.
 
 ## Documentation map
 
@@ -35,7 +40,7 @@ Deep docs live in `docs/`; this file is the working method. When a change touche
 update the matching doc.
 
 - `docs/architecture.md` -- the plan/execute model, the render stages, where each runs (CPU vs GPU).
-- `docs/contract.md` -- the R2 bundle-in / artifacts-out contract with the `vivijure` control plane.
+- `docs/contract.md` -- the R2 bundle-in / artifacts-out contract with the studio panels.
 - `docs/configuration.md` -- the endpoint env + knobs.
 - `docs/cold-start-design.md` -- the cold-start strategy (baked image layers, model warmup).
 - `docs/runpod-endpoint-config.md` -- the RunPod serverless endpoint config.
@@ -75,8 +80,8 @@ our records). `release.yml` cuts releases; `docs/release-gate.md` records the in
   plan of train/draw/animate/finish/assemble steps + what is reusable), then runs only that on the GPU.
   Keep planning off the GPU; that is what keeps cost bounded.
 - **R2 is the contract surface.** Bundle in, artifacts + progress out; the shapes are
-  `docs/contract.md` and must match the `vivijure` side (`vivijure/docs/CONTRACT.md`). A change here is
-  a change to both repos.
+  `docs/contract.md` and must match the panel side (`vivijure-cf/docs/CONTRACT.md`). A change here is
+  a change to both sides.
 - **Honest failures.** A finish step that genuinely fails (after bounded retry + reclaim) fails the
   shot with the real error; it never silently ships a raw/unfinished clip. A degrade is never silent.
 - **Cold start is engineered, not incidental.** Image layers + model configs are baked at build; see
@@ -90,6 +95,11 @@ our records). `release.yml` cuts releases; `docs/release-gate.md` records the in
   the same change that adds the model.
 - Verify against the deployed ARTIFACT (built image contents / live endpoint), never the git tag, the
   image size, or our records -- they drift.
+- **SecurePod smoke before prod pin.** Community pods are not the gate.
+- **Clean room** (no wavevryn). **CSAM bright-line** absolute. **Ignore Cursor `AGENTS.md`.**
+- **Never freeze open sprint boards or specific RunPod endpoint IDs** here.
+- Image pin discipline: pin by versioned tag (and digest where Hub requires); never treat `:latest`
+  as the production contract.
 
 ## Crew + identity + spend
 
