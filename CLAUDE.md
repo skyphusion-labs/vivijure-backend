@@ -95,20 +95,46 @@ our records). `release.yml` cuts releases; `docs/release-gate.md` records the in
   the same change that adds the model.
 - Verify against the deployed ARTIFACT (built image contents / live endpoint), never the git tag, the
   image size, or our records -- they drift.
-- **SecurePod smoke before prod pin.** Community pods are not the gate.
 - **Clean room** (no wavevryn). **CSAM bright-line** absolute. **Ignore Cursor `AGENTS.md`.**
 - **Never freeze open sprint boards or specific RunPod endpoint IDs** here.
 - Image pin discipline: pin by versioned tag (and digest where Hub requires); never treat `:latest`
   as the production contract.
+
+## Pre-prod GPU test spend (Conrad, 2026-08-06) -- do not thrift here
+
+**Never hold back RunPod spend when proving an image before it is production-pinned.** A green
+Plane C bake is not a proven render. Pre-prod verification is **expected spend**, not an escalation.
+Community pods are not the gate.
+
+Pick **one** of these for the gate (either is fine; pick what fits the change):
+
+| Path | How | When |
+| --- | --- | --- |
+| **SecurePod** | Spin a SecurePod (or equivalent dedicated pod) on the candidate image; run selftest / short real job; verify the **artifact** (outputs, logs, structured events). | Prefer for isolated image proof without touching prod traffic. |
+| **Serverless endpoint** | Deploy/pin the candidate image on the relevant serverless endpoint, set **active workers (min idle / `workersMin`) to 1** so cold-start does not fake a hang or a false timeout, run the same selftest / short job, verify the artifact. | Prefer when the proof needs the real endpoint shape (env, network, bindings). |
+
+### HARD: restore workers after serverless test
+
+If you raised the serverless endpoint's active / min workers **above 0** for testing, **bring it
+back to 0 when the test is done** (same session, before you walk away). Leaving `workersMin` /
+active workers at 1+ burns idle GPU money with no proof benefit. Max workers can stay at the
+prod pin; the restore rule is about the **floor that keeps a warm worker** (min/active = 0 in
+steady state unless Conrad ruled otherwise for prod capacity).
+
+Do **not** skip the restore because "we might test again tomorrow." Re-raise to 1 at the next
+test if needed. Document the before/after values in the PR or runlog when you change them.
+
+Never trust: CI green alone, bake green alone, or image size alone.
 
 ## Crew + identity + spend
 
 - Crew work as their own identity: FIRST command in any op is `sudo -u <member> bash -lc '<ops>'` (own
   `$HOME`, own clone, own creds); commits/PRs land under `skyphusion-<member>`. This is the backend lane
   (Rollins owns the render contracts).
-- **GPU / RunPod render spend is GATED.** Spinning a GPU endpoint or a render run costs money; ration it
-  per the vivijure render-spend rule and confirm before a non-trivial GPU spend. (This is the one place
-  the "execute autonomously" default yields to the spend gate.)
+- **Pre-prod GPU proof spend is authorized** (SecurePod or serverless workersMin=1). Do not thrift out
+  of the proof. **Serverless min/active workers back to 0 when the test ends.** Routine prod render
+  volume still follows estate cost discipline; the thrift ban is about **not skipping** the pre-prod
+  gate, not about unbounded open-ended farm spend.
 - Operating memory: this repo's per-project memory (`vivijure` project segments cover the backend);
   load it before acting.
 
