@@ -11,7 +11,7 @@ name: Build seed image to GHCR (#537)
 # or per-tag event) -- so it is never fork-reachable and never runs untrusted code on the larger runner
 # (design law #5: snapshot/large-runner jobs are dispatch-gated only, larger runners bill).
 #
-# Runner: Plane C `[self-hosted, gpu]` (vivijure-gpu-builds; fc#754). CPU-only bake on the GPU
+# Runner: Plane C `[self-hosted, bake-capable]` (vivijure-gpu-builds; fc#754). CPU-only bake on the GPU
 # pool (label is the pool membership). Stages seed from R2, reconstructs HF-cache symlinks,
 # bin-packs, writes the union-keyed SHA-256 manifest, asserts a real weight set, builds and pushes.
 # Consuming Dockerfile pins tag+digest. GH runner-snapshot lane is RETIRED.
@@ -72,10 +72,10 @@ jobs:
     # inputs.runner_host == 'any' selects the literal string 'self-hosted' as the third label,
     # yielding ["self-hosted","gpu","self-hosted"]. runs-on label matching is a set
     # intersection, so a duplicate label is byte-identical in effect to today's
-    # [self-hosted, gpu] -- the default path is unchanged.
+    # [self-hosted, bake-capable] -- the default path is unchanged.
     #
     # type: choice (not free text) closes the JSON-injection path on the format() call below.
-    runs-on: ${{ fromJSON(format('["self-hosted","gpu","{0}"]',
+    runs-on: ${{ fromJSON(format('["self-hosted","bake-capable","{0}"]',
                   inputs.runner_host == 'any' && 'self-hosted' || inputs.runner_host)) }}
     timeout-minutes: 180
     steps:
