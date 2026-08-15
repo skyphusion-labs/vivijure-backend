@@ -191,7 +191,7 @@ def fake_finish(monkeypatch):
     import types as _t
     from vivijure_backend import finish as _finish_mod
 
-    def _fake_finish_clip(shot_id, in_path, out_path, server, params=None):
+    def _fake_finish_clip(shot_id, in_path, out_path, server, params=None, deadline=None):
         Path(out_path).write_bytes(b"MP4")
         return _t.SimpleNamespace(interpolated=True, face_restored=False, out_fps=32, frames_out=160)
 

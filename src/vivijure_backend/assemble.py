@@ -162,9 +162,9 @@ def probe_duration(path: Path) -> float | None:
         return None
 
 
-def probe_has_audio(path: Path) -> bool:
+def probe_has_audio(path: Path, *, timeout: float | None = None) -> bool:
     """Whether the file has an audio stream (False if ffprobe fails; it logs the stderr)."""
-    out = subprocess.run(ffprobe_has_audio_cmd(path), capture_output=True, text=True)
+    out = subprocess.run(ffprobe_has_audio_cmd(path), capture_output=True, text=True, timeout=timeout)
     if out.returncode != 0:
         log.warning("ffprobe audio check failed for %s (rc=%d): %s", path, out.returncode, out.stderr.strip()[-500:])
         return False
