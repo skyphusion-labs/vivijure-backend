@@ -20,6 +20,7 @@ from typing import Protocol, runtime_checkable
 
 from ..assemble import ClipInput, assemble, build_manifest, order_for_storyboard, write_manifest
 from ..contract import Bundle, RenderRequest, RenderResult, Keyframe, Clip
+from ..finish import Deadline, FinishDeadlineExceeded
 from ..orchestrator import Action, RenderPlan, plan as make_plan, resolve_lora_family, validate
 from . import keys
 from .progress import NullEmitter, ProgressEmitter
@@ -399,6 +400,7 @@ def run_finish_job(
     workdir: Path,
     job_id: str = "local",
     on_progress=None,
+    deadline: Deadline | None = None,
 ) -> dict:
     """Standalone finish pass: download a clip from R2, run RIFE interpolation and/or face restore,
     upload the result, return the output key. No bundle, no pipeline, no Wan needed.
@@ -436,17 +438,28 @@ def run_finish_job(
     local_in = workdir / "input.mp4"
     local_out = workdir / "output.mp4"
 
+    if deadline is not None:
+        deadline.check("fetch_clip")
     try:
         store.get_file(clip_key_in, local_in)
     except Exception as e:
         raise HarnessError(f"finish_clip: could not fetch clip {clip_key_in!r}: {e}")
+    if deadline is not None:
+        deadline.check("fetch_clip")
 
     server = ModelServer()
-    result = finish_clip(shot_id, local_in, local_out, server, params=params)
+    result = finish_clip(shot_id, local_in, local_out, server, params=params, deadline=deadline)
 
     # keys._slug via the shared helper: the SAME slug as the full-render path, so one project
     # never scatters its clips across two slug spellings ("My  Film" -> My_Film everywhere).
     clip_key_out = keys.finished_clip_key(project, shot_id)
+    # Checked BEFORE the upload and never during it: once the artifact exists the GPU time is
+    # already banked, and aborting mid-PUT would discard finished work for nothing. Past the budget
+    # HERE we still degrade, because the ceiling has to mean what it says and core has moved on.
+    # The PUT itself is bounded by botocore socket timeouts (harness/r2.py sets retries only), NOT
+    # by this guard -- see docs/finish-deadline.md.
+    if deadline is not None:
+        deadline.check("upload")
     store.put_file(local_out, clip_key_out)
     # #583 provenance: stamp the core-computed param-hash to `<clip_key_out>.hash` AFTER the artifact
     # (artifact first, sidecar last -- the only safe order; studio CONTRACT.md 3.3.1). Opaque: write
@@ -587,6 +600,48 @@ def _wants_i2v_prefetch(action: str) -> bool:
     return str(action) not in ("finish_clip", "train_lora")
 
 
+def _finish_deadline_degrade(expiry: FinishDeadlineExceeded, *, project: str, job_id: str,
+                             store=None, on_progress=None) -> dict:
+    """Turn a finish wall-clock expiry into a STRUCTURED soft degrade. Returns data, never raises.
+
+    The shape is dictated by the CONSUMER, vivijure-cf modules/_shared/finish-soft-degrade.ts, read
+    at cf 219cd6b6352a0535a64d76fc228c41fd6c43ee06:
+
+      - ok: False is the entire discriminator. softDegradeInCompletedOutput requires an object
+        output whose ok is exactly false. A genuine crash leaves NO structured output and keeps
+        failing loud, so this widens nothing: only an expiry reaches here.
+      - detail is the FIRST key its degradeReason reads, and it slices to 120 characters.
+      - NO top-level error key. RunPod lifts a top-level error in a handler RETURN into a job-level
+        FAILED envelope, which forces recovery through the FAILED branch for no gain; detail keeps
+        the envelope COMPLETED and the output arrives intact.
+
+    The cf module builds the passthrough TAG itself, from its own stored input key; this reason
+    only becomes the human note in FinishOutput.degraded. KNOWN LIMIT: that tag is the generic
+    passthrough:backend-soft-degrade for every cause, so the CAUSE is not machine-visible
+    downstream (vivijure-core#226, cf#595). Not fixable from this repo.
+
+    A raise instead of this return would leave no structured output, classify deterministic in
+    vivijure-core and fail the WHOLE render after the GPU time is already banked -- strictly worse
+    than the unbounded hang this guard replaces, which core phase ceiling at least recovers."""
+    import json
+    print("@event finish_deadline_exceeded " + json.dumps({
+        "stage": expiry.stage,
+        "elapsed_seconds": round(expiry.elapsed, 1),
+        "budget_seconds": expiry.budget,
+        "project": project,
+        "job_id": job_id,
+    }), flush=True)
+    try:
+        # Terminal record on the R2 progress channel so the run does not sit at started forever.
+        # COMPLETE rather than error, matching the RunPod envelope, which also stays COMPLETED.
+        # Best-effort: a progress failure must NEVER change what this returns.
+        ProgressEmitter(store, project, job_id, on_progress=on_progress).complete(
+            degraded=expiry.reason, stage=expiry.stage)
+    except Exception:  # noqa: BLE001 -- diagnostics only; the degrade return is what matters
+        pass
+    return {"ok": False, "detail": expiry.reason}
+
+
 def handler(job: dict) -> dict:
     """RunPod serverless entry point. Mirrors models on a cold worker, builds the live R2
     client, runs the job through the deployed GPU pipeline, returns the response. RunPod passes
@@ -615,6 +670,19 @@ def handler(job: dict) -> dict:
     job_id = str(job.get("id") or "unknown")
     on_progress = _runpod_progress_hook(job)
 
+    # ONE wall-clock budget for the WHOLE finish_clip invocation (#422), opened HERE at the first
+    # line of the invocation so the R2 client build and the cold-start model mirror are INSIDE it
+    # and the number is a real invocation ceiling rather than a stage total. ONE shared deadline,
+    # not a timeout per step: per-step timeouts multiply, and the invocation bound is then a sum
+    # nobody computes.
+    #
+    # SCOPED TO finish_clip ALONE (#422 D). Every other action gets None, and every check here and
+    # in finish.py is guarded on deadline-is-not-None, so render / i2v_clip / train_lora / health
+    # cannot raise FinishDeadlineExceeded at all. Unchanged by CONSTRUCTION, not by a promise.
+    action_in = str(payload.get("action", "render"))
+    deadline = Deadline.start() if action_in == "finish_clip" else None
+    store = None  # bound below; named here so the expiry handler can pass it to the emitter
+
     # Everything below runs inside the quiesce guard (#90): on EVERY exit -- return or raise --
     # in-flight progress-mirror posts are drained before the SDK posts the terminal result to
     # the same /job-done endpoint, so a straggler mirror can never race the finalization.
@@ -636,11 +704,18 @@ def handler(job: dict) -> dict:
         # no run context (#90). Best-effort; a config failure above never reaches here (R2 is the
         # failure, so its own rejection can only degrade to stdout).
         job_done_diag.register(store, project, job_id)
+        if deadline is not None:
+            deadline.check("r2_client")
         try:
             mirrored = ensure_models()
         except Exception as e:
             ProgressEmitter(store, project, job_id, on_progress=on_progress).error("mirror", e)
             raise
+        # The mirror is one un-interruptible call, so it is bounded only at its EDGES: it cannot be
+        # cut short, but it can no longer be followed by compute that ignores how long it took. On
+        # the baked production image it short-circuits in milliseconds (models_mirror.is_baked).
+        if deadline is not None:
+            deadline.check("model_mirror")
 
         # Eager-start the Wan I2V pull in the background so it overlaps LoRA training: training is
         # GPU-bound with the network idle, while the pull (~120GB from R2) is network-bound. The two
@@ -667,6 +742,11 @@ def handler(job: dict) -> dict:
                            job_id=job_id, mirrored=bool(mirrored), on_progress=on_progress)
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
+    except FinishDeadlineExceeded as expiry:
+        # The ONE catch site for the guard. RETURN DATA, NEVER RAISE -- see the docstring on
+        # _finish_deadline_degrade for why a raise here is worse than the hang it replaces.
+        return _finish_deadline_degrade(expiry, project=project, job_id=job_id,
+                                        store=store, on_progress=on_progress)
     finally:
         quiesce = getattr(on_progress, "quiesce", None)
         if callable(quiesce):

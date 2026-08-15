@@ -281,7 +281,7 @@ class _EncodeRecorder:
         self.was_generator = None
         self.out_path = None
 
-    def __call__(self, frames, out_path, fps):
+    def __call__(self, frames, out_path, fps, deadline=None):
         self.was_generator = isinstance(frames, types.GeneratorType)
         self.frames = list(frames)
         self.fps = fps
@@ -347,7 +347,7 @@ def test_encoder_argv_falls_back_to_libx264():
 def test_finish_clip_restores_then_interpolates_and_encodes_uniformly(tmp_path, monkeypatch):
     rec = _EncodeRecorder()
     monkeypatch.setattr(finish, "_encode_uniform", rec)
-    monkeypatch.setattr(finish, "_source_has_audio", lambda p: False)  # audio-less source path
+    monkeypatch.setattr(finish, "_source_has_audio", lambda p, deadline=None: False)  # audio-less source path
     restorer = _RecordingRestorer()
     server = _FakeServer(interp=_FakeInterp(), restorer=restorer)
     params = FinishParams(interpolate=True, factor=2, face_restore=True,
@@ -372,7 +372,7 @@ def test_finish_clip_encodes_uniformly_even_with_no_passes_run(tmp_path, monkeyp
     # to the uniform form so the stream-copy concat survives it next to multi-frame finished clips.
     rec = _EncodeRecorder()
     monkeypatch.setattr(finish, "_encode_uniform", rec)
-    monkeypatch.setattr(finish, "_source_has_audio", lambda p: False)  # audio-less source path
+    monkeypatch.setattr(finish, "_source_has_audio", lambda p, deadline=None: False)  # audio-less source path
     server = _FakeServer(interp=_FakeInterp())
     params = FinishParams(interpolate=True, factor=4)        # interpolation requested...
     with _patched_modules(_fake_imageio(_frames(1))):
@@ -413,7 +413,7 @@ class _MuxRecorder:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, video_path, audio_src, out_path):
+    def __call__(self, video_path, audio_src, out_path, deadline=None):
         self.calls.append((video_path, audio_src, out_path))
 
 
@@ -434,7 +434,7 @@ def test_finish_clip_muxes_source_audio_back_when_present(tmp_path, monkeypatch)
     rec = _EncodeRecorder()
     mux = _MuxRecorder()
     monkeypatch.setattr(finish, "_encode_uniform", rec)
-    monkeypatch.setattr(finish, "_source_has_audio", lambda p: True)
+    monkeypatch.setattr(finish, "_source_has_audio", lambda p, deadline=None: True)
     monkeypatch.setattr(finish, "_mux_audio", mux)
     server = _FakeServer(interp=_FakeInterp())
     params = FinishParams(interpolate=True, factor=2)
@@ -457,7 +457,7 @@ def test_finish_clip_skips_audio_step_when_source_is_silent(tmp_path, monkeypatc
     rec = _EncodeRecorder()
     mux = _MuxRecorder()
     monkeypatch.setattr(finish, "_encode_uniform", rec)
-    monkeypatch.setattr(finish, "_source_has_audio", lambda p: False)
+    monkeypatch.setattr(finish, "_source_has_audio", lambda p, deadline=None: False)
     monkeypatch.setattr(finish, "_mux_audio", mux)
     server = _FakeServer(interp=_FakeInterp())
     params = FinishParams(interpolate=True, factor=2)
@@ -472,10 +472,10 @@ def test_finish_clip_skips_audio_step_when_source_is_silent(tmp_path, monkeypatc
 def test_finish_clip_fails_loud_when_the_audio_mux_fails(tmp_path, monkeypatch):
     # Honest failure (#245): if the source had audio and the mux fails, FAIL the shot -- never
     # silently ship a video-only clip when audio was present.
-    def _boom(video_path, audio_src, out_path):
+    def _boom(video_path, audio_src, out_path, deadline=None):
         raise RuntimeError("finish audio mux failed (rc=1): moov atom not found")
     monkeypatch.setattr(finish, "_encode_uniform", _EncodeRecorder())
-    monkeypatch.setattr(finish, "_source_has_audio", lambda p: True)
+    monkeypatch.setattr(finish, "_source_has_audio", lambda p, deadline=None: True)
     monkeypatch.setattr(finish, "_mux_audio", _boom)
     server = _FakeServer(interp=_FakeInterp())
     params = FinishParams(interpolate=True, factor=2)
