@@ -22,6 +22,8 @@ pipeline. The frame / fps math and the run/skip decisions are pure and CPU-teste
 """
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +35,124 @@ MAX_FACTOR = 8
 
 # Tri-state warm-worker cache for the NVENC probe: None = unprobed, True/False = h264_nvenc usable.
 _NVENC = None
+
+
+# --------------------------------------------------------------------------- wall-clock guard
+
+# ONE wall-clock budget for a WHOLE finish_clip invocation (#422). Before this, the only timeouts
+# in this file were the two on the cached NVENC capability probe (_probe_nvenc), which is not the
+# compute path: a stalled ffmpeg at the encode pipe or the mux, or a spinning RIFE recursion, held
+# the GPU worker until something outside this repo gave up.
+#
+# WHY 420 SECONDS. Three bounds, and the default has to clear all three.
+#
+#   1. PLATFORM. The endpoint serving this image reports timeout: 0 (RunPod v2 per-request
+#      execution timeout, milliseconds). What 0 MEANS is not settled: the queue-endpoint docs give
+#      the execution timeout as default 600s, range 5s..7 days, while the Flash SDK gives
+#      execution_timeout_ms default 0 = no limit -- a DIFFERENT product surface, and this endpoint
+#      is type QUEUE. Control for the reading: of the 6 endpoints on the account, 5 report 0 and
+#      vivijure-blender reports 600000, so 0 is a distinct stored state and the field can report a
+#      real value. That control does not settle the SEMANTICS. Staying strictly under 600s makes
+#      the guard fire under BOTH readings, so the open question cannot turn it into decoration.
+#      See docs/finish-deadline.md.
+#
+#   2. CORE. vivijure-core retries a finish step FINISH_STEP_MAX_ATTEMPTS = 3 times, and a retry
+#      moves its attempts counter, never the idx progress marker, so a guard G costs up to 3*G of
+#      wall clock with no marker movement. Core raises the phase deadline to 3*G when that exceeds
+#      its PHASE_HARD_DEADLINE_SECONDS floor of 5400s; 3*420 = 1260s leaves the floor untouched.
+#
+#   3. THE WORK. The largest clip that can reach this stage is 256 frames (config clamps num_frames
+#      to 1..256; the default is 81, five seconds at 16 fps). 256 frames at 8x with face restore is
+#      256 restores plus 255*7 = 1785 RIFE midpoints, which is minutes on the Hopper/Blackwell
+#      pools this endpoint runs, not hours. 420s is multiples of the worst LEGAL configuration.
+DEFAULT_MAX_SECONDS = 420
+MAX_SECONDS_ENV = "VJ_FINISH_MAX_SECONDS"
+
+
+def max_finish_seconds(env: dict | None = None) -> float:
+    """The finish wall-clock budget in seconds: VJ_FINISH_MAX_SECONDS when it parses to a positive
+    number, DEFAULT_MAX_SECONDS otherwise. Configurable rather than hardcoded because the ceiling a
+    door enforces is deployment state, not a source constant (vivijure-core modules/types.ts says so
+    for max_invocation_seconds). There is deliberately NO value that turns the guard OFF: junk, an
+    empty string, zero and negatives all fall back to the default, because a guard an operator can
+    disable by typo is the defect this closes, not a feature. Pure; env defaults to os.environ."""
+    e = os.environ if env is None else env
+    raw = e.get(MAX_SECONDS_ENV)
+    if raw is None:
+        return float(DEFAULT_MAX_SECONDS)
+    try:
+        v = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return float(DEFAULT_MAX_SECONDS)
+    return v if v > 0 else float(DEFAULT_MAX_SECONDS)
+
+
+class FinishDeadlineExceeded(BaseException):
+    """The finish wall-clock budget ran out. Carries the stage, the elapsed seconds and the budget.
+
+    Derives from BaseException, NOT Exception, ON PURPOSE. This path carries deliberate broad
+    except-Exception handlers that are correct for their own job and would silently eat an expiry:
+    _restore_frame (a frame the restorer chokes on passes through untouched), _tick (progress is
+    best-effort), _probe_nvenc, and several in the harness. A guard a pre-existing handler swallows
+    is a guard that is present, tested, and INERT on the exact path it exists for. Subclassing
+    BaseException makes that structurally impossible instead of something every future handler on
+    this path has to remember, which is the same reason KeyboardInterrupt and SystemExit sit there.
+
+    It is caught in exactly ONE place, harness.handler.handler, which turns it into a structured
+    soft degrade. It must never escape as a raise: a raise leaves no structured output, classifies
+    deterministic in vivijure-core and fails the WHOLE render after the GPU time is already banked,
+    which is strictly worse than the unbounded hang this replaces (that one the phase ceiling at
+    least recovers)."""
+
+    def __init__(self, stage: str, elapsed: float, budget: float) -> None:
+        self.stage = str(stage)
+        self.elapsed = float(elapsed)
+        self.budget = float(budget)
+        # The consumer caps the degrade reason at 120 characters (vivijure-cf
+        # modules/_shared/finish-soft-degrade.ts degradeReason), so the guard name, the stage and
+        # both numbers have to fit inside the first 120. This form is ~70; tested.
+        self.reason = (f"finish_clip deadline: {self.elapsed:.1f}s of {self.budget:.0f}s"
+                       f" budget at stage {self.stage}")
+        super().__init__(self.reason)
+
+
+@dataclass
+class Deadline:
+    """One monotonic budget shared by every stage of one finish_clip invocation.
+
+    ONE deadline established at entry and checked between stages, rather than a per-step timeout:
+    per-step timeouts multiply, so N steps of T each bound the invocation at N*T, and the number a
+    door could honestly declare is the sum nobody computes. A shared deadline means the invocation
+    ceiling IS the budget.
+
+    time.monotonic, never time.time: a wall-clock step (ntp, a suspended worker) must not shorten or
+    extend a budget."""
+
+    budget_seconds: float
+    started_at: float
+
+    @classmethod
+    def start(cls, budget_seconds: float | None = None, env: dict | None = None) -> "Deadline":
+        """Open a budget now. budget_seconds overrides the env/default resolution (tests, callers
+        that already resolved it); everything else reads max_finish_seconds."""
+        b = max_finish_seconds(env) if budget_seconds is None else float(budget_seconds)
+        return cls(budget_seconds=b, started_at=time.monotonic())
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started_at
+
+    def remaining(self) -> float:
+        """Seconds left, floored at 0 so it is always a legal subprocess timeout / Timer interval."""
+        return max(0.0, self.budget_seconds - self.elapsed())
+
+    def expired(self) -> bool:
+        return self.elapsed() >= self.budget_seconds
+
+    def check(self, stage: str) -> None:
+        """Raise FinishDeadlineExceeded if the budget is gone. Called at every stage boundary and
+        inside both per-frame loops, so the reported stage names where the time actually went."""
+        if self.expired():
+            raise FinishDeadlineExceeded(stage, self.elapsed(), self.budget_seconds)
 
 
 # --------------------------------------------------------------------------- pure helpers
@@ -132,6 +252,7 @@ def finish_clip(
     *,
     params: FinishParams | None = None,
     progress_cb=None,
+    deadline: "Deadline | None" = None,
 ) -> FinishResult:
     """Finish one animated clip: decode -> (face restore) -> (interpolate) -> uniform re-encode.
 
@@ -170,9 +291,19 @@ def finish_clip(
 
     import imageio.v3 as iio  # deferred: keep this module CPU-importable
 
+    if deadline is not None:
+        deadline.check("start")
     meta = iio.immeta(in_path, plugin="pyav")
     src_fps = int(round(meta.get("fps", 16))) or 16
-    frames = list(iio.imiter(in_path, plugin="pyav"))  # source frames (bounded: one i2v clip)
+    # Consume the decode ITERATOR rather than list()-ing it, so the budget is checked per decoded
+    # frame. list() is ONE un-interruptible call: a decoder that stalls between frames would sit
+    # inside it with no check reachable. A stall INSIDE a single frame decode is still not bounded
+    # here; see docs/finish-deadline.md, coverage row decode.
+    frames = []
+    for _fr in iio.imiter(in_path, plugin="pyav"):  # source frames (bounded: one i2v clip)
+        frames.append(_fr)
+        if deadline is not None:
+            deadline.check("decode")
     frames_in = len(frames)
 
     face_restored = False
@@ -180,14 +311,18 @@ def finish_clip(
         # A configured restorer that cannot load is fatal (no `_safe` swallow): the loader RAISES and
         # we let it propagate. Restore the whole clip through ONE restorer instance for a stable
         # identity (see `_restore_clip`); per-frame independent restoration causes identity flicker.
+        if deadline is not None:
+            deadline.check("restorer_load")
         restorer = server.face_restorer(cfg.face_restore_backend)
-        frames = _restore_clip(restorer, frames, cfg, progress_cb)
+        frames = _restore_clip(restorer, frames, cfg, progress_cb, deadline=deadline)
         face_restored = True
 
     interp = None
     passes = 0
     interpolated = False
     if cfg.interpolate and len(frames) > 1:
+        if deadline is not None:
+            deadline.check("interpolator_load")
         interp = server.frame_interpolator()  # configured-but-unloadable -> raises, not a silent skip
         passes = interpolation_passes(cfg.factor)
         interpolated = passes > 0
@@ -200,13 +335,14 @@ def finish_clip(
     # MuseTalk muxes the dialogue audio onto `in_path`; without this step it is silently dropped and
     # the shot -- plus every clip after it in the stream-copy concat -- plays silent (#240). RIFE
     # keeps wall-clock duration fixed, so the source audio lines up 1:1 with the finished video.
-    has_audio = _source_has_audio(in_path)
+    has_audio = _source_has_audio(in_path, deadline=deadline)
     encode_target = out_path.with_name(out_path.stem + ".noaudio" + out_path.suffix) if has_audio else out_path
-    _encode_uniform(_finished_stream(interp, frames, passes, progress_cb), encode_target, out_fps)
+    _encode_uniform(_finished_stream(interp, frames, passes, progress_cb, deadline=deadline),
+                    encode_target, out_fps, deadline=deadline)
     if has_audio:
         # Honest failure (#245): a mux that fails RAISES; never ship a video-only clip when the
         # source carried audio (a silent drop is exactly the defect this fixes).
-        _mux_audio(encode_target, in_path, out_path)
+        _mux_audio(encode_target, in_path, out_path, deadline=deadline)
         encode_target.unlink(missing_ok=True)
     return FinishResult(
         shot_id=shot_id, path=out_path, src_fps=src_fps, out_fps=out_fps,
@@ -230,7 +366,7 @@ def _between(interp, a, b, depth):
     yield from _between(interp, mid, b, depth - 1)
 
 
-def _finished_stream(interp, frames, passes, progress_cb=None):
+def _finished_stream(interp, frames, passes, progress_cb=None, deadline=None):
     """Yield the finished frame sequence lazily: each source frame followed by the interpolated
     frames that bridge it to the next (none when interpolation is off / `passes` == 0). Only a small
     per-pair recursion window is live at once, so the 8x-expanded sequence is never all in RAM.
@@ -243,6 +379,13 @@ def _finished_stream(interp, frames, passes, progress_cb=None):
             continue
         yield prev
         if interp is not None and passes > 0:
+            # Per SOURCE PAIR: one pair is at most 2**passes - 1 RIFE calls (7 at the 8x cap), so
+            # this bounds the recursion without a check inside _between. A single
+            # interp.interpolate call that never returns is NOT bounded here
+            # (docs/finish-deadline.md, row interpolate). The check sits BEFORE the yield-from and
+            # never inside _tick, which swallows every exception from the progress callback.
+            if deadline is not None:
+                deadline.check("interpolate")
             yield from _between(interp, prev, cur, passes)
             _tick(progress_cb, "interpolate", i, total)
         prev = cur
@@ -250,7 +393,7 @@ def _finished_stream(interp, frames, passes, progress_cb=None):
         yield prev
 
 
-def _restore_clip(restorer, frames, cfg: FinishParams, progress_cb=None):
+def _restore_clip(restorer, frames, cfg: FinishParams, progress_cb=None, deadline=None):
     """Face-restore a whole clip through ONE restorer instance, in clip order. Restoring every frame
     with the SAME loaded model (rather than re-loading or re-detecting per call) keeps the relocked
     identity consistent across the clip, which is what avoids the frame-to-frame identity flicker a
@@ -259,6 +402,12 @@ def _restore_clip(restorer, frames, cfg: FinishParams, progress_cb=None):
     n = len(frames)
     out = []
     for i, f in enumerate(frames):
+        # BEFORE _restore_frame, never inside it: _restore_frame swallows Exception by design so a
+        # bad frame passes through untouched, and a check placed inside it would be eaten by that
+        # handler. (FinishDeadlineExceeded is a BaseException so it would survive anyway; keeping
+        # the check outside means the guard does not DEPEND on that.)
+        if deadline is not None:
+            deadline.check("face_restore")
         out.append(_restore_frame(restorer, f, cfg))
         _tick(progress_cb, "face_restore", i + 1, n)
     return out
@@ -327,7 +476,7 @@ def _frame_bytes(frame):
     return np.ascontiguousarray(frame, dtype=np.uint8).tobytes()
 
 
-def _encode_uniform(frames, out_path: Path, fps: int) -> None:
+def _encode_uniform(frames, out_path: Path, fps: int, deadline=None) -> None:
     """Encode an iterable of HxWx3 uint8 rgb frames to `out_path` at a fixed (codec, pix_fmt, fps)
     through an ffmpeg rawvideo pipe, so every finished clip in a render shares the same parameters
     and the downstream stream-copy concat in `assemble` stays valid (no per-clip re-encode fallback).
@@ -344,6 +493,8 @@ def _encode_uniform(frames, out_path: Path, fps: int) -> None:
     Frames are streamed to the pipe as produced, so an 8x-interpolated clip is never fully resident."""
     import subprocess  # deferred: keep this module CPU-importable
 
+    import threading  # deferred: only the watchdog below needs it
+
     frames = iter(frames)
     try:
         first = next(frames)
@@ -352,23 +503,69 @@ def _encode_uniform(frames, out_path: Path, fps: int) -> None:
     height, width = first.shape[0], first.shape[1]
     encoder = "h264_nvenc" if _nvenc_available() else "libx264"
     proc = subprocess.Popen(_encoder_argv(out_path, width, height, fps, encoder), stdin=subprocess.PIPE)
+    # A per-frame check CANNOT interrupt a BLOCKED write. If ffmpeg stalls, its stdin pipe buffer
+    # fills and proc.stdin.write never returns, so control never reaches the next check; proc.wait
+    # has the same shape. ONE watchdog covers both: at expiry it kills ffmpeg, the blocked write
+    # fails BrokenPipeError and wait returns. Without it the guard would be present, tested and
+    # INERT on the single most likely hang in this file, which is the defect #422 is about.
+    watchdog = None
+    if deadline is not None:
+        watchdog = threading.Timer(deadline.remaining(), proc.kill)
+        watchdog.daemon = True
+        watchdog.start()
     try:
-        proc.stdin.write(_frame_bytes(first))
-        for fr in frames:
-            proc.stdin.write(_frame_bytes(fr))
+        try:
+            proc.stdin.write(_frame_bytes(first))
+            for fr in frames:
+                if deadline is not None:
+                    deadline.check("encode")
+                proc.stdin.write(_frame_bytes(fr))
+        except BrokenPipeError:
+            # A watchdog-killed ffmpeg looks exactly like a crashed one. If the budget is gone it
+            # WAS the watchdog and the expiry is the honest report; otherwise re-raise the real
+            # encoder failure unchanged.
+            if deadline is not None:
+                deadline.check("encode")
+            raise
+        finally:
+            try:
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+            rc = proc.wait()
     finally:
-        proc.stdin.close()
-        rc = proc.wait()
+        if watchdog is not None:
+            watchdog.cancel()
+    # The expiry OUTRANKS the exit code: a killed encoder reports a nonzero rc, and reporting that
+    # as an encode failure would hide the cause AND fail the render loud instead of degrading.
+    if deadline is not None:
+        deadline.check("encode")
     if rc != 0:
         raise RuntimeError(f"finish encode failed (encoder={encoder}, rc={rc})")
 
 
-def _source_has_audio(path: Path) -> bool:
+def _source_has_audio(path: Path, deadline=None) -> bool:
     """Whether the source clip carries an audio stream that must survive the finish re-encode.
     Reuses the `assemble` probe so audio detection is defined once for the whole backend; the
-    deferred import keeps this module CPU-importable."""
+    deferred import keeps this module CPU-importable.
+
+    The probe is an ffprobe subprocess and had NO timeout, so it was a FIFTH untimed subprocess on
+    this path -- reached from here, which is why the four counted inside finish.py missed it. It
+    gets the remaining budget. probe_has_audio keeps its no-timeout DEFAULT, so the render/assemble
+    callers are byte-identical (#422 D)."""
+    import subprocess  # deferred: keep this module CPU-importable
     from .assemble import probe_has_audio  # deferred: keep this module CPU-importable
-    return probe_has_audio(path)
+    if deadline is None:
+        return probe_has_audio(path)
+    deadline.check("probe_audio")
+    try:
+        return probe_has_audio(path, timeout=deadline.remaining())
+    except subprocess.TimeoutExpired:
+        # subprocess.run kills the child on timeout, so the worker is released either way. The
+        # budget is what ran out; report THAT, not a probe failure. NEVER return False here: a
+        # false negative silently drops the dialogue track (#240).
+        deadline.check("probe_audio")
+        raise
 
 
 def _mux_audio_argv(video_path: Path, audio_src: Path, out_path: Path) -> list[str]:
@@ -382,13 +579,24 @@ def _mux_audio_argv(video_path: Path, audio_src: Path, out_path: Path) -> list[s
             "-map", "0:v", "-map", "1:a?", "-c", "copy", str(out_path)]
 
 
-def _mux_audio(video_path: Path, audio_src: Path, out_path: Path) -> None:
+def _mux_audio(video_path: Path, audio_src: Path, out_path: Path, deadline=None) -> None:
     """Remux the finished video-only clip with `audio_src`'s audio (`-c copy`) into `out_path`.
     Honest failure (#245): a mux that fails RAISES rather than silently shipping a video-only clip
     when the source carried audio -- the exact silent drop this fixes."""
     import subprocess  # deferred: keep this module CPU-importable
-    proc = subprocess.run(_mux_audio_argv(video_path, audio_src, out_path),
-                          capture_output=True, text=True)
+    if deadline is None:
+        proc = subprocess.run(_mux_audio_argv(video_path, audio_src, out_path),
+                              capture_output=True, text=True)
+    else:
+        deadline.check("mux_audio")
+        try:
+            proc = subprocess.run(_mux_audio_argv(video_path, audio_src, out_path),
+                                  capture_output=True, text=True, timeout=deadline.remaining())
+        except subprocess.TimeoutExpired:
+            # subprocess.run kills the child, so a stalled mux never holds the worker past the
+            # budget. Report the expiry, not a mux failure.
+            deadline.check("mux_audio")
+            raise
     if proc.returncode != 0:
         raise RuntimeError(f"finish audio mux failed (rc={proc.returncode}): {proc.stderr.strip()[-500:]}")
 
