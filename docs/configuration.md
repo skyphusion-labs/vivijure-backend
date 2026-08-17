@@ -214,6 +214,8 @@ image (see [operations.md](operations.md#environment)); the R2 credential is the
 | `HF_HOME` | `/opt/models/hf-cache` | HuggingFace cache the mirror fills (read offline). |
 | `HF_HUB_OFFLINE` / `TRANSFORMERS_OFFLINE` / `HF_DATASETS_OFFLINE` | `1` | Read weights from the local mirror, never the Hub. |
 | `R2_ENDPOINT` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET` | -- | R2 credentials (the one runtime secret; `R2_BUCKET` defaults to `vivijure`). |
+| `R2_ALLOWED_ENDPOINT_HOSTS` | (empty) | Optional comma-separated extra hosts a job-supplied `r2.endpoint` may use, on top of `*.r2.cloudflarestorage.com`. IPs and metadata hosts in this list are ignored. |
+| `CLOUDFLARE_ACCOUNT_ID` | (empty) | When set, also allows `https://<account>.r2.cloudflarestorage.com` as a job-supplied endpoint (the documented account S3 API shape). |
 
 ## See also
 

@@ -32,7 +32,7 @@ from .harness.progress import NullEmitter
 from .keyframe import KeyframeParams, build_prompt
 from .i2v import I2VParams, frames_for, snap_frames
 from .orchestrator import KeyframeMode, RenderPlan, kf_hash
-from .contract import Bundle
+from .contract import Bundle, resolve_inside
 
 # Shared no-op emitter for a pipeline run with no progress channel wired (the test default).
 _NULL_PROGRESS = NullEmitter()
@@ -311,7 +311,12 @@ class GpuPipeline:
         shot under a success status, the exact dishonest-degrade class the studio refuses. A shot
         the plan does not animate (required=False) may resolve to None harmlessly."""
         if sp.keyframe_mode is KeyframeMode.INJECT and scene.start_image:
-            cand = bundle.root / scene.start_image
+            try:
+                cand = resolve_inside(bundle.root, scene.start_image, what="start_image")
+            except ValueError as e:
+                raise HarnessError(
+                    f"shot {sp.shot_id}: authored start_image {scene.start_image!r} "
+                    f"is not inside the bundle ({e})") from e
             if cand.is_file():
                 return cand
             if required:

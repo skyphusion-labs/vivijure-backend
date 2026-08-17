@@ -30,11 +30,14 @@ is just bytes in and out of the store.
 """
 from __future__ import annotations
 
+import ipaddress
 import os
+import re
 import tarfile
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .models_mirror import uses_namespaced_mirror_creds
 
@@ -43,6 +46,96 @@ from .models_mirror import uses_namespaced_mirror_creds
 # rather than inline so the handler, the tests, and the control plane all read one definition.
 PAYLOAD_KEY = "r2"
 PAYLOAD_REQUIRED = ("endpoint", "access_key_id", "secret_access_key", "bucket")
+
+# Job-supplied r2.endpoint must be https on this host family. Operator R2_ENDPOINT (the
+# dedicated-endpoint env path) is not gated here; only a payload-supplied URL is.
+R2_ENDPOINT_HOST_SUFFIX = "r2.cloudflarestorage.com"
+R2_ALLOWED_HOSTS_ENV = "R2_ALLOWED_ENDPOINT_HOSTS"
+R2_ACCOUNT_ID_ENV = "CLOUDFLARE_ACCOUNT_ID"
+_R2_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_BLOCKED_ENDPOINT_HOSTS = frozenset({
+    "localhost",
+    "metadata",
+    "metadata.google.internal",
+    "metadata.internal",
+    "instance-data",
+})
+
+
+def _is_ip_host(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def _labels_ok(host: str) -> bool:
+    return bool(host) and all(_R2_LABEL_RE.fullmatch(part) for part in host.split("."))
+
+
+def configured_r2_endpoint_hosts(env: dict | None = None) -> frozenset[str]:
+    """Extra hosts an operator opted into for job-supplied r2.endpoint.
+
+    `R2_ALLOWED_ENDPOINT_HOSTS` is a comma-separated exact-host list. `CLOUDFLARE_ACCOUNT_ID`
+    adds `<account>.r2.cloudflarestorage.com` (the documented S3 API shape). Neither can
+    introduce an IP or a blocked metadata host.
+    """
+    e = env if env is not None else os.environ
+    hosts: set[str] = set()
+    raw = str(e.get(R2_ALLOWED_HOSTS_ENV) or "")
+    for part in raw.split(","):
+        h = part.strip().lower().rstrip(".")
+        if h:
+            hosts.add(h)
+    account = str(e.get(R2_ACCOUNT_ID_ENV) or "").strip().lower()
+    if account and _R2_LABEL_RE.fullmatch(account):
+        hosts.add(f"{account}.{R2_ENDPOINT_HOST_SUFFIX}")
+    return frozenset(h for h in hosts if h and not _is_ip_host(h) and h not in _BLOCKED_ENDPOINT_HOSTS)
+
+
+def _host_is_r2(host: str) -> bool:
+    if host == R2_ENDPOINT_HOST_SUFFIX:
+        return _labels_ok(host)
+    if host.endswith("." + R2_ENDPOINT_HOST_SUFFIX):
+        return _labels_ok(host)
+    return False
+
+
+def validate_job_r2_endpoint(endpoint: str, *, extra_hosts: frozenset[str] | None = None) -> str:
+    """Refuse a job-supplied r2.endpoint that is not https on a Cloudflare R2 host.
+
+    Accepts `*.r2.cloudflarestorage.com` (including the jurisdictional
+    `<account>.<region>.r2.cloudflarestorage.com` shape) or an operator-configured extra host.
+    Rejects http, file:, credentials-in-URL, non-443 ports, IP literals, and metadata hosts.
+    """
+    raw = str(endpoint or "").strip()
+    if not raw:
+        raise RuntimeError("job R2 config: endpoint must be a non-empty https URL")
+    parsed = urlparse(raw)
+    if parsed.scheme != "https":
+        raise RuntimeError(
+            "job R2 config: endpoint must be an https Cloudflare R2 host "
+            f"(*.{R2_ENDPOINT_HOST_SUFFIX})")
+    if parsed.username is not None or parsed.password is not None:
+        raise RuntimeError("job R2 config: endpoint must not include credentials")
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        raise RuntimeError("job R2 config: endpoint is missing a host")
+    if parsed.port not in (None, 443):
+        raise RuntimeError("job R2 config: endpoint must use https port 443")
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment or parsed.params:
+        raise RuntimeError("job R2 config: endpoint must be an origin URL with no path or query")
+    if _is_ip_host(host) or host in _BLOCKED_ENDPOINT_HOSTS or host.endswith(".localhost"):
+        raise RuntimeError(
+            "job R2 config: endpoint must be an https Cloudflare R2 host "
+            f"(*.{R2_ENDPOINT_HOST_SUFFIX})")
+    extras = extra_hosts if extra_hosts is not None else configured_r2_endpoint_hosts()
+    if _host_is_r2(host) or host in extras:
+        return raw
+    raise RuntimeError(
+        "job R2 config: endpoint must be an https Cloudflare R2 host "
+        f"(*.{R2_ENDPOINT_HOST_SUFFIX})")
 
 
 @dataclass(frozen=True)
@@ -97,7 +190,7 @@ class R2Config:
             raise RuntimeError(
                 "job R2 config: session_token, when present, must be a non-empty string")
         return cls(
-            endpoint=block["endpoint"].strip(),
+            endpoint=validate_job_r2_endpoint(block["endpoint"].strip()),
             access_key_id=block["access_key_id"].strip(),
             secret_access_key=block["secret_access_key"].strip(),
             bucket=block["bucket"].strip(),

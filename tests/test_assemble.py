@@ -70,9 +70,12 @@ def test_manifest_round_trips(tmp_path):
 # ------------------------------------------------------------- ffmpeg/ffprobe builders
 
 def test_concat_list_text_quotes_and_escapes():
-    text = concat_list_text([ClipInput("s", Path("/tmp/a'b.mp4"))])
-    # the single quote is escaped so it can't break out of the demuxer's quoting
-    assert "file '/tmp/a'\\''b.mp4'" in text
+    path = Path("/tmp/a'b.mp4")
+    text = concat_list_text([ClipInput("s", path)])
+    # the single quote is escaped so it can't break out of the demuxer's quoting.
+    # Match the resolved path: on macOS /tmp is a symlink to /private/tmp.
+    rendered = str(path.resolve()).replace("'", r"'\''")
+    assert f"file '{rendered}'" in text
     assert text.endswith("\n")
 
 

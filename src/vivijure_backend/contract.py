@@ -47,6 +47,57 @@ def _bool(v: Any, default: bool = False) -> bool:
     return default
 
 
+def validate_bundle_relpath(rel: str, *, what: str) -> str:
+    """A job-authored path that must stay inside the extracted bundle.
+
+    Syntax gate only: rejects absolute paths (posix, Windows drive, UNC), URI schemes,
+    backslashes, NUL, and any `..` component. `resolve_inside` is the filesystem follow-up
+    that confirms the realpath is still under the bundle root.
+    """
+    if not isinstance(rel, str) or not rel.strip():
+        raise ValueError(f"{what} must be a non-empty relative path inside the bundle")
+    p = rel.strip()
+    if "\x00" in p:
+        raise ValueError(f"{what} must not contain a NUL byte")
+    if "\\" in p:
+        raise ValueError(f"{what} must use forward slashes and stay inside the bundle")
+    if "://" in p or p.startswith("file:"):
+        raise ValueError(f"{what} must be a relative path, not a URI")
+    if p.startswith("/"):
+        raise ValueError(f"{what} must be a relative path inside the bundle, not absolute")
+    if len(p) >= 2 and p[1] == ":":
+        raise ValueError(f"{what} must be a relative path inside the bundle, not absolute")
+    if ".." in p.split("/"):
+        raise ValueError(f"{what} must not contain '..' components")
+    parts = [part for part in p.split("/") if part not in ("", ".")]
+    if not parts:
+        raise ValueError(f"{what} must be a non-empty relative path inside the bundle")
+    return p
+
+
+def _optional_bundle_relpath(d: dict[str, Any], key: str) -> str | None:
+    """Parse an optional storyboard path field; blank/absent is None, anything else is gated."""
+    if key not in d:
+        return None
+    raw = _str(d[key]) or None
+    return validate_bundle_relpath(raw, what=key) if raw else None
+
+
+def resolve_inside(root: Path, rel: str, *, what: str) -> Path:
+    """Join `rel` onto `root`, resolve, and refuse anything that leaves `root`.
+
+    `validate_bundle_relpath` is the syntax gate. This is the filesystem gate: a symlink or
+    remaining relative trick that resolves outside the bundle is rejected even when the
+    authored string looked safe.
+    """
+    rel = validate_bundle_relpath(rel, what=what)
+    base = Path(root).resolve()
+    target = (base / rel).resolve()
+    if not target.is_relative_to(base):
+        raise ValueError(f"{what} resolves outside the job bundle")
+    return target
+
+
 # --------------------------------------------------------------------------- storyboard
 
 @dataclass
@@ -77,7 +128,7 @@ class Scene:
             end=end,
             target_seconds=target_seconds,
             act=(_str(d["act"]) or None) if "act" in d else None,
-            start_image=(_str(d["start_image"]) or None) if "start_image" in d else None,
+            start_image=_optional_bundle_relpath(d, "start_image"),
         )
 
     @property
@@ -129,7 +180,7 @@ class Storyboard:
             style_preset=preset,
             use_characters=use_chars,
             cast_rules=_str(d.get("cast_rules")),
-            refs_dir=(_str(d["refs_dir"]) or None) if "refs_dir" in d else None,
+            refs_dir=_optional_bundle_relpath(d, "refs_dir"),
         )
 
     @classmethod
@@ -195,7 +246,7 @@ class Bundle:
         reg_path = dest / "characters" / "registry.json"
         cast = Cast.from_registry(json.loads(reg_path.read_text(encoding="utf-8")) if reg_path.is_file() else {})
 
-        refs_root = dest / (storyboard.refs_dir or "characters/refs")
+        refs_root = resolve_inside(dest, storyboard.refs_dir or "characters/refs", what="refs_dir")
         for slot, char in cast.characters.items():
             slot_dir = refs_root / slot
             if slot_dir.is_dir():

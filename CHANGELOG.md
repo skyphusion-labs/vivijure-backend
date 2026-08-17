@@ -7,6 +7,20 @@ releases are summarized below from that history.
 
 ## Unreleased
 
+**Fix: job-authored bundle paths and job-supplied R2 endpoints stay in contract.**
+
+- `start_image` and `refs_dir` must be relative paths inside the extracted bundle (no absolute
+  paths, no `..`). The resolved realpath is checked against the bundle root, so a symlink that
+  looks in-bundle but points out is refused.
+- A job-supplied `r2.endpoint` must be `https` on a Cloudflare R2 host
+  (`*.r2.cloudflarestorage.com` or `R2_ALLOWED_ENDPOINT_HOSTS` / `CLOUDFLARE_ACCOUNT_ID`).
+  `http`, IP literals, `file:`, and metadata hosts are refused. Operator `R2_*` env (the
+  dedicated-endpoint path) is unchanged.
+- Dockerfile `USER nonroot` was not applied: the runtime base is a root-owned conda GPU image
+  (`/opt/models`, `/opt/conda`) and RunPod serverless writes workdirs from the entrypoint. A
+  non-root USER in the consumer Dockerfile would break that contract without a runtime-base
+  rebuild.
+
 ## [1.0.12] -- 2026-07-31
 
 **Fix: the InstantID face-embedding path runs on the GPU again.** PATCH.
