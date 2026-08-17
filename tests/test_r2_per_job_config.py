@@ -18,7 +18,12 @@ import pytest
 
 from vivijure_backend.harness import models_mirror
 from vivijure_backend.harness import r2 as r2_mod
-from vivijure_backend.harness.r2 import R2, R2Config
+from vivijure_backend.harness.r2 import (
+    R2,
+    R2Config,
+    configured_r2_endpoint_hosts,
+    validate_job_r2_endpoint,
+)
 
 # A complete, VALID environment, present in every test below. Malformed-block tests assert a
 # refusal WHILE this is available: a negative test against an environment that could not have
@@ -75,6 +80,81 @@ def test_present_block_wins_over_a_fully_valid_env():
 def test_block_fields_are_stripped_of_surrounding_whitespace():
     cfg = R2Config.from_payload_or_env({"r2": {**BLOCK, "bucket": "  tenant-bucket  "}}, ENV)
     assert cfg.bucket == "tenant-bucket"
+
+
+# ---------------------------------------------------------- job-supplied endpoint allowlist
+
+def test_job_endpoint_accepts_cloudflare_r2_https_hosts():
+    assert validate_job_r2_endpoint("https://tenant.r2.cloudflarestorage.com") == (
+        "https://tenant.r2.cloudflarestorage.com")
+    assert validate_job_r2_endpoint(
+        "https://abc123.eu.r2.cloudflarestorage.com") == "https://abc123.eu.r2.cloudflarestorage.com"
+    assert validate_job_r2_endpoint("https://tenant.r2.cloudflarestorage.com/") == (
+        "https://tenant.r2.cloudflarestorage.com/")
+
+
+@pytest.mark.parametrize("endpoint, why", [
+    ("http://tenant.r2.cloudflarestorage.com", "http"),
+    ("https://169.254.169.254/", "link-local metadata ip"),
+    ("https://127.0.0.1/", "loopback ip"),
+    ("https://[::1]/", "loopback ipv6"),
+    ("file:///etc/passwd", "file scheme"),
+    ("https://metadata.google.internal/", "gcp metadata host"),
+    ("https://metadata/", "short metadata host"),
+    ("https://evil.example/", "unrelated host"),
+    ("https://tenant.r2.cloudflarestorage.com.evil.example/", "suffix spoof"),
+    ("ftp://tenant.r2.cloudflarestorage.com", "ftp"),
+    ("//tenant.r2.cloudflarestorage.com", "scheme-relative"),
+    ("https://user:pass@tenant.r2.cloudflarestorage.com", "userinfo"),
+    ("https://tenant.r2.cloudflarestorage.com:8443", "non-443 port"),
+    ("https://tenant.r2.cloudflarestorage.com/bucket", "path"),
+    ("https://tenant.r2.cloudflarestorage.com?x=1", "query"),
+])
+def test_job_endpoint_rejects_non_r2_and_ssrf_shapes(endpoint, why):
+    with pytest.raises(RuntimeError, match="job R2 config: endpoint"):
+        validate_job_r2_endpoint(endpoint)
+
+
+def test_job_endpoint_configured_account_pattern_is_accepted():
+    extras = configured_r2_endpoint_hosts({"CLOUDFLARE_ACCOUNT_ID": "acct01deadbeef"})
+    assert "acct01deadbeef.r2.cloudflarestorage.com" in extras
+    assert validate_job_r2_endpoint(
+        "https://acct01deadbeef.r2.cloudflarestorage.com", extra_hosts=extras)
+
+
+def test_job_endpoint_allowed_hosts_env_is_the_operator_override(monkeypatch):
+    monkeypatch.setenv("R2_ALLOWED_ENDPOINT_HOSTS", "r2.example.test, metadata.google.internal")
+    extras = configured_r2_endpoint_hosts()
+    assert "r2.example.test" in extras
+    assert "metadata.google.internal" not in extras, "metadata hosts cannot be opted in"
+    assert validate_job_r2_endpoint(
+        "https://r2.example.test", extra_hosts=extras) == "https://r2.example.test"
+
+
+def test_job_endpoint_ip_cannot_be_opted_in():
+    extras = configured_r2_endpoint_hosts({"R2_ALLOWED_ENDPOINT_HOSTS": "169.254.169.254"})
+    assert extras == frozenset()
+    with pytest.raises(RuntimeError, match="job R2 config: endpoint"):
+        validate_job_r2_endpoint("https://169.254.169.254/", extra_hosts=extras)
+
+
+def test_payload_block_refuses_a_non_r2_endpoint_and_never_degrades_to_env():
+    with pytest.raises(RuntimeError, match="job R2 config: endpoint"):
+        R2Config.from_payload_or_env(
+            {"r2": {**BLOCK, "endpoint": "http://169.254.169.254/latest/meta-data/"}}, ENV)
+
+
+def test_env_path_is_not_gated_by_the_job_allowlist():
+    """Dedicated-endpoint R2_ENDPOINT is operator-set. The allowlist is for a job-supplied
+    endpoint only; applying it here would break the from_env path that still accepts the
+    historical r2.dev shape used in tests and some operator files."""
+    cfg = R2Config.from_env({
+        "R2_ENDPOINT": "https://x.r2.dev",
+        "R2_ACCESS_KEY_ID": "k",
+        "R2_SECRET_ACCESS_KEY": "s",
+        "R2_BUCKET": "vivijure",
+    })
+    assert cfg.endpoint == "https://x.r2.dev"
 
 
 # ------------------------------------------------------------- refusal (the load-bearing property)

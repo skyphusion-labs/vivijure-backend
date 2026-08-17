@@ -255,6 +255,37 @@ def test_execute_fails_loud_when_reused_keyframe_is_missing(tmp_path):
         pipe.execute(plan, bundle, tmp_path / "work")     # shot_01 keyframe not staged
 
 
+def test_execute_refuses_start_image_that_escapes_the_bundle(tmp_path):
+    # Defense in depth: even a Scene built without from_dict cannot point start_image at
+    # a file outside the extracted bundle. Absolute and `..` are rejected; a symlink that
+    # looks in-bundle but resolves out is refused by the realpath check.
+    bundle = _extract_bundle(tmp_path)
+    inject = next(s for s in bundle.storyboard.scenes if s.id == "shot_03")
+    inject.start_image = "../secret.png"
+    (tmp_path / "secret.png").write_bytes(b"pwn")
+    req = RenderRequest.from_dict({"action": "render", "project": "neon",
+                                   "bundle_key": "x", "quality_tier": "final"})
+    plan = make_plan(req, bundle.storyboard)
+    pipe = StubPipeline(req.config)
+    with pytest.raises(HarnessError, match="start_image"):
+        pipe.execute(plan, bundle, tmp_path / "work")
+
+
+def test_execute_refuses_start_image_symlink_escape(tmp_path):
+    bundle = _extract_bundle(tmp_path)
+    outside = tmp_path / "secret.png"
+    outside.write_bytes(b"pwn")
+    planted = bundle.root / "injected" / "shot_03.png"
+    planted.unlink()
+    planted.symlink_to(outside)
+    req = RenderRequest.from_dict({"action": "render", "project": "neon",
+                                   "bundle_key": "x", "quality_tier": "final"})
+    plan = make_plan(req, bundle.storyboard)
+    pipe = StubPipeline(req.config)
+    with pytest.raises(HarnessError, match="start_image"):
+        pipe.execute(plan, bundle, tmp_path / "work")
+
+
 def test_execute_fails_loud_when_injected_start_image_is_missing(tmp_path):
     # An INJECT shot whose authored start_image is absent from the bundle is a HARD per-shot
     # error naming the shot and the file, not a missing shot in a "successful" film.

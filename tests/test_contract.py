@@ -14,6 +14,8 @@ from vivijure_backend.contract import (
     Storyboard,
     Keyframe,
     Clip,
+    resolve_inside,
+    validate_bundle_relpath,
 )
 
 SAMPLE = {
@@ -239,6 +241,81 @@ def test_render_request_parses_audio_key():
         {"action": "render", "project": "p", "bundle_key": "b", "audio_key": "audio/x.m4a"})
     assert req.audio_key == "audio/x.m4a"
     assert RenderRequest.from_dict({"project": "p"}).audio_key is None
+
+
+def test_valid_bundle_relpaths_are_accepted():
+    assert validate_bundle_relpath("clips/shot_02_keyframe.png", what="start_image") == (
+        "clips/shot_02_keyframe.png")
+    assert validate_bundle_relpath("characters/refs", what="refs_dir") == "characters/refs"
+    assert validate_bundle_relpath("injected/./shot_03.png", what="start_image") == (
+        "injected/./shot_03.png")
+
+
+@pytest.mark.parametrize("rel, why", [
+    ("/etc/passwd", "posix absolute"),
+    ("//etc/passwd", "unc-style absolute"),
+    ("C:/Windows/win.ini", "windows drive"),
+    ("..", "dotdot only"),
+    ("../secret.png", "parent escape"),
+    ("injected/../../../etc/passwd", "nested parent escape"),
+    ("clips\\shot.png", "backslash"),
+    ("file:/etc/passwd", "file uri"),
+    ("https://evil.example/x.png", "https uri"),
+    ("", "empty"),
+    (".", "dot only"),
+    ("/", "slash only"),
+])
+def test_bundle_relpath_rejects_escapes(rel, why):
+    with pytest.raises(ValueError, match="start_image"):
+        validate_bundle_relpath(rel, what="start_image")
+
+
+def test_storyboard_rejects_escaping_start_image_and_refs_dir():
+    with pytest.raises(ValueError, match="start_image"):
+        Storyboard.from_dict({
+            "scenes": [{"prompt": "x", "start_image": "../escape.png"}],
+        })
+    with pytest.raises(ValueError, match="start_image"):
+        Scene.from_dict({"prompt": "x", "start_image": "/tmp/x.png"}, 0)
+    with pytest.raises(ValueError, match="refs_dir"):
+        Storyboard.from_dict({
+            "refs_dir": "../../etc",
+            "scenes": [{"prompt": "x"}],
+        })
+
+
+def test_resolve_inside_accepts_a_file_under_the_bundle(tmp_path):
+    root = tmp_path / "bundle"
+    target = root / "injected" / "shot.png"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"png")
+    assert resolve_inside(root, "injected/shot.png", what="start_image") == target.resolve()
+
+
+def test_resolve_inside_rejects_symlink_that_leaves_the_bundle(tmp_path):
+    root = tmp_path / "bundle"
+    root.mkdir()
+    outside = tmp_path / "secret.png"
+    outside.write_bytes(b"pwn")
+    (root / "start.png").symlink_to(outside)
+    with pytest.raises(ValueError, match="outside"):
+        resolve_inside(root, "start.png", what="start_image")
+
+
+def test_bundle_extract_honors_in_bundle_refs_dir(tmp_path):
+    import yaml
+    sb = dict(SAMPLE)
+    sb["refs_dir"] = "alts/refs"
+    tar = _make_bundle(tmp_path, {
+        "storyboard.yaml": yaml.safe_dump(sb).encode(),
+        "characters/registry.json": json.dumps({"characters": {
+            "A": {"name": "Vesper", "prompt": "teal"},
+        }}).encode(),
+        "alts/refs/A/ref_01.png": b"\x89PNG-fake",
+    })
+    bundle = Bundle.extract(tar, tmp_path / "out")
+    assert [p.name for p in bundle.cast.characters["A"].ref_paths] == ["ref_01.png"]
+    assert bundle.cast.characters["A"].ref_paths[0].is_relative_to((tmp_path / "out").resolve())
 
 
 def test_bundle_rejects_hardlink(tmp_path):

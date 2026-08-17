@@ -53,7 +53,7 @@ uniformly to every scene's prompt. A storyboard with no scenes is rejected.
 | `style_preset` | str | `"None"` | Normalized to the literal `"None"` when absent. |
 | `use_characters` | list[str] | `[]` | Slots in play (subset of A-D); drives LoRA planning. |
 | `cast_rules` | str | `""` | Authored cast guidance. |
-| `refs_dir` | str \| null | null | Override for the refs root (default `characters/refs`). |
+| `refs_dir` | str \| null | null | Override for the refs root (default `characters/refs`). Relative to the extracted bundle; absolute paths and `..` components are refused, and the resolved realpath must stay under the bundle root. |
 
 ### Scene
 
@@ -68,7 +68,7 @@ uniformly to every scene's prompt. A storyboard with no scenes is rejected.
 | `end` | float \| null | null | Beat end (seconds). |
 | `target_seconds` | float \| null | null | Desired clip length; derives the i2v frame count. |
 | `act` | str \| null | null | Authored act label. |
-| `start_image` | str \| null | null | An authored keyframe to inject (skips keyframe generation for this shot). |
+| `start_image` | str \| null | null | An authored keyframe to inject (skips keyframe generation for this shot). Relative to the extracted bundle; absolute paths and `..` components are refused, and the resolved realpath must stay under the bundle root. |
 
 A scene with two or more `character_slots` is "multi-character" and renders on the regional
 no-bleed keyframe path; see [configuration.md](configuration.md#multicharconfig).
@@ -157,7 +157,7 @@ pooled RunPod endpoint serve many tenants without any of them sharing a credenti
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `r2.endpoint` | str | yes | The tenant's R2 S3 endpoint. |
+| `r2.endpoint` | str | yes | The tenant's R2 S3 endpoint. When supplied on the job, must be `https` on a Cloudflare R2 host (`*.r2.cloudflarestorage.com`, including `<account>.<jurisdiction>.r2.cloudflarestorage.com`) or an operator-configured extra host (`R2_ALLOWED_ENDPOINT_HOSTS` / `CLOUDFLARE_ACCOUNT_ID`). `http`, IP literals, `file:`, credentials-in-URL, and metadata hosts are refused. The dedicated-endpoint `R2_ENDPOINT` env var is not gated by this allowlist. |
 | `r2.access_key_id` | str | yes | |
 | `r2.secret_access_key` | str | yes | |
 | `r2.bucket` | str | yes | The tenant's bucket. |
