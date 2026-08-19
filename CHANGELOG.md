@@ -7,6 +7,12 @@ releases are summarized below from that history.
 
 ## Unreleased
 
+**Fix: seed-build and runtime-build register on Plane C before they bake.**
+
+Group 9 is workflow-restricted. `release.yml` already ran `sync-gpu-allowlist` on
+ubuntu-latest first. The seed and runtime workflows did not, so a dispatch sat
+queued on idle bake runners. Same job, `--apply` (these are main-ref, not tags).
+
 **Fix: tests.yml concurrency no longer cancels against the dummy coverage check.**
 
 `tests.yml` and `coverage.yml` both used `group: coverage-${{ github.ref }}`. GitHub
