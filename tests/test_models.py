@@ -78,7 +78,7 @@ def test_bake_manifest_keep_set_includes_canny_controlnet():
     assert canny["role"] == "CONTROLNET"
     assert canny["rev"] == "1271357eda52d54b857c650cacb5b51144643ccb"
     assert canny["approx_gb_bf16"] == 2.5
-    assert m["model_version"] == 1  # bump is the seed-build dispatch, not this src PR
+    assert m["model_version"] == 2  # seed 2-bf16 (canny) is on GHCR; runtime imports it
     assert DEFAULT_SPECS[ModelRole.CONTROLNET_CANNY].repo_id == "xinsir/controlnet-canny-sdxl-1.0"
 
 

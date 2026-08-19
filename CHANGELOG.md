@@ -7,6 +7,11 @@ releases are summarized below from that history.
 
 ## Unreleased
 
+**Weights: seed `2-bf16` (canny ControlNet in the importable seed).**
+
+`ghcr.io/skyphusion-labs/vivijure-backend-seed:2-bf16@sha256:45d036fd50c83dfa0347cf837c43bcccb07e4d2c52c3fb5c02d3deee962a7e66`.
+Runtime imports this; `backend-v*` still only COPY src.
+
 **Fix: seed-build and runtime-build register on Plane C before they bake.**
 
 Group 9 is workflow-restricted. `release.yml` already ran `sync-gpu-allowlist` on
