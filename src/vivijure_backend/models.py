@@ -47,6 +47,7 @@ class ModelRole(str, Enum):
     INSTANTID = "instantid"              # face identity (insightface + ControlNet)
     IP_ADAPTER = "ip_adapter"            # per-slot identity conditioning
     CONTROLNET_POSE = "controlnet_pose"  # OpenPose: separates bodies in multi-char shots
+    CONTROLNET_CANNY = "controlnet_canny"  # Canny: scene-lock Pass B (t2i on the Pass A plate)
     FRAME_INTERP = "frame_interp"        # RIFE: finishing-stage frame interpolation (16fps -> smooth)
     FACE_RESTORE = "face_restore"        # blind face restorer: relock identity over the i2v frames
 
@@ -110,6 +111,11 @@ DEFAULT_SPECS: dict[ModelRole, ModelSpec] = {
     ModelRole.IP_ADAPTER: ModelSpec(ModelRole.IP_ADAPTER, "h94/IP-Adapter", ModelFamily.AUX),
     ModelRole.CONTROLNET_POSE: ModelSpec(
         ModelRole.CONTROLNET_POSE, "xinsir/controlnet-openpose-sdxl-1.0", ModelFamily.AUX,
+    ),
+    ModelRole.CONTROLNET_CANNY: ModelSpec(
+        ModelRole.CONTROLNET_CANNY, "xinsir/controlnet-canny-sdxl-1.0", ModelFamily.AUX,
+        note="scene-lock Pass B; same vendor as CONTROLNET_POSE. Apache-2.0. Must be in the "
+             "baked runtime before src defaults scene_lock true (not a src-only backend-v*).",
     ),
     ModelRole.FRAME_INTERP: ModelSpec(
         ModelRole.FRAME_INTERP, "imaginairy/rife", ModelFamily.AUX,
@@ -206,6 +212,26 @@ def quant_for(family: ModelFamily, device: Device) -> Quant:
 
 # Below this much VRAM the inactive Wan expert is CPU-offloaded, and torchao fp8 is not applied.
 _I2V_OFFLOAD_VRAM_GB = 120
+# 12/16gb local-gpu: cache one ControlNet at a time (swap pipe.controlnet; not MultiControlNet).
+# Hosted (H200/B200) keeps both pose and canny cached.
+_CONTROLNET_UNLOAD_VRAM_GB = 24
+
+
+def controlnet_load_failure(role: ModelRole, exc: BaseException) -> BaseException:
+    """Map a local from_pretrained miss onto HarnessError for CONTROLNET_CANNY.
+
+    Names the role, not a raw diffusers hub path, so a pre-canny runtime fails as a missing
+    bake rather than an inscrutable LocalEntryNotFoundError. Other ControlNet roles keep the
+    original exception. Pure besides the HarnessError import."""
+    if role is not ModelRole.CONTROLNET_CANNY:
+        return exc
+    from .harness.handler import HarnessError
+    return HarnessError(
+        f"missing weights for ModelRole.CONTROLNET_CANNY ({type(exc).__name__}). "
+        "scene_lock Pass B needs this role in the baked runtime; seed-build then "
+        "runtime-build, then tag backend-v* on that digest. Do not src-only tag "
+        "against a pre-canny runtime."
+    )
 
 
 def i2v_cpu_offload(device: Device) -> bool:
@@ -429,17 +455,12 @@ class ModelServer:
         if "keyframe" in self._cache:
             return self._cache["keyframe"]
         import torch
-        from diffusers import ControlNetModel, StableDiffusionXLControlNetPipeline
+        from diffusers import StableDiffusionXLControlNetPipeline
 
         spec = self.specs[ModelRole.KEYFRAME_BASE]
-        cn_spec = self.specs[ModelRole.CONTROLNET_POSE]
-        # The keyframe pipe is a ControlNet pipeline so the regional multi-character path can plant
-        # two distinct bodies with an OpenPose skeleton (keyframe._render_regional); the single path
-        # hands it a blank control image at conditioning_scale 0.0, which makes the ControlNet inert
-        # (zero residual), so single-subject renders behave exactly like plain SDXL. Sharing one pipe
-        # keeps the dynamic per-scene LoRA + IP-Adapter attach points identical across both paths.
-        controlnet = ControlNetModel.from_pretrained(
-            cn_spec.repo_id, torch_dtype=torch.bfloat16, local_files_only=True)
+        # Pose first (regional Pass A plants bodies). Canny is cached separately and swapped onto
+        # pipe.controlnet for scene-lock Pass B; not MultiControlNet.
+        controlnet = self._controlnet(ModelRole.CONTROLNET_POSE)
         pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
             spec.repo_id, controlnet=controlnet, torch_dtype=torch.bfloat16, local_files_only=True)
         pipe.to("cuda")
@@ -456,6 +477,51 @@ class ModelServer:
 
         self._cache["keyframe"] = pipe
         return pipe
+
+    def set_keyframe_controlnet(self, role: ModelRole):
+        """Assign `pipe.controlnet` from the cached ControlNet for `role`. Not MultiControlNet.
+
+        `keyframe_pipeline` loads pose first. Pass B swaps to CONTROLNET_CANNY. Hosted keeps
+        both cached; below `_CONTROLNET_UNLOAD_VRAM_GB` the idle one is dropped before load."""
+        pipe = self.keyframe_pipeline()
+        pipe.controlnet = self._controlnet(role)
+        return pipe
+
+    def _controlnet_cache_key(self, role: ModelRole) -> str:
+        if role is ModelRole.CONTROLNET_POSE:
+            return "controlnet_pose"
+        if role is ModelRole.CONTROLNET_CANNY:
+            return "controlnet_canny"
+        raise ValueError(f"not a ControlNet role: {role}")
+
+    def _controlnet(self, role: ModelRole):
+        key = self._controlnet_cache_key(role)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        if self.device.vram_gb and self.device.vram_gb < _CONTROLNET_UNLOAD_VRAM_GB:
+            idle = "controlnet_canny" if key == "controlnet_pose" else "controlnet_pose"
+            self._cache.pop(idle, None)
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+        cn = self._load_controlnet(self.specs[role])
+        self._cache[key] = cn
+        return cn
+
+    def _load_controlnet(self, spec: ModelSpec):
+        import torch
+        from diffusers import ControlNetModel
+        try:
+            return ControlNetModel.from_pretrained(
+                spec.repo_id, torch_dtype=torch.bfloat16, local_files_only=True)
+        except Exception as e:  # noqa: BLE001 -- wrap canny misses as HarnessError; re-raise others
+            mapped = controlnet_load_failure(spec.role, e)
+            if mapped is e:
+                raise
+            raise mapped from e
 
     def face_analyzer(self):
         """insightface FaceAnalysis on the antelopev2 pack (mirrored to <VJ_MODELS_ROOT>/antelopev2

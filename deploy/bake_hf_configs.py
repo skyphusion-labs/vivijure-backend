@@ -38,6 +38,7 @@ _WEIGHT_GLOBS = [
 REPOS = [
     "SG161222/RealVisXL_V5.0",            # SDXL base (keyframe + LoRA train)
     "xinsir/controlnet-openpose-sdxl-1.0", # ControlNet pose
+    "xinsir/controlnet-canny-sdxl-1.0",    # ControlNet canny (scene-lock Pass B)
     "h94/IP-Adapter",                      # IP-Adapter (image_encoder config)
     "Wan-AI/Wan2.2-I2V-A14B-Diffusers",   # Wan I2V (configs only; weights arrive from R2)
 ]
@@ -52,6 +53,7 @@ STUBS = [
     ("models--SG161222--RealVisXL_V5.0",             "vae/diffusion_pytorch_model.safetensors.index.json"),
     # probe 2: same shard-index check for the xinsir ControlNet weights
     ("models--xinsir--controlnet-openpose-sdxl-1.0", "diffusion_pytorch_model.safetensors.index.json"),
+    ("models--xinsir--controlnet-canny-sdxl-1.0",    "diffusion_pytorch_model.safetensors.index.json"),
     # probe 3: PEFT adapter_config probe for IP-Adapter image_encoder (not a PEFT model)
     ("models--h94--IP-Adapter",                      "sdxl_models/image_encoder/adapter_config.json"),
 ]

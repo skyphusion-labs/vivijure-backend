@@ -35,6 +35,12 @@ def test_scrub_removes_all_tree_listings(tmp_path):
     assert keep.is_file()  # non-tree content untouched
 
 
+def test_stubs_include_canny_controlnet():
+    dirs = {d for d, _ in bake_hf_configs.STUBS}
+    assert "models--xinsir--controlnet-canny-sdxl-1.0" in dirs
+    assert "xinsir/controlnet-canny-sdxl-1.0" in bake_hf_configs.REPOS
+
+
 def test_scrub_idempotent_and_empty_safe(tmp_path):
     """No trees/ present -> zero removed, no error (idempotent re-run / clean cache)."""
     hub = tmp_path / "hub"

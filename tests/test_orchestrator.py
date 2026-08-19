@@ -115,6 +115,50 @@ def test_hash_match_allows_keyframe_reuse():
     assert modes["shot_02"] is KeyframeMode.GENERATE
 
 
+def test_kf_hash_changes_when_scene_lock_flips():
+    req = _req()
+    on = kf_hash(req.config.keyframe)
+    req.config.keyframe.scene_lock = False
+    off = kf_hash(req.config.keyframe)
+    assert on != off
+    req.config.keyframe.scene_lock = True
+    req.config.keyframe.canny_scale = 0.85
+    assert kf_hash(req.config.keyframe) != on
+
+
+def test_kf_hash_covers_split_lora_and_two_pass_marker():
+    import json, hashlib
+    req = _req()
+    kc = req.config.keyframe
+    assert kc.lora_scale == 0.30
+    assert kc.multi_char.lora_scale_per_slot == 0.35
+    h = kf_hash(kc)
+    # flipping only the single-char scale must change the hash (regional scale staying put)
+    kc.lora_scale = 0.11
+    assert kf_hash(kc) != h
+    # the two-pass marker is load-bearing: old stills without it must not reuse
+    payload_without = {
+        "steps": kc.distill_steps if kc.distill else kc.steps,
+        "guidance": kc.guidance_scale,
+        "seed": kc.seed,
+        "base_model": kc.base_model,
+        "identity_method": kc.identity_method.value,
+        "width": kc.width,
+        "height": kc.height,
+        "lora_scale": kc.lora_scale,
+        "lora_scale_per_slot": kc.multi_char.lora_scale_per_slot,
+        "ip_scale": kc.multi_char.ip_adapter_scale_per_slot,
+        "pose_cond": kc.multi_char.pose_conditioning,
+        "cn_scale": kc.multi_char.controlnet_pose_scale,
+        "gutter": kc.multi_char.region_gutter,
+        "max_slots": kc.multi_char.max_slots,
+        "scene_lock": kc.scene_lock,
+        "canny_scale": kc.canny_scale,
+    }
+    old = hashlib.sha256(json.dumps(payload_without, sort_keys=True).encode()).hexdigest()[:16]
+    assert kf_hash(kc) != old
+
+
 def test_none_hash_allows_reuse_for_backward_compat():
     """A shot in existing_keyframes with None (old state, no hash stored) is reused conservatively."""
     p = plan(_req(), _sb(TWO_SCENES), existing_keyframes={"shot_01": None})

@@ -9,7 +9,7 @@ the image at `/opt/models/licenses` at build time (the Dockerfile COPY is tracke
 separately, issue #127).
 
 The authoritative list of what gets baked is `DEFAULT_SPECS` in
-`src/vivijure_backend/models.py`. The nine entries below are that list. Each license
+`src/vivijure_backend/models.py`. The ten entries below are that list. Each license
 was verified at the pinned revision shown (the Hugging Face commit SHA, or, for the
 two repos that are access-restricted on the Hub, the upstream source the weights
 originate from).
@@ -25,6 +25,7 @@ originate from).
 | Face identity | InstantX/InstantID | `57b32dfee076092ad2930c71fd6d439c2c3b1820` | Apache-2.0 | https://huggingface.co/InstantX/InstantID |
 | IP-Adapter | h94/IP-Adapter | `018e402774aeeddd60609b4ecdb7e298259dc729` | Apache-2.0 | https://huggingface.co/h94/IP-Adapter |
 | OpenPose ControlNet | xinsir/controlnet-openpose-sdxl-1.0 | `23f966cd5cfdd3f7729c903e243d87152162d2b7` | Apache-2.0 | https://huggingface.co/xinsir/controlnet-openpose-sdxl-1.0 |
+| Canny ControlNet (scene-lock Pass B) | xinsir/controlnet-canny-sdxl-1.0 | `1271357eda52d54b857c650cacb5b51144643ccb` | Apache-2.0 | https://huggingface.co/xinsir/controlnet-canny-sdxl-1.0 |
 | RIFE frame interp | imaginairy/rife | upstream (see note) | MIT | https://huggingface.co/imaginairy/rife |
 | Face restore | TencentARC/GFPGANv1.4 | upstream (see note) | Apache-2.0 | https://huggingface.co/TencentARC/GFPGANv1.4 |
 

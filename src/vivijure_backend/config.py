@@ -129,9 +129,9 @@ class MultiCharConfig:
     nature, so the regional path stays masked-IP-Adapter only.
 
     Defaults mirror `orchestrator.MULTI_CHAR_DEFAULTS` (engine=regional, pose_conditioning=True,
-    lora_scale_per_slot=0.7, ip_adapter_scale_per_slot=0.7, max_slots=2)."""
+    lora_scale_per_slot=0.35, ip_adapter_scale_per_slot=0.7, max_slots=2)."""
     pose_conditioning: bool = True            # OpenPose ControlNet to separate bodies
-    lora_scale_per_slot: float = 0.7          # 0..2; per-character LoRA strength in a shared frame
+    lora_scale_per_slot: float = 0.35         # 0..2; regional only (single-char reads KeyframeConfig.lora_scale)
     ip_adapter_scale_per_slot: float = 0.7    # 0..1; per-region masked IP-Adapter identity pull
     max_slots: int = 2                        # 1..4; characters the no-bleed path supports at once
     controlnet_pose_scale: float = 0.55       # 0..1.5; OpenPose ControlNet conditioning scale
@@ -184,6 +184,9 @@ class KeyframeConfig:
     identity_method: IdentityMethod = IdentityMethod.IP_ADAPTER
     ip_adapter_scale: float = 0.65   # 0..1; single-subject IP-Adapter identity pull (face_lock default)
     instantid_ip_adapter_scale: float = 0.8  # 0..1.5; InstantID IP-Adapter (single-char upgrade)
+    lora_scale: float = 0.30         # 0..2; single-char LoRA; regional uses multi_char.lora_scale_per_slot
+    scene_lock: bool = True          # two-pass plate then canny; default true only on the canny-bearing image
+    canny_scale: float = 0.70        # 0..1.5; Pass B ControlNet conditioning
     multi_char: MultiCharConfig = field(default_factory=MultiCharConfig)
 
     @classmethod
@@ -228,6 +231,9 @@ class KeyframeConfig:
             identity_method=_enum_or(IdentityMethod, d.get("identity_method"), base.identity_method),
             ip_adapter_scale=_clamp(d.get("ip_adapter_scale"), 0.0, 1.0, base.ip_adapter_scale),
             instantid_ip_adapter_scale=_clamp(d.get("instantid_ip_adapter_scale"), 0.0, 1.5, base.instantid_ip_adapter_scale),
+            lora_scale=_clamp(d.get("lora_scale"), 0.0, 2.0, base.lora_scale),
+            scene_lock=bool(d.get("scene_lock", base.scene_lock)),
+            canny_scale=_clamp(d.get("canny_scale"), 0.0, 1.5, base.canny_scale),
             multi_char=MultiCharConfig.from_dict(d.get("multi_char")),
         )
 

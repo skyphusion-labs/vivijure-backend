@@ -30,9 +30,17 @@ def test_multichar_defaults_mirror_orchestrator():
     # The anti-bleed scales must agree with what the planner already records.
     mc = MultiCharConfig()
     assert mc.pose_conditioning == MULTI_CHAR_DEFAULTS["pose_conditioning"]
-    assert mc.lora_scale_per_slot == MULTI_CHAR_DEFAULTS["lora_scale_per_slot"]
+    assert mc.lora_scale_per_slot == MULTI_CHAR_DEFAULTS["lora_scale_per_slot"] == 0.35
     assert mc.ip_adapter_scale_per_slot == MULTI_CHAR_DEFAULTS["ip_adapter_scale_per_slot"]
     assert mc.max_slots == MULTI_CHAR_DEFAULTS["max_slots"]
+
+
+def test_keyframe_scene_lock_defaults_on_and_single_lora_is_split():
+    k = KeyframeConfig()
+    assert k.scene_lock is True
+    assert k.canny_scale == 0.70
+    assert k.lora_scale == 0.30
+    assert k.multi_char.lora_scale_per_slot == 0.35
 
 
 # --------------------------------------------------------------------------- tier baselines

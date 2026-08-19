@@ -52,6 +52,50 @@ def analyze_face(analyzer, image):
     return face.normed_embedding, face.kps, img.size
 
 
+def crop_from_bbox(image, bbox, *, pad_ratio: float = 0.35):
+    """PIL RGB crop of an insightface bbox `(x1, y1, x2, y2)`, padded and clipped to the image.
+
+    Pure except PIL. A degenerate or empty bbox returns the original image so a caller that
+    already decided a face exists never gets a zero-size crop."""
+    from PIL import Image
+
+    img = image if isinstance(image, Image.Image) else Image.open(image)
+    img = img.convert("RGB")
+    w, h = img.size
+    try:
+        x1, y1, x2, y2 = (float(v) for v in bbox)
+    except (TypeError, ValueError):
+        return img
+    bw, bh = x2 - x1, y2 - y1
+    if bw <= 1 or bh <= 1:
+        return img
+    pad_x, pad_y = bw * pad_ratio, bh * pad_ratio
+    left = max(0, int(x1 - pad_x))
+    top = max(0, int(y1 - pad_y))
+    right = min(w, int(x2 + pad_x))
+    bottom = min(h, int(y2 + pad_y))
+    if right <= left or bottom <= top:
+        return img
+    return img.crop((left, top, right, bottom))
+
+
+def crop_face(analyzer, image, *, pad_ratio: float = 0.35):
+    """Largest-face crop via the insightface bbox, or None if no face.
+
+    Pass B feeds this crop as `ip_adapter_image`, never the full studio portrait. GPU/onnx
+    path: deferred imports, validated on a pod."""
+    import numpy as np
+    from PIL import Image
+
+    img = image if isinstance(image, Image.Image) else Image.open(image)
+    img = img.convert("RGB")
+    arr = np.array(img)[:, :, ::-1]  # insightface wants BGR
+    face = largest_face(analyzer.get(arr))
+    if face is None:
+        return None
+    return crop_from_bbox(img, face.bbox, pad_ratio=pad_ratio)
+
+
 def build_image_proj(state_dict):
     """Construct InstantID's image-projection (a Resampler / perceiver) and load its weights from the
     `image_proj` sub-dict of `ip-adapter.bin`. The Resampler maps one 512-d face embedding to
