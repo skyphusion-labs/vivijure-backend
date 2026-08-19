@@ -75,7 +75,30 @@ env:
                                     # so FROM-inheritance dedups same-repo (#537 fix)
 
 jobs:
+  # Inline sync: public repo cannot workflow_call internal fleet-chezmoi.
+  # Without this, a dispatch sits queued forever on idle Plane C runners
+  # (group 9 is workflow-restricted; exact ref only). Same job as release.yml.
+  sync-gpu-allowlist:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout fleet-chezmoi (sync script)
+        uses: actions/checkout@v7
+        with:
+          repository: skyphusion-labs/fleet-chezmoi
+          ref: main
+          token: ${{ secrets.RUNNER_GROUP_ADMIN_TOKEN }}
+
+      - name: Sync vivijure-gpu-builds allowlist
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_GROUP_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          bash scripts/sync-vivijure-gpu-builds-allowlist.sh --apply
+
   build-and-push:
+    needs: sync-gpu-allowlist
+    if: always() && (needs.sync-gpu-allowlist.result == 'success' || needs.sync-gpu-allowlist.result == 'skipped')
     # Plane C `[self-hosted, gpu-device]` (org runner group vivijure-gpu-builds, id 9; propagandhi + fatmike,
     # fc#754): a host-persistent JIT runner, so the local docker image store survives across jobs and
     # `FROM seed` is a warm local cache hit on a repeat bake, skipping the ~87 GB seed pull (a cold
