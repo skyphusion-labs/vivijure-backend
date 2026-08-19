@@ -7,6 +7,12 @@ releases are summarized below from that history.
 
 ## Unreleased
 
+**Fix: tests.yml concurrency no longer cancels against the dummy coverage check.**
+
+`tests.yml` and `coverage.yml` both used `group: coverage-${{ github.ref }}`. GitHub
+concurrency is repository-wide, so the org-ruleset dummy `coverage` job cancelled the
+real pytest + required `ci` job (PR 432). tests.yml now uses `tests-${{ github.ref }}`.
+
 **Fix: keyframes stay in the scene (plate then canny face, not studio portraits).**
 
 Live LoRA scale was 0.7 on every shot, including single-char, via `keyframe_params_from`

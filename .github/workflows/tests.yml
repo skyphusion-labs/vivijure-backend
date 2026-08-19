@@ -15,7 +15,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: coverage-${{ github.ref }}
+  # Must NOT share coverage.yml's `coverage-${{ github.ref }}` group. GitHub concurrency is
+  # repository-wide: coverage.yml (the org-ruleset dummy check, fefc988) cancelled this
+  # workflow on PR 432, so the required `ci` job never ran. Keep this group unique.
+  group: tests-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
