@@ -456,11 +456,14 @@ def test_hf_offline_stubs_covers_known_probes():
     paths = {p for _, p in HF_OFFLINE_STUBS}
     # Probe 1: VAE shard-index (diffusers checks for sharded weights; single-file VAE has none)
     assert "vae/diffusion_pytorch_model.safetensors.index.json" in paths
-    # Probe 2: ControlNet shard-index
+    # Probe 2: ControlNet shard-index (pose + canny)
     assert "diffusion_pytorch_model.safetensors.index.json" in paths
+    stub_dirs = {d for d, _ in HF_OFFLINE_STUBS}
+    assert "models--xinsir--controlnet-openpose-sdxl-1.0" in stub_dirs
+    assert "models--xinsir--controlnet-canny-sdxl-1.0" in stub_dirs
     # Probe 3: IP-Adapter image_encoder PEFT adapter_config (IP-Adapter is not a PEFT model)
     assert "sdxl_models/image_encoder/adapter_config.json" in paths
-    assert len(HF_OFFLINE_STUBS) == 3  # probe 4 fixed in lora_train.py; update if more added
+    assert len(HF_OFFLINE_STUBS) == 4  # probe 4 fixed in lora_train.py; update if more added
 
 
 def test_overwrites_a_stale_nonsymlink(tmp_path):

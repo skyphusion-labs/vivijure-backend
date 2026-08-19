@@ -7,6 +7,28 @@ releases are summarized below from that history.
 
 ## Unreleased
 
+**Fix: tests.yml concurrency no longer cancels against the dummy coverage check.**
+
+`tests.yml` and `coverage.yml` both used `group: coverage-${{ github.ref }}`. GitHub
+concurrency is repository-wide, so the org-ruleset dummy `coverage` job cancelled the
+real pytest + required `ci` job (PR 432). tests.yml now uses `tests-${{ github.ref }}`.
+
+**Fix: keyframes stay in the scene (plate then canny face, not studio portraits).**
+
+Live LoRA scale was 0.7 on every shot, including single-char, via `keyframe_params_from`
+always reading `multi_char.lora_scale_per_slot`, plus a full-frame IP-Adapter of the
+cast portrait. That reconstructed the LoRA training studio. There is no img2img pipe.
+
+- Two-pass SDXL keyframe: Pass A is a scene plate (no LoRA, no IP-Adapter); Pass B is
+  canny ControlNet of that plate plus a face-crop IP-Adapter. InstantID is not Pass B.
+- New `ModelRole.CONTROLNET_CANNY` (`xinsir/controlnet-canny-sdxl-1.0`, rev
+  `1271357eda52d54b857c650cacb5b51144643ccb`). Both ControlNets are cached; the pipe
+  swaps `pipe.controlnet`. Missing canny weights raise `HarnessError` naming the role.
+- Split LoRA mapper: single-char `lora_scale` 0.30; regional `lora_scale_per_slot` 0.35.
+- `kf_hash` includes `scene_lock`, `canny_scale`, `scene_lock_v1`, and the split scales.
+- `scene_lock` defaults true in this src. Do not tag `backend-v*` until seed-build and
+  runtime-build contain the canny weights.
+
 **Fix: job-authored bundle paths and job-supplied R2 endpoints stay in contract.**
 
 - `start_image` and `refs_dir` must be relative paths inside the extracted bundle (no absolute

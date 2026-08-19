@@ -27,10 +27,18 @@ from .contract import Cast, Scene, Storyboard
 # the per-slot scales are deliberately moderate and the identity comes mostly from the masked
 # IP-Adapter. Mirrors orchestrator.MULTI_CHAR_DEFAULTS (the planner's view of the same numbers).
 DEFAULT_LORA_SCALE = 0.3
+DEFAULT_LORA_SCALE_PER_SLOT = 0.35
 DEFAULT_IP_ADAPTER_SCALE = 0.7
+DEFAULT_CANNY_SCALE = 0.70
 DEFAULT_NEGATIVE = (
     "lowres, bad anatomy, extra limbs, fused faces, two heads, deformed, blurry, watermark, text"
 )
+# Appended to the negative when scene.prompt is non-empty (defense in depth; the two-pass is the fix).
+SCENE_LOCK_NEGATIVE = (
+    "studio backdrop, grey background, seamless paper, cyclorama, passport photo, "
+    "headshot on backdrop, portrait studio, empty soundstage"
+)
+PASS_B_LOCK_CLAUSE = "in this location, not a studio portrait"
 # The persistent base adapter name the ModelServer loads the Hyper-SD few-step distill LoRA under
 # (models.ModelServer.keyframe_pipeline). _bind_loras keeps it active at 1.0 on the few-step path and
 # 0.0 on the full-step (final) path, so one warm pipe renders every tier.
@@ -61,8 +69,11 @@ class KeyframeParams:
     seed: int = 0
     few_step: bool = True            # use the Hyper-SD/DMD2 distilled path the ModelServer loaded
     scheduler: str = "ddim_trailing" # config.Scheduler value; few-step wants ddim_trailing, final a solver
-    lora_scale: float = DEFAULT_LORA_SCALE
+    lora_scale: float = DEFAULT_LORA_SCALE          # single-char; regional uses lora_scale_per_slot
+    lora_scale_per_slot: float = DEFAULT_LORA_SCALE_PER_SLOT
     ip_adapter_scale: float = DEFAULT_IP_ADAPTER_SCALE
+    scene_lock: bool = True          # Pass A scene plate, Pass B canny + face-crop; off is a debug hatch
+    canny_scale: float = DEFAULT_CANNY_SCALE
     # Identity method for the SINGLE-character path: "ip_adapter" (h94 IP-Adapter, the default) or
     # "instantid" (insightface face-embed projected through InstantID's image-projection + IP attn,
     # higher face fidelity). Multi-character shots ignore this and always take the masked-IP-Adapter
@@ -117,19 +128,82 @@ def slot_trigger(cast: Cast, slot: str) -> str:
     return (char.name if char and char.name else slot)
 
 
-def build_prompt(scene: Scene, cast: Cast, storyboard: Storyboard) -> str:
-    """Compose the SDXL prompt: the storyboard style prefix, the scene's own prompt, and the
-    trigger token for each character in the shot. Pieces are comma-joined and de-duplicated of
-    empty fragments so a missing style or prompt never leaves a dangling comma."""
-    triggers = ", ".join(slot_trigger(cast, s) for s in scene.character_slots)
+def build_prompt(scene: Scene, cast: Cast, storyboard: Storyboard, *,
+                 include_triggers: bool = True, lock_clause: bool = False) -> str:
+    """Compose the SDXL prompt: the storyboard style prefix, the scene's own prompt, and
+    optionally the LoRA trigger tokens and the Pass B location-lock clause. Pass A is
+    style + scene only (no triggers). Pieces are comma-joined and de-duplicated of empty
+    fragments so a missing style or prompt never leaves a dangling comma."""
+    triggers = ", ".join(slot_trigger(cast, s) for s in scene.character_slots) if include_triggers else ""
     parts = [storyboard.style_prefix, scene.prompt, triggers]
     if storyboard.style_preset and storyboard.style_preset != "None":
         parts.append(storyboard.style_preset)
+    if lock_clause:
+        parts.append(PASS_B_LOCK_CLAUSE)
     # Fragments may carry their own edge commas (the control plane's style_prefix ends in ","),
     # so strip leading/trailing commas per fragment before joining; internal commas (the trigger
     # list) are untouched, so two characters never collapse into one.
     cleaned = [c for c in (p.strip().strip(",").strip() for p in parts if p) if c]
     return ", ".join(cleaned)
+
+
+def scene_lock_negative(scene: Scene, base: str) -> str:
+    """Anatomy negative plus the studio-lock tail, but only when the scene actually has a
+    location prompt. An empty scene prompt must not grow a studio-negative that then fights
+    an empty positive."""
+    if not (scene.prompt and scene.prompt.strip()):
+        return base
+    if SCENE_LOCK_NEGATIVE in (base or ""):
+        return base
+    return f"{base}, {SCENE_LOCK_NEGATIVE}" if base else SCENE_LOCK_NEGATIVE
+
+
+@dataclass(frozen=True)
+class KeyframePass:
+    """One t2i call in the scene-lock two-pass. CPU-testable plan shape; the GPU body executes it."""
+    name: str                    # "plate" | "identity"
+    prompt: str
+    negative_prompt: str
+    bind_loras: bool
+    lora_scale: float
+    use_ip_adapter: bool
+    face_crop: bool
+    controlnet: str              # "none" | "pose" | "canny"
+    canny_from_plate: bool
+
+
+def plan_keyframe_passes(scene: Scene, cast: Cast, storyboard: Storyboard,
+                         cfg: KeyframeParams) -> list[KeyframePass]:
+    """The two-pass plan (or Pass A only for no-character shots). Pure."""
+    engine = engine_for(scene, cfg)
+    negative = scene_lock_negative(scene, cfg.negative_prompt)
+    plate_prompt = build_prompt(scene, cast, storyboard, include_triggers=False)
+    plate_cn = "pose" if (engine == "regional" and cfg.pose_conditioning) else "none"
+    plate = KeyframePass(
+        name="plate", prompt=plate_prompt, negative_prompt=negative,
+        bind_loras=False, lora_scale=0.0, use_ip_adapter=False, face_crop=False,
+        controlnet=plate_cn, canny_from_plate=False,
+    )
+    if not scene.character_slots:
+        return [plate]
+    ident_scale = cfg.lora_scale_per_slot if engine == "regional" else cfg.lora_scale
+    identity = KeyframePass(
+        name="identity",
+        prompt=build_prompt(scene, cast, storyboard, include_triggers=True, lock_clause=True),
+        negative_prompt=negative,
+        bind_loras=True, lora_scale=ident_scale, use_ip_adapter=True, face_crop=True,
+        controlnet="canny", canny_from_plate=True,
+    )
+    return [plate, identity]
+
+
+def keyframe_render_path(engine: str, cfg: KeyframeParams, *, has_instantid_ref: bool) -> str:
+    """Which GPU body `render_keyframe` takes. InstantID is not Pass B: scene_lock wins."""
+    if cfg.scene_lock:
+        return "scene_lock"
+    if engine == "single" and cfg.identity_method == "instantid" and has_instantid_ref:
+        return "instantid"
+    return engine
 
 
 # ------------------------------------------------------------------------- region geometry
@@ -203,7 +277,6 @@ def render_keyframe(
     cfg = params or KeyframeParams()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    prompt = build_prompt(scene, cast, storyboard)
     slots = list(scene.character_slots)
     engine = engine_for(scene, cfg)
 
@@ -211,14 +284,20 @@ def render_keyframe(
 
     loras = {s: Path(p) for s, p in (lora_paths or {}).items()}
     single_slot = scene.character_slots[0] if scene.character_slots else None
+    has_instantid_ref = bool(single_slot and _ref_images(cast, single_slot, count=1))
+    path = keyframe_render_path(engine, cfg, has_instantid_ref=has_instantid_ref)
 
-    # Single-character + identity_method "instantid" + a real reference face -> the InstantID pipe
-    # (its own SDXL + face-keypoints ControlNet + face-embedding injection). Everything else (the
-    # default IP-Adapter single path, and all multi-character shots) takes the shared keyframe pipe.
-    if engine == "single" and cfg.identity_method == "instantid" and single_slot is not None \
-            and _ref_images(cast, single_slot, count=1):
+    # InstantID is not Pass B. scene_lock (default) is plate then canny + face-crop IP-Adapter;
+    # InstantID still records as identity_requested. The debug hatch (scene_lock off) keeps the
+    # old InstantID / single / regional bodies.
+    if path == "scene_lock":
+        image, identity_path, prompt = _render_scene_lock(
+            server, scene, cast, storyboard, cfg, loras, pose_image)
+    elif path == "instantid":
+        prompt = build_prompt(scene, cast, storyboard)
         image, identity_path = _render_instantid(server, prompt, scene, cast, cfg, loras, single_slot)
     else:
+        prompt = build_prompt(scene, cast, storyboard)
         pipe = server.keyframe_pipeline()
         _apply_scheduler(pipe, cfg)
         generator = torch.Generator(device="cuda").manual_seed(cfg.seed)
@@ -233,6 +312,168 @@ def render_keyframe(
                           multi_char=(engine == "regional"), prompt=prompt, seed=cfg.seed,
                           engine=engine, identity_requested=cfg.identity_method,
                           identity_path=identity_path)
+
+
+def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image):
+    """Pass A: scene plate (no LoRA, no IP-Adapter). Pass B: canny of that plate + face-crop
+    IP-Adapter + split LoRA. No-character shots skip Pass B. Few-step tiers still run Pass B
+    (t2i). InstantID is not this path. Returns `(image, identity_path, prompt)`."""
+    import json
+    import torch
+    from .models import ModelRole
+
+    engine = engine_for(scene, cfg)
+    passes = plan_keyframe_passes(scene, cast, storyboard, cfg)
+    pipe = server.keyframe_pipeline()
+    _apply_scheduler(pipe, cfg)
+    generator = torch.Generator(device="cuda").manual_seed(cfg.seed)
+
+    # Distill adapter tracks the tier; character LoRAs stay off for Pass A.
+    _bind_loras(pipe, {}, cfg.lora_scale, few_step=cfg.few_step)
+    _ensure_ip_adapter(pipe, 0)
+
+    plate_spec = passes[0]
+    if plate_spec.controlnet == "pose":
+        server.set_keyframe_controlnet(ModelRole.CONTROLNET_POSE)
+        slots = scene.character_slots[:cfg.max_slots]
+        boxes = region_boxes(cfg.width, cfg.height, len(slots), orientation="vertical",
+                             gutter=cfg.region_gutter)
+        if pose_image is not None:
+            from PIL import Image
+            control = Image.open(pose_image).convert("RGB").resize((cfg.width, cfg.height))
+        else:
+            control = _pose_skeleton(cfg.width, cfg.height, boxes)
+        cn_scale = cfg.controlnet_pose_scale
+    else:
+        server.set_keyframe_controlnet(ModelRole.CONTROLNET_POSE)
+        control = _blank_control(cfg.width, cfg.height)
+        cn_scale = 0.0
+    plate = pipe(
+        prompt=plate_spec.prompt, negative_prompt=plate_spec.negative_prompt,
+        num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
+        height=cfg.height, width=cfg.width, generator=generator,
+        image=control, controlnet_conditioning_scale=cn_scale,
+    ).images[0]
+    print("@event keyframe.scene_plate " + json.dumps(
+        {"shot_id": scene.id or "shot", "seed": cfg.seed}, sort_keys=True), flush=True)
+
+    if len(passes) == 1:
+        return plate, "none", plate_spec.prompt
+
+    ident = passes[1]
+    server.set_keyframe_controlnet(ModelRole.CONTROLNET_CANNY)
+    canny = _canny_preprocess(plate)
+    scale = ident.lora_scale
+    if engine == "regional":
+        slots = scene.character_slots[:cfg.max_slots]
+        crops, any_face = _face_crops_for_slots(server, cast, slots)
+        image, identity_path = _pass_b_regional(
+            pipe, ident, scene, cfg, loras, generator, canny, scale, crops, any_face)
+    else:
+        slot = scene.character_slots[0] if scene.character_slots else None
+        crops, any_face = _face_crops_for_slots(server, cast, [slot] if slot else [])
+        image, identity_path = _pass_b_single(
+            pipe, ident, scene, cfg, loras, generator, canny, scale, crops, any_face)
+    # Next shot's Pass A expects pose on the shared pipe.
+    server.set_keyframe_controlnet(ModelRole.CONTROLNET_POSE)
+    return image, identity_path, ident.prompt
+
+
+def _pass_b_single(pipe, ident, scene, cfg, loras, generator, canny, scale, crops, any_face):
+    slot = scene.character_slots[0] if scene.character_slots else None
+    _bind_loras(pipe, {slot: loras[slot]} if (slot and slot in loras) else {}, scale,
+                few_step=cfg.few_step)
+    if any_face and crops and crops[0] is not None:
+        _ensure_ip_adapter(pipe, 1)
+        pipe.set_ip_adapter_scale(cfg.ip_adapter_scale)
+        ip_kw = {"ip_adapter_image": crops[0]}
+        identity_path = single_identity_path(slot, has_ref_image=True,
+                                             has_lora=bool(slot and slot in loras))
+    else:
+        _ensure_ip_adapter(pipe, 0)
+        ip_kw = {}
+        identity_path = single_identity_path(slot, has_ref_image=False,
+                                             has_lora=bool(slot and slot in loras))
+    image = pipe(
+        prompt=ident.prompt, negative_prompt=ident.negative_prompt,
+        num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
+        height=cfg.height, width=cfg.width, generator=generator,
+        image=canny, controlnet_conditioning_scale=cfg.canny_scale,
+        **ip_kw,
+    ).images[0]
+    return image, identity_path
+
+
+def _pass_b_regional(pipe, ident, scene, cfg, loras, generator, canny, scale, crops, any_face):
+    from diffusers.image_processor import IPAdapterMaskProcessor
+
+    slots = scene.character_slots[:cfg.max_slots]
+    w, h = cfg.width, cfg.height
+    boxes = region_boxes(w, h, len(slots), orientation="vertical", gutter=cfg.region_gutter)
+    _bind_loras(pipe, {s: loras[s] for s in slots if s in loras}, scale, few_step=cfg.few_step)
+    if any_face:
+        _ensure_ip_adapter(pipe, n=len(slots))
+        scales = [cfg.ip_adapter_scale if c is not None else 0.0 for c in crops]
+        pipe.set_ip_adapter_scale(scales)
+        from PIL import Image
+        ip_images = [c if c is not None else Image.new("RGB", (64, 64), (0, 0, 0)) for c in crops]
+        masks = IPAdapterMaskProcessor().preprocess(
+            [_box_mask(w, h, b) for b in boxes], height=h, width=w)
+        ip_kw = {"ip_adapter_image": ip_images, "cross_attention_kwargs": {"ip_adapter_masks": masks}}
+        identity_path = "regional_ip_adapter"
+    else:
+        _ensure_ip_adapter(pipe, 0)
+        ip_kw = {}
+        identity_path = "lora_only" if any(s in loras for s in slots) else "none"
+    image = pipe(
+        prompt=ident.prompt, negative_prompt=ident.negative_prompt,
+        num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
+        height=h, width=w, generator=generator,
+        image=canny, controlnet_conditioning_scale=cfg.canny_scale,
+        **ip_kw,
+    ).images[0]
+    return image, identity_path
+
+
+def _face_crops_for_slots(server, cast, slots):
+    """Per-slot face crop (or None). No-face slots skip IP-Adapter (blank, scale 0)."""
+    from . import instantid as _iid
+    crops = []
+    for slot in slots:
+        refs = _ref_images(cast, slot, count=1)
+        crop = None
+        if refs:
+            try:
+                crop = _iid.crop_face(server.face_analyzer(), refs[0])
+            except Exception:  # noqa: BLE001 -- no-face / analyzer miss is a skip, not a crash
+                crop = None
+        crops.append(crop)
+    return crops, any(c is not None for c in crops)
+
+
+def _canny_preprocess(image, *, low: int = 100, high: int = 200):
+    """Canny edges of a PIL RGB image as RGB (xinsir ControlNet conditioning).
+
+    Prefers OpenCV (the baked image; insightface pulls it) matching the model card.
+    Falls back to a Sobel magnitude so CPU tests never import cv2."""
+    import numpy as np
+    from PIL import Image
+
+    arr = np.asarray(image.convert("RGB"))
+    try:
+        import cv2
+        edges = cv2.Canny(arr, low, high)
+    except Exception:  # noqa: BLE001 -- CPU tests / missing cv2
+        gray = arr.mean(axis=2).astype(np.float32)
+        gx = np.zeros_like(gray)
+        gy = np.zeros_like(gray)
+        gx[:, 1:-1] = gray[:, 2:] - gray[:, :-2]
+        gy[1:-1, :] = gray[2:, :] - gray[:-2, :]
+        mag = np.sqrt(gx * gx + gy * gy)
+        hi = (mag.max() * (high / 255.0)) if mag.max() else 1.0
+        edges = (mag >= hi).astype(np.uint8) * 255
+    rgb = np.stack([edges, edges, edges], axis=-1)
+    return Image.fromarray(rgb)
 
 
 def _render_single(pipe, prompt, scene, cast, cfg, loras, generator):
@@ -277,7 +518,7 @@ def _render_regional(pipe, prompt, scene, cast, cfg, loras, generator, pose_imag
     w, h = cfg.width, cfg.height
     boxes = region_boxes(w, h, len(slots), orientation="vertical", gutter=cfg.region_gutter)
 
-    _bind_loras(pipe, {s: loras[s] for s in slots if s in loras}, cfg.lora_scale,
+    _bind_loras(pipe, {s: loras[s] for s in slots if s in loras}, cfg.lora_scale_per_slot,
                 few_step=cfg.few_step)
 
     # One IP-Adapter image per slot (its refs), each confined to its region's mask.

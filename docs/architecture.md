@@ -163,12 +163,14 @@ A few engine details worth knowing:
   `to_out.0`); the text encoders are left frozen to avoid drift. It runs in bf16 so the
   optimizer sees real gradients (fp8 is for inference). It is a DreamBooth-style fit on the
   5-20 reference images per slot, ~1000 steps at rank 16 by default.
-- **Keyframe** has three paths chosen by shot. A single-character (or character-free) shot
-  draws on the plain SDXL path with IP-Adapter identity. A face-critical single-character shot
-  can use **InstantID** (a face embedding projected to identity tokens plus a face-keypoint
-  ControlNet). A two-character shot uses the **regional** path: the canvas is split into masked
-  regions, each gets one character's IP-Adapter and LoRA, and an OpenPose ControlNet separates
-  the two bodies. This regional masking is what holds two faces apart without identity bleed.
+- **Keyframe** is two-pass when `scene_lock` is on (the default on the canny-bearing image).
+  Pass A draws a scene plate (style + scene prompt, no LoRA, no IP-Adapter; regional still
+  plants OpenPose bodies). Pass B is t2i on the existing ControlNet pipe with
+  `xinsir/controlnet-canny-sdxl-1.0` swapped onto `pipe.controlnet`, a canny of the plate,
+  and a face-crop IP-Adapter (never the full studio portrait). InstantID is recorded as
+  requested but is not Pass B. No-character shots skip Pass B. A two-character shot still
+  uses regional masks on Pass B. `scene_lock` off is a debug hatch back to the old single
+  pass. There is no img2img pipe.
 - **Image-to-video** is the long pole. The draft tier rides the Wan2.2-Lightning 4-step
   distill LoRA (CFG off); standard and final run the full-step path, with an inference feature
   cache (EasyCache / MixCache) for a ~1.5-2x speedup at high step counts. Frame counts snap to

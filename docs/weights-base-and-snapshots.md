@@ -79,6 +79,15 @@ bin layers) + the `sha256sum -c` manifest gate + `assert-weights`/`assert-finish
 by blob identity, so a src-only release **re-pushes only the app layers** ("layer already exists" on
 the runtime + weight blobs). Shipped in #213 (`deploy/Dockerfile` is `FROM runtime@digest` + `COPY src`).
 
+## Next seed (canny ControlNet; `model_version` still 1)
+
+`deploy/bake-manifest.json` keep-set now includes `xinsir/controlnet-canny-sdxl-1.0`
+(Hub rev `1271357eda52d54b857c650cacb5b51144643ccb`) for keyframe scene-lock Pass B.
+`model_version` stays 1 in that file until the seed-build dispatch (that dispatch is
+the weight-version bump). Src that defaults `scene_lock` true must not be tagged
+`backend-v*` against a pre-canny runtime; missing canny weights raise `HarnessError`
+naming `CONTROLNET_CANNY`.
+
 ## Why this shape (Shape Y), not the alternatives
 
 - **`hf-configs` is load-bearing and constrains the layering.** `deploy/bake_hf_configs.py` runs

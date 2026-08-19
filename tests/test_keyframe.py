@@ -3,9 +3,13 @@ geometry that confines each identity, and the single-vs-regional path choice. Th
 body needs torch/diffusers/PIL and is validated on a pod."""
 from vivijure_backend.contract import Cast, Scene, Storyboard
 from vivijure_backend.keyframe import (
+    DEFAULT_CANNY_SCALE,
     DEFAULT_IP_ADAPTER_SCALE,
     DEFAULT_LORA_SCALE,
+    DEFAULT_LORA_SCALE_PER_SLOT,
     DISTILL_GUIDANCE,
+    PASS_B_LOCK_CLAUSE,
+    SCENE_LOCK_NEGATIVE,
     KeyframeParams,
     _bind_loras,
     _box_mask,
@@ -15,7 +19,10 @@ from vivijure_backend.keyframe import (
     _pose_skeleton,
     build_prompt,
     engine_for,
+    keyframe_render_path,
+    plan_keyframe_passes,
     region_boxes,
+    scene_lock_negative,
     slot_trigger,
 )
 import pytest
@@ -42,6 +49,21 @@ def test_prompt_combines_style_scene_and_triggers():
     sc = Scene.from_dict({"id": "shot_01", "prompt": "rooftop standoff", "character_slots": ["A", "B"]}, 0)
     p = build_prompt(sc, CAST, _sb())
     assert p == "cyberpunk anime, rooftop standoff, Vesper, Rhode"
+
+
+def test_pass_a_prompt_omits_triggers():
+    sc = Scene.from_dict({"id": "shot_01", "prompt": "diner booth", "character_slots": ["A"]}, 0)
+    p = build_prompt(sc, CAST, _sb(), include_triggers=False)
+    assert p == "cyberpunk anime, diner booth"
+    assert "Vesper" not in p
+
+
+def test_pass_b_prompt_has_triggers_and_lock_clause():
+    sc = Scene.from_dict({"id": "shot_01", "prompt": "diner booth", "character_slots": ["A"]}, 0)
+    p = build_prompt(sc, CAST, _sb(), include_triggers=True, lock_clause=True)
+    assert "Vesper" in p
+    assert PASS_B_LOCK_CLAUSE in p
+    assert p.startswith("cyberpunk anime, diner booth")
 
 
 def test_prompt_has_no_dangling_comma_without_style():
@@ -159,9 +181,12 @@ def test_over_cap_falls_back_to_single():
 def test_anti_bleed_defaults():
     p = KeyframeParams()
     assert p.lora_scale == DEFAULT_LORA_SCALE == 0.3
+    assert p.lora_scale_per_slot == DEFAULT_LORA_SCALE_PER_SLOT == 0.35
     assert p.ip_adapter_scale == DEFAULT_IP_ADAPTER_SCALE == 0.7
     assert p.pose_conditioning is True
     assert p.max_slots == 2
+    assert p.scene_lock is True
+    assert p.canny_scale == DEFAULT_CANNY_SCALE == 0.70
 
 
 # ------------------------------------------------------------------- LoRA binding (shared pipe)
@@ -397,3 +422,72 @@ def test_keyframe_result_defaults_do_not_claim_an_identity_path():
                          prompt="p", seed=0, engine="single")
     assert res.identity_path == ""
     assert res.identity_path not in IDENTITY_PATHS
+
+
+# ---------------------------------------------------------------- scene-lock two-pass plan
+
+def test_scene_lock_negative_only_when_scene_prompt_is_non_empty():
+    empty = Scene.from_dict({"id": "s", "prompt": "  ", "character_slots": ["A"]}, 0)
+    filled = Scene.from_dict({"id": "s", "prompt": "a diner", "character_slots": ["A"]}, 0)
+    base = "lowres, bad anatomy"
+    assert scene_lock_negative(empty, base) == base
+    locked = scene_lock_negative(filled, base)
+    assert SCENE_LOCK_NEGATIVE in locked
+    assert locked.startswith(base)
+    assert "bad anatomy" in locked  # keep the anatomy negative
+
+
+def test_scene_lock_wins_over_instantid():
+    cfg = KeyframeParams(scene_lock=True, identity_method="instantid")
+    assert keyframe_render_path("single", cfg, has_instantid_ref=True) == "scene_lock"
+    hatch = KeyframeParams(scene_lock=False, identity_method="instantid")
+    assert keyframe_render_path("single", hatch, has_instantid_ref=True) == "instantid"
+    assert keyframe_render_path("regional", hatch, has_instantid_ref=False) == "regional"
+
+
+def test_plan_two_passes_for_character_shot():
+    sc = Scene.from_dict({"id": "s", "prompt": "a diner booth", "character_slots": ["A"]}, 0)
+    cfg = KeyframeParams()
+    passes = plan_keyframe_passes(sc, CAST, _sb(), cfg)
+    assert [p.name for p in passes] == ["plate", "identity"]
+    plate, ident = passes
+    assert plate.bind_loras is False
+    assert plate.use_ip_adapter is False
+    assert plate.face_crop is False
+    assert plate.controlnet == "none"
+    assert "Vesper" not in plate.prompt
+    assert ident.bind_loras is True
+    assert ident.face_crop is True
+    assert ident.controlnet == "canny"
+    assert ident.canny_from_plate is True
+    assert ident.lora_scale == DEFAULT_LORA_SCALE == 0.3
+    assert "Vesper" in ident.prompt
+    assert PASS_B_LOCK_CLAUSE in ident.prompt
+    assert SCENE_LOCK_NEGATIVE in ident.negative_prompt
+
+
+def test_plan_regional_pass_a_is_pose_pass_b_is_canny_at_slot_scale():
+    sc = Scene.from_dict({"id": "s", "prompt": "a diner", "character_slots": ["A", "B"]}, 0)
+    cfg = KeyframeParams()
+    plate, ident = plan_keyframe_passes(sc, CAST, _sb(), cfg)
+    assert plate.controlnet == "pose"
+    assert ident.controlnet == "canny"
+    assert ident.canny_from_plate is True
+    assert ident.lora_scale == DEFAULT_LORA_SCALE_PER_SLOT == 0.35
+    assert ident.use_ip_adapter is True
+    assert ident.face_crop is True
+
+
+def test_plan_no_character_is_pass_a_only():
+    sc = Scene.from_dict({"id": "s", "prompt": "empty diner", "character_slots": []}, 0)
+    passes = plan_keyframe_passes(sc, CAST, _sb(), KeyframeParams())
+    assert len(passes) == 1
+    assert passes[0].name == "plate"
+    assert passes[0].bind_loras is False
+
+
+def test_few_step_still_plans_pass_b():
+    sc = Scene.from_dict({"id": "s", "prompt": "a diner", "character_slots": ["A"]}, 0)
+    cfg = KeyframeParams(few_step=True, steps=4)
+    names = [p.name for p in plan_keyframe_passes(sc, CAST, _sb(), cfg)]
+    assert names == ["plate", "identity"]

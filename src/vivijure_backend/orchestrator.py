@@ -28,7 +28,7 @@ import json
 MULTI_CHAR_DEFAULTS: dict[str, object] = {
     "engine": "regional",
     "pose_conditioning": True,
-    "lora_scale_per_slot": 0.7,
+    "lora_scale_per_slot": 0.35,
     "ip_adapter_scale_per_slot": 0.7,
     "max_slots": 2,
     "region_gutter": 64,
@@ -127,16 +127,18 @@ class RenderPlan:
 
 
 def kf_hash(kc) -> str:
-    """Short SHA-256 hash of the keyframe render params (steps, guidance, seed, model, and the
-    multi-char anti-bleed knobs). Stored alongside each keyframe in state so an incremental
-    re-run with changed params forces regeneration instead of silently reusing a stale image.
+    """Short SHA-256 hash of the keyframe render params (steps, guidance, seed, model, the
+    multi-char anti-bleed knobs, and the scene-lock two-pass knobs). Stored alongside each
+    keyframe in state so an incremental re-run with changed params forces regeneration instead
+    of silently reusing a stale image.
 
     Covers every input that changes the SDXL output but NOT the prompt or character refs -- those
     are project-level inputs that change the bundle, not the config. If only prompt/refs changed,
     the user supplies a new bundle and the state tar is naturally stale (different project slot).
 
-    Accepts any object with the KeyframeConfig attribute shape to avoid a circular import; the
-    type is enforced by the callers."""
+    Flipping `scene_lock` MUST change this hash so incremental preview does not reuse grey
+    studio portraits. Accepts any object with the KeyframeConfig attribute shape to avoid a
+    circular import; the type is enforced by the callers."""
     mc = kc.multi_char
     payload = {
         "steps": kc.distill_steps if kc.distill else kc.steps,
@@ -146,12 +148,16 @@ def kf_hash(kc) -> str:
         "identity_method": kc.identity_method.value,
         "width": kc.width,
         "height": kc.height,
-        "lora_scale": mc.lora_scale_per_slot,
+        "lora_scale": kc.lora_scale,
+        "lora_scale_per_slot": mc.lora_scale_per_slot,
         "ip_scale": mc.ip_adapter_scale_per_slot,
         "pose_cond": mc.pose_conditioning,
         "cn_scale": mc.controlnet_pose_scale,
         "gutter": mc.region_gutter,
         "max_slots": mc.max_slots,
+        "scene_lock": kc.scene_lock,
+        "canny_scale": kc.canny_scale,
+        "two_pass": "scene_lock_v1",
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 

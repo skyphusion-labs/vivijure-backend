@@ -61,10 +61,13 @@ The SDXL keyframe stage. Fields map to diffusers SDXL parameters.
 | `distill_model` | str | Hyper-SD (`DEFAULT_SPECS`) | -- | The few-step LoRA repo. |
 | `distill_steps` | int | 8 | 1-8 | Hyper-SD fixed-step count. |
 | `seed` | int | 424242 | >=0 | Base RNG seed. |
-| `identity_method` | enum | `ip_adapter` | see [IdentityMethod](#identitymethod) | How a face is pinned (all shots). |
+| `identity_method` | enum | `ip_adapter` | see [IdentityMethod](#identitymethod) | How a face is pinned (all shots). InstantID is still recorded; scene-lock Pass B is canny + face-crop IP-Adapter, not InstantID. |
 | `ip_adapter_scale` | float | 0.65 | 0-1 | Single-subject IP-Adapter identity pull. |
 | `instantid_controlnet_scale` | float | 0.8 | 0-1.5 | InstantID face-ControlNet (single-char upgrade). |
 | `instantid_ip_adapter_scale` | float | 0.8 | 0-1.5 | InstantID IP-Adapter (single-char upgrade). |
+| `lora_scale` | float | 0.30 | 0-2 | Single-char LoRA. The mapper must not read `lora_scale_per_slot` for this path. |
+| `scene_lock` | bool | true | -- | Two-pass plate then canny. Default true only on the canny-bearing image. Off is a debug hatch. Do not tag `backend-v*` until seed+runtime contain `CONTROLNET_CANNY`. |
+| `canny_scale` | float | 0.70 | 0-1.5 | Pass B ControlNet conditioning. |
 | `multi_char` | MultiCharConfig | see below | -- | Regional multi-character anti-bleed block. |
 
 `from_dict` also accepts a `resolution` string `"WIDTHxHEIGHT"` (the control plane's shape) in
@@ -85,7 +88,7 @@ single-face by nature), so the regional path stays masked-IP-Adapter only.
 |---|---|---|---|---|
 | `regional` | bool | true | -- | Use the regional no-bleed engine for multi-char shots. |
 | `pose_conditioning` | bool | true | -- | OpenPose ControlNet to separate bodies. |
-| `lora_scale_per_slot` | float | 0.7 | 0-2 | Per-character LoRA strength in a shared frame. |
+| `lora_scale_per_slot` | float | 0.35 | 0-2 | Regional only. Was 0.7 live for both paths (the studio-portrait defect). |
 | `ip_adapter_scale_per_slot` | float | 0.7 | 0-1 | Per-region masked IP-Adapter identity pull. |
 | `max_slots` | int | 2 | 1-4 | Characters the no-bleed path supports at once. |
 | `controlnet_pose_scale` | float | 0.55 | 0-1.5 | OpenPose ControlNet conditioning scale. |

@@ -51,12 +51,27 @@ def test_keyframe_params_pull_multichar_scales():
         "lora_scale_per_slot": 0.25, "ip_adapter_scale_per_slot": 0.6,
         "max_slots": 2, "pose_conditioning": False}}})
     p = keyframe_params_from(cfg)
-    assert p.lora_scale == 0.25
+    assert p.lora_scale == pytest.approx(0.30)  # single-char default; must not read per-slot
+    assert p.lora_scale_per_slot == pytest.approx(0.25)
     # ip_adapter_scale comes from kc.ip_adapter_scale (top-level), not mc.ip_adapter_scale_per_slot;
     # mc's per-slot value is consumed by the regional blending engine, not this params field.
     assert p.ip_adapter_scale == pytest.approx(0.65)  # KeyframeConfig default
     assert p.pose_conditioning is False
     assert p.max_slots == 2
+
+
+def test_keyframe_params_from_split_lora_ignores_per_slot_for_single():
+    """The live defect: mapper always used mc.lora_scale_per_slot (0.7) for single-char too."""
+    cfg = RenderConfig.from_request("final", {"keyframe": {
+        "lora_scale": 0.30, "multi_char": {"lora_scale_per_slot": 0.7}}})
+    p = keyframe_params_from(cfg)
+    assert p.lora_scale == pytest.approx(0.30)
+    assert p.lora_scale_per_slot == pytest.approx(0.7)
+    cfg2 = RenderConfig.from_request("final", {"keyframe": {
+        "lora_scale": 0.30, "multi_char": {"lora_scale_per_slot": 0.35}}})
+    p2 = keyframe_params_from(cfg2)
+    assert p2.lora_scale == pytest.approx(0.30)
+    assert p2.lora_scale_per_slot == pytest.approx(0.35)
 
 
 def test_keyframe_params_default_size_is_square():

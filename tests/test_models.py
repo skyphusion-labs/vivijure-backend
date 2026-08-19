@@ -60,6 +60,72 @@ def test_default_specs_cover_every_role():
         assert spec.repo_id  # a real, non-empty HF id
 
 
+def test_default_specs_include_controlnet_canny():
+    from vivijure_backend.models import DEFAULT_SPECS
+    spec = DEFAULT_SPECS[ModelRole.CONTROLNET_CANNY]
+    assert spec.repo_id == "xinsir/controlnet-canny-sdxl-1.0"
+    assert spec.family is ModelFamily.AUX
+
+
+def test_bake_manifest_keep_set_includes_canny_controlnet():
+    import json
+    from pathlib import Path
+    from vivijure_backend.models import DEFAULT_SPECS
+    root = Path(__file__).resolve().parents[1]
+    m = json.loads((root / "deploy" / "bake-manifest.json").read_text())
+    repos = {e["repo"]: e for e in m["keep_repos"]}
+    canny = repos["models--xinsir--controlnet-canny-sdxl-1.0"]
+    assert canny["role"] == "CONTROLNET"
+    assert canny["rev"] == "1271357eda52d54b857c650cacb5b51144643ccb"
+    assert canny["approx_gb_bf16"] == 2.5
+    assert m["model_version"] == 1  # bump is the seed-build dispatch, not this src PR
+    assert DEFAULT_SPECS[ModelRole.CONTROLNET_CANNY].repo_id == "xinsir/controlnet-canny-sdxl-1.0"
+
+
+def test_missing_canny_weights_raise_harness_error_naming_the_role():
+    from vivijure_backend.harness.handler import HarnessError
+    from vivijure_backend.models import controlnet_load_failure
+    err = controlnet_load_failure(ModelRole.CONTROLNET_CANNY, OSError("LocalEntryNotFoundError"))
+    assert isinstance(err, HarnessError)
+    assert "CONTROLNET_CANNY" in str(err)
+    assert "xinsir/" not in str(err)  # role, not a raw diffusers path
+    pose = controlnet_load_failure(ModelRole.CONTROLNET_POSE, OSError("missing pose"))
+    assert isinstance(pose, OSError)
+
+
+def test_controlnet_cache_keeps_both_and_swaps():
+    from vivijure_backend.models import ModelServer
+    server = ModelServer(device=H200)
+    loaded = []
+
+    def fake_load(spec):
+        loaded.append(spec.role)
+        return f"cn-{spec.role.value}"
+
+    server._load_controlnet = fake_load
+    pose = server._controlnet(ModelRole.CONTROLNET_POSE)
+    canny = server._controlnet(ModelRole.CONTROLNET_CANNY)
+    assert pose == "cn-controlnet_pose"
+    assert canny == "cn-controlnet_canny"
+    assert server._cache["controlnet_pose"] is pose
+    assert server._cache["controlnet_canny"] is canny
+    assert server._controlnet(ModelRole.CONTROLNET_POSE) is pose  # cache hit
+    assert loaded == [ModelRole.CONTROLNET_POSE, ModelRole.CONTROLNET_CANNY]
+
+
+def test_low_vram_unloads_idle_controlnet():
+    from vivijure_backend.device import Arch, Device, Tier
+    from vivijure_backend.models import ModelServer
+    small = Device(name="local-16gb", capability=(8, 9), arch=Arch.OTHER,
+                   tier=Tier.UNKNOWN, vram_gb=16, bandwidth_tbs=0)
+    server = ModelServer(device=small)
+    server._load_controlnet = lambda spec: f"cn-{spec.role.value}"
+    server._controlnet(ModelRole.CONTROLNET_POSE)
+    server._controlnet(ModelRole.CONTROLNET_CANNY)
+    assert "controlnet_pose" not in server._cache  # idle dropped
+    assert "controlnet_canny" in server._cache
+
+
 # ------------------------------------------------------- repo_id allowlist (cold-start security)
 
 from vivijure_backend.models import (

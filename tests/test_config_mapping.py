@@ -90,7 +90,23 @@ def test_keyframe_instantid_ip_adapter_scale_reaches_params():
 
 def test_keyframe_multi_char_lora_scale_reaches_params():
     p = keyframe_params_from(_rcfg(kf={"multi_char": {"lora_scale_per_slot": 0.5}}))
-    assert p.lora_scale == pytest.approx(0.5)
+    assert p.lora_scale == pytest.approx(0.30)  # single-char; multi_char must not leak
+    assert p.lora_scale_per_slot == pytest.approx(0.5)
+
+
+def test_keyframe_single_char_lora_scale_reaches_params():
+    p = keyframe_params_from(_rcfg(kf={"lora_scale": 0.22, "multi_char": {"lora_scale_per_slot": 0.7}}))
+    assert p.lora_scale == pytest.approx(0.22)
+    assert p.lora_scale_per_slot == pytest.approx(0.7)
+
+
+def test_keyframe_scene_lock_and_canny_scale_reach_params():
+    p = keyframe_params_from(_rcfg(kf={"scene_lock": False, "canny_scale": 0.55}))
+    assert p.scene_lock is False
+    assert p.canny_scale == pytest.approx(0.55)
+    on = keyframe_params_from(_rcfg())
+    assert on.scene_lock is True
+    assert on.canny_scale == pytest.approx(0.70)
 
 
 def test_keyframe_ip_adapter_scale_reaches_params():
@@ -232,6 +248,9 @@ KEYFRAME_ASSERTED = {
     "distill", "scheduler", "identity_method",
     "instantid_ip_adapter_scale",
     "ip_adapter_scale",
+    "lora_scale",
+    "scene_lock",
+    "canny_scale",
     "multi_char",
 }
 

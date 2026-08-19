@@ -60,6 +60,13 @@
       "role": "CONTROLNET",
       "approx_gb_bf16": 2.5,
       "note": "SDXL openpose ControlNet (loaded via ControlNetModel.from_pretrained torch_dtype=bfloat16). Already <10 GB max file; kept whole."
+    },
+    {
+      "repo": "models--xinsir--controlnet-canny-sdxl-1.0",
+      "rev": "1271357eda52d54b857c650cacb5b51144643ccb",
+      "role": "CONTROLNET",
+      "approx_gb_bf16": 2.5,
+      "note": "SDXL canny ControlNet for keyframe scene-lock Pass B (t2i on the Pass A plate). Same vendor as openpose; Apache-2.0. Pin Hub revision at seed-build. Src that defaults scene_lock true MUST ship only on a runtime that contains these weights -- do not src-only backend-v* against a pre-canny runtime. model_version stays 1 here until the seed-build dispatch."
     }
   ],
   "finish_dirs": [

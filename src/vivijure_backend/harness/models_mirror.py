@@ -643,6 +643,7 @@ HF_OFFLINE_STUBS: tuple[tuple[str, str], ...] = (
     ("models--SG161222--RealVisXL_V5.0", "vae/diffusion_pytorch_model.safetensors.index.json"),
     # probe 2: same shard-index check for the xinsir ControlNet weights
     ("models--xinsir--controlnet-openpose-sdxl-1.0", "diffusion_pytorch_model.safetensors.index.json"),
+    ("models--xinsir--controlnet-canny-sdxl-1.0", "diffusion_pytorch_model.safetensors.index.json"),
     # probe 3: PEFT adapter_config probe for the IP-Adapter image_encoder (not a PEFT model)
     ("models--h94--IP-Adapter", "sdxl_models/image_encoder/adapter_config.json"),
 )

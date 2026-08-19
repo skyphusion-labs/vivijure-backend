@@ -42,9 +42,10 @@ _NULL_PROGRESS = NullEmitter()
 
 def keyframe_params_from(config: RenderConfig) -> KeyframeParams:
     """Map the typed `KeyframeConfig` onto the keyframe engine's `KeyframeParams`. `distill`
-    selects the few-step path (its `distill_steps`) and `few_step`; the per-slot anti-bleed
-    scales come from the multi_char block (the engine uses one IP-Adapter / LoRA scale for both
-    the single and the masked-regional path, which is what KeyframeParams models)."""
+    selects the few-step path (its `distill_steps`) and `few_step`. LoRA scale is SPLIT:
+    single-char reads `KeyframeConfig.lora_scale` (0.30); regional reads
+    `multi_char.lora_scale_per_slot` (0.35). Reading the regional default for both paths
+    was the live 0.7 studio-portrait defect."""
     kc = config.keyframe
     mc = kc.multi_char
     return KeyframeParams(
@@ -55,7 +56,8 @@ def keyframe_params_from(config: RenderConfig) -> KeyframeParams:
         seed=kc.seed,
         few_step=kc.distill,
         scheduler=kc.scheduler.value,              # ddim_trailing on the few-step path, a solver on final
-        lora_scale=mc.lora_scale_per_slot,
+        lora_scale=kc.lora_scale,                  # single-char only; must not read lora_scale_per_slot
+        lora_scale_per_slot=mc.lora_scale_per_slot,
         ip_adapter_scale=kc.ip_adapter_scale,      # single-char field; multi-char path uses mc.ip_adapter_scale_per_slot via region override
         identity_method=kc.identity_method.value,  # single-char path: ip_adapter (default) or instantid
         instantid_ip_adapter_scale=kc.instantid_ip_adapter_scale,
@@ -63,6 +65,8 @@ def keyframe_params_from(config: RenderConfig) -> KeyframeParams:
         controlnet_pose_scale=mc.controlnet_pose_scale,
         region_gutter=mc.region_gutter,
         max_slots=mc.max_slots,
+        scene_lock=kc.scene_lock,
+        canny_scale=kc.canny_scale,
     )
 
 
