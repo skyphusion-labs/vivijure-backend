@@ -1,7 +1,7 @@
 {
   "_comment": "Change-controlled bake seed manifest for the bf16 baked image (#13). The seed staged to R2 (deploy/stage_bake_seed.py) and the worker's runtime model set are derived from ONE source of truth -- models.py specs + harness/models_mirror keep-set -- so 'baked == what the worker loads, no more'. A second hand-maintained list would drift; that drift (in spirit) is how the :0.3.0 empty bake happened. Revisions are the HF snapshot SHAs pinned in r2:vivijure/models. Sizes are approximate (post-recast for recast repos). The drop-set is recorded with a reason each so this file is the auditable record of BOTH sides.",
   "precision": "bf16",
-  "model_version": 1,
+  "model_version": 2,
   "source": "r2:vivijure/models",
   "dest": "r2:vivijure/bake-seed-bf16",
   "hub_subpath": "hf-cache/hub",
