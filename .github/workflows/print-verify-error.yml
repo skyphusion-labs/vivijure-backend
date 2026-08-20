@@ -1,0 +1,38 @@
+name: Print verify R2 error
+
+# Cheap ubuntu job: fetch verify/<run_id>/summary.json and print stage+message only. No GPU.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Verify run id (e.g. s1-41aa1926802e)"
+        required: true
+        type: string
+      prefix:
+        description: "R2 key prefix"
+        required: false
+        default: verify
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  print:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PYTHONPATH: src
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: vivijure
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install boto3
+        run: pip install --upgrade pip && pip install boto3
+      - name: Print error only
+        run: python deploy/print_verify_error.py "${{ inputs.run_id }}" "${{ inputs.prefix }}"

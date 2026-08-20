@@ -941,9 +941,19 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
             events, terminal = reader()
             if terminal is not None:                 # "complete" OR "error" -- a terminal channel state
                 result = evaluator(events, cfg)
+                err = find_event(events, "error")
+                if err:
+                    report["channel_error"] = {
+                        "stage": err.get("stage"),
+                        "message": str(err.get("message") or "")[:500],
+                    }
                 if terminal == "error":
                     result.passed = False
                     result.reasons.append("verify channel reported status=error before all gates passed")
+                    if report.get("channel_error", {}).get("message"):
+                        result.reasons.append("%s: %s" % (
+                            report["channel_error"].get("stage") or "error",
+                            report["channel_error"]["message"]))
                 break
             poll_sleep(poll_step)
         else:

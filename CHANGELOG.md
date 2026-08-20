@@ -7,6 +7,12 @@ releases are summarized below from that history.
 
 ## Unreleased
 
+**Fix: verify report includes R2 channel error stage and message.**
+
+A `status=error` smoke no longer dies as a generic hold. `channel_error` lands in
+the report. `print-verify-error.yml` dumps a prior run's stage+message from R2
+with no GPU.
+
 **Fix: verify pod pulls GHCR with the same RunPod registry auth as serverless.**
 
 The GraphQL SDK cannot attach `containerRegistryAuthId`. The harness was rejecting it

@@ -197,6 +197,25 @@ def test_run_verify_pass_deletes_pod_and_signals_promote():
     assert report["cost_estimate_usd"] >= 0.0
 
 
+def test_run_verify_surfaces_channel_error_stage_and_message():
+    client = FakePodClient([])
+
+    def reader():
+        return (
+            [("error", {"stage": "render", "message": "CONTROLNET_CANNY missing from bake"})],
+            "error",
+        )
+
+    report = rv.run_verify(client, rv.VerifyConfig(image="img:test"), clock=_clock(),
+                           event_reader=reader)
+    assert report["passed"] is False
+    assert report["channel_error"] == {
+        "stage": "render",
+        "message": "CONTROLNET_CANNY missing from bake",
+    }
+    assert any("CONTROLNET_CANNY missing from bake" in r for r in report["reasons"])
+
+
 def test_run_verify_fail_deletes_pod_and_captures_evidence():
     log = _pass_log() + ['@event mirror_complete {"total_seconds": 400.0}']  # baked but pulled R2 -> FAIL
     client = FakePodClient(log)
