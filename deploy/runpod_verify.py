@@ -223,12 +223,14 @@ class RunpodSdkPodClient:
     The `runpod` SDK is imported lazily; unit tests inject a fake `sdk` and never import it."""
 
     def __init__(self, *, api_key=None, container_disk_gb=500, data_center_id=None,
-                 log_fetcher=None, name_prefix="vj-verify", sdk=None):
+                 log_fetcher=None, name_prefix="vj-verify", sdk=None, rest_transport=None):
+        self._api_key = api_key or os.environ.get("RUNPOD_API_KEY")
         self._sdk = sdk if sdk is not None else _import_runpod(api_key)
         self._container_disk_gb = container_disk_gb
         self._data_center_id = data_center_id
         self._log_fetcher = log_fetcher or _null_log_fetcher
         self._name_prefix = name_prefix
+        self._rest_transport = rest_transport
 
     def list_gpu_types(self):
         """SECURE-cloud GPU types in the harness shape ({id, displayName, available}). The RunPod SDK
@@ -257,19 +259,23 @@ class RunpodSdkPodClient:
         """Spin ONE SECURE-cloud GPU pod on `image`. `command` is the container start command (RunPod
         docker_args) -- for a verify run it RUNS the verify entrypoint; without it the pod boots the
         image default CMD (the serverless worker) and emits no @event contract. `ttl_seconds` is
-        enforced by the harness poll loop, not the SDK. `registry_auth_id` is rejected loudly (not
-        silently ignored): our images are public GHCR (no auth needed); a private image must be pulled
-        via a pre-created RunPod template carrying containerRegistryAuthId, spun from template_id -- a
-        separate seam, not this call."""
-        if registry_auth_id:
-            raise ValueError("RunpodSdkPodClient pulls public GHCR images (no registry auth). For a "
-                             "private image, provision a RunPod template with containerRegistryAuthId "
-                             "and spin from its template_id -- do not pass registry_auth_id here.")
+        enforced by the harness poll loop, not the SDK.
+
+        GHCR is private. The serverless template already holds the pull PAT as
+        ``containerRegistryAuthId``. The GraphQL SDK `create_pod` cannot attach that id, so a GHCR
+        verify pod is created over REST with the SAME id (never a new PAT)."""
+        if str(image).startswith("ghcr.io/") and not registry_auth_id:
+            raise ValueError("GHCR pull needs containerRegistryAuthId (same PAT as serverless; "
+                             "pass --registry-auth-id / RUNPOD_CONTAINER_REGISTRY_AUTH_ID)")
         # An explicit per-call value wins; the sentinel means "fall back to the client default".
         dc = self._data_center_id if data_center_id is _USE_CLIENT_DC else data_center_id
+        name = ("%s-%s" % (self._name_prefix, gpu_type_id)).replace(" ", "-")[:60]
+        if registry_auth_id:
+            return self._create_pod_rest(
+                name=name, image=image, gpu_type_id=gpu_type_id, env=dict(env or {}),
+                registry_auth_id=registry_auth_id, command=command, data_center_id=dc)
         kwargs = dict(
-            name=("%s-%s" % (self._name_prefix, gpu_type_id)).replace(" ", "-")[:60],
-            image_name=image, gpu_type_id=gpu_type_id, cloud_type="SECURE",
+            name=name, image_name=image, gpu_type_id=gpu_type_id, cloud_type="SECURE",
             container_disk_in_gb=self._container_disk_gb, env=dict(env or {}),
             data_center_id=dc, support_public_ip=True, start_ssh=True)
         if command:
@@ -278,6 +284,36 @@ class RunpodSdkPodClient:
         pod_id = pod.get("id") if isinstance(pod, dict) else None
         if not pod_id:
             raise RuntimeError("RunPod create_pod returned no id: %r" % (pod,))
+        return {"id": pod_id}
+
+    def _create_pod_rest(self, *, name, image, gpu_type_id, env, registry_auth_id, command,
+                         data_center_id):
+        """REST create so we can attach containerRegistryAuthId. The GraphQL SDK cannot."""
+        transport = self._rest_transport or _default_promote_transport()
+        key = _clean_key(self._api_key)
+        if not key:
+            raise RuntimeError("GHCR pod create needs RUNPOD_API_KEY (never hardcode a key)")
+        payload = {
+            "name": name,
+            "imageName": image,
+            "gpuTypeIds": [gpu_type_id],
+            "gpuCount": 1,
+            "cloudType": "SECURE",
+            "containerDiskInGb": self._container_disk_gb,
+            "env": dict(env or {}),
+            "containerRegistryAuthId": registry_auth_id,
+            "supportPublicIp": True,
+            "ports": ["22/tcp"],
+        }
+        if command:
+            payload["dockerArgs"] = command
+        if data_center_id:
+            payload["dataCenterIds"] = [data_center_id]
+        pod = transport("%s/pods" % RUNPOD_REST_BASE, method="POST",
+                        headers=_auth_headers(key), payload=payload)
+        pod_id = pod.get("id") if isinstance(pod, dict) else None
+        if not pod_id:
+            raise RuntimeError("RunPod REST create pod returned no id: %r" % (pod,))
         return {"id": pod_id}
 
     def get_pod(self, pod_id):
@@ -1429,7 +1465,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="RunPod pod verify harness (mock-first; live is gated).")
     ap.add_argument("--image", default="ghcr.io/skyphusion-labs/vivijure-backend:dryrun")
     ap.add_argument("--tier", default="i2v", choices=sorted(GPU_TIERS))
-    ap.add_argument("--registry-auth-id", default=None)
+    ap.add_argument("--registry-auth-id",
+                    default=os.environ.get("RUNPOD_CONTAINER_REGISTRY_AUTH_ID") or None,
+                    help="RunPod containerRegistryAuthId (same GHCR PAT as serverless; id, not the PAT)")
     ap.add_argument("--live", action="store_true", help="use the (gated) live RunPod client")
     ap.add_argument("--regression", action="store_true",
                     help="run the FULL capability regression (CAP-1..6 + BAK-3/4), not just the smoke")
