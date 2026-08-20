@@ -44,7 +44,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import sys
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Protocol
@@ -289,34 +288,34 @@ class RunpodSdkPodClient:
 
     def _create_pod_rest(self, *, name, image, gpu_type_id, env, registry_auth_id, command,
                          data_center_id):
-        """REST create so we can attach containerRegistryAuthId. The GraphQL SDK cannot."""
+        """REST v2 create so we can attach `registry` (containerRegistryAuthId). GraphQL cannot."""
         transport = self._rest_transport or _default_promote_transport()
         key = _clean_key(self._api_key)
         if not key:
             raise RuntimeError("GHCR pod create needs RUNPOD_API_KEY (never hardcode a key)")
         payload = {
             "name": name,
-            "imageName": image,
-            "gpuTypeIds": [gpu_type_id],
-            "gpuCount": 1,
-            "cloudType": "SECURE",
-            "containerDiskInGb": self._container_disk_gb,
+            "image": image,
+            "gpu": {"id": gpu_type_id, "count": 1},
+            "cloud": "SECURE",
+            "disk": self._container_disk_gb,
             "env": dict(env or {}),
-            "containerRegistryAuthId": registry_auth_id,
-            "supportPublicIp": True,
+            "registry": registry_auth_id,
             "ports": ["22/tcp"],
+            "startSsh": True,
         }
         if command:
-            payload["dockerStartCmd"] = (
-                list(command) if isinstance(command, (list, tuple))
-                else shlex.split(command))
+            payload["args"] = (
+                " ".join(command) if isinstance(command, (list, tuple)) else command)
         if data_center_id:
             payload["dataCenterIds"] = [data_center_id]
-        pod = transport("%s/pods" % RUNPOD_REST_BASE, method="POST",
+        pod = transport("%s/pods" % RUNPOD_REST_V2, method="POST",
                         headers=_auth_headers(key), payload=payload)
-        pod_id = pod.get("id") if isinstance(pod, dict) else None
+        if not isinstance(pod, dict):
+            raise RuntimeError("RunPod REST v2 create pod returned no body: %r" % (pod,))
+        pod_id = pod.get("id") or (pod.get("pod") or {}).get("id")
         if not pod_id:
-            raise RuntimeError("RunPod REST create pod returned no id: %r" % (pod,))
+            raise RuntimeError("RunPod REST v2 create pod returned no id: %r" % (pod,))
         return {"id": pod_id}
 
     def get_pod(self, pod_id):
@@ -1041,7 +1040,8 @@ SMOKE_PROJECT = "verify-smoke"
 
 # The image + endpoint config live on the RunPod REST v1 control plane; the run/status/health job API
 # lives on the v2 endpoint host. Both authenticate with the same Bearer RUNPOD_API_KEY.
-RUNPOD_REST_BASE = "https://rest.runpod.io/v1"
+RUNPOD_REST_BASE = "https://rest.runpod.io/v1"  # promote/flush: v2 endpoint mutations 500 (deploy/README.md)
+RUNPOD_REST_V2 = "https://api.runpod.io/v2"     # pod create: v2 (image/registry/gpu/args/disk)
 RUNPOD_RUN_BASE = "https://api.runpod.ai/v2"
 # Worker states reported by GET /v2/{id}/health -> "workers". The pool is DRAINED when every one is 0.
 _WORKER_STATES = ("idle", "initializing", "ready", "running", "throttled", "unhealthy")

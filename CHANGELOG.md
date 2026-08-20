@@ -12,7 +12,8 @@ releases are summarized below from that history.
 The GraphQL SDK cannot attach `containerRegistryAuthId`. The harness was rejecting it
 and assuming GHCR was public. REST create now passes the serverless template's auth
 id (`cmqbz5bba0018e11d6bpcnu4n`). The PAT stays in RunPod; we never mint a second one.
-REST v1 takes `dockerStartCmd` (argv array), not GraphQL `dockerArgs`.
+Pod create is REST v2 (`POST https://api.runpod.io/v2/pods`: `image`, `registry`,
+`gpu`, `args`, `disk`). Promote/flush stay on v1 (v2 endpoint mutations 500).
 
 **Weights: seed `2-bf16` (canny ControlNet in the importable seed).**
 
