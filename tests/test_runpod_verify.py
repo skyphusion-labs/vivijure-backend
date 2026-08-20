@@ -354,7 +354,7 @@ def test_sdk_client_create_pod_forwards_registry_auth_id_over_rest():
     assert payload["containerRegistryAuthId"] == "cmqbz5bba0018e11d6bpcnu4n"
     assert payload["imageName"] == "ghcr.io/x:1"
     assert payload["cloudType"] == "SECURE"
-    assert payload["dockerArgs"] == "python -m vivijure_backend.verify"
+    assert payload["dockerStartCmd"] == ["python", "-m", "vivijure_backend.verify"]
     assert not any(c[0] == "create_pod" for c in client._sdk.calls)
 
 
