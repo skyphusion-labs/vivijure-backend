@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Protocol
@@ -306,7 +307,9 @@ class RunpodSdkPodClient:
             "ports": ["22/tcp"],
         }
         if command:
-            payload["dockerArgs"] = command
+            payload["dockerStartCmd"] = (
+                list(command) if isinstance(command, (list, tuple))
+                else shlex.split(command))
         if data_center_id:
             payload["dataCenterIds"] = [data_center_id]
         pod = transport("%s/pods" % RUNPOD_REST_BASE, method="POST",
