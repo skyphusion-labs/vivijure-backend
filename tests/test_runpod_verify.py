@@ -350,11 +350,13 @@ def test_sdk_client_create_pod_forwards_registry_auth_id_over_rest():
     assert len(calls) == 1
     method, url, payload = calls[0]
     assert method == "POST"
-    assert url.endswith("/pods")
-    assert payload["containerRegistryAuthId"] == "cmqbz5bba0018e11d6bpcnu4n"
-    assert payload["imageName"] == "ghcr.io/x:1"
-    assert payload["cloudType"] == "SECURE"
-    assert payload["dockerStartCmd"] == ["python", "-m", "vivijure_backend.verify"]
+    assert url == "https://api.runpod.io/v2/pods"
+    assert payload["registry"] == "cmqbz5bba0018e11d6bpcnu4n"
+    assert payload["image"] == "ghcr.io/x:1"
+    assert payload["cloud"] == "SECURE"
+    assert payload["gpu"] == {"id": "NVIDIA H200", "count": 1}
+    assert payload["args"] == "python -m vivijure_backend.verify"
+    assert payload["startSsh"] is True
     assert not any(c[0] == "create_pod" for c in client._sdk.calls)
 
 
