@@ -1187,7 +1187,7 @@ def test_promote_smoke_uses_a_train_free_bundle_not_the_verify_render_bundle():
     run_calls = [c for c in fake.calls if c[0] == "POST" and c[1].endswith("/run")]
     assert run_calls, "smoke never submitted a /run job"
     submitted = run_calls[0][2]["input"]
-    assert submitted["bundle_key"] == rv.SMOKE_BUNDLE_KEY == "bundles/verify-smoke/Verify_Smoke.tar.gz"
+    assert submitted["bundle_key"] == rv.SMOKE_BUNDLE_KEY == "bundles/verify/Verify_Smoke.tar.gz"
     assert submitted["project"] == rv.SMOKE_PROJECT == "verify-smoke"  # isolated from the verify render
     assert submitted["action"] == "preview" and submitted["quality_tier"] == "draft"
     assert out["smoke"]["status"] == "COMPLETED"

@@ -7,6 +7,11 @@ releases are summarized below from that history.
 
 ## Unreleased
 
+**Fix: promote proof uses tenant-scoped verify bundle key.**
+
+`SMOKE_BUNDLE_KEY` was `bundles/verify-smoke/...`. Serverless `_job_bundle_key`
+rejects that for project `verify`. Use `bundles/verify/Verify_Smoke.tar.gz`.
+
 **Fix: pin torchao 0.17.0; 0.18.0 breaks Wan i2v on torch 2.7.1.**
 
 Dependabot #419 bumped torchao to 0.18.0. That release imports
