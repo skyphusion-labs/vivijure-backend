@@ -7,6 +7,14 @@ releases are summarized below from that history.
 
 ## Unreleased
 
+**Fix: pin torchao 0.17.0; 0.18.0 breaks Wan i2v on torch 2.7.1.**
+
+Dependabot #419 bumped torchao to 0.18.0. That release imports
+`torch.nn.functional.ScalingType` (torch 2.10+) at package load, so
+`from diffusers import WanImageToVideoPipeline` died on the 1.0.15 H200
+smoke (`s1-41aa1926802e`). Revert to 0.17.0. Overlay runtime-2-bf16-t2
+from t1 (deps only; seed 2-bf16 unchanged).
+
 **Fix: verify report includes R2 channel error stage and message.**
 
 A `status=error` smoke no longer dies as a generic hold. `channel_error` lands in
