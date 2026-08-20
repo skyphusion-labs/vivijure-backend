@@ -149,9 +149,12 @@ jobs:
           # sharpness far below that, so the #118 method-ii detector keeps its teeth.
           # RECALIBRATION DOCTRINE: re-measure the baseline from a confirmed-good clip whenever the smoke
           # bundle content or the i2v config changes -- NEVER move this number to make a failing run pass.
+          # Same RunPod GHCR auth as serverless template pdc3fsdqbc (id, not the PAT).
+          REGISTRY_AUTH="${RUNPOD_CONTAINER_REGISTRY_AUTH_ID:-cmqbz5bba0018e11d6bpcnu4n}"
           python deploy/runpod_verify.py --live \
             --report-file verify-report.json \
             --image "${IMAGE}" \
+            --registry-auth-id "${REGISTRY_AUTH}" \
             --tier "${{ inputs.tier }}" \
             --bundle-key "${{ inputs.bundle_key }}" \
             --sharpness-baseline 75.0 \

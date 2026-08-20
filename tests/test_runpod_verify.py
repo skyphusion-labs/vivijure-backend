@@ -318,21 +318,44 @@ def test_sdk_client_list_gpu_types_marks_only_secure_available():
 def test_sdk_client_create_pod_forces_secure_cloud():
     sdk = FakeSdk()
     client = rv.RunpodSdkPodClient(sdk=sdk, container_disk_gb=500)
-    out = client.create_pod(image="ghcr.io/x:1", gpu_type_id="NVIDIA H200",
+    out = client.create_pod(image="runpod/stack:1", gpu_type_id="NVIDIA H200",
                             env={"VJ_VERIFY": "1"}, registry_auth_id=None, ttl_seconds=1800)
     assert out == {"id": "pod-live-1"}
     (_, kw), = [c for c in sdk.calls if c[0] == "create_pod"]
     assert kw["cloud_type"] == "SECURE"          # NEVER COMMUNITY
-    assert kw["image_name"] == "ghcr.io/x:1"
+    assert kw["image_name"] == "runpod/stack:1"
     assert kw["container_disk_in_gb"] == 500
     assert kw["env"] == {"VJ_VERIFY": "1"}
 
 
-def test_sdk_client_create_pod_rejects_registry_auth_id():
+def test_sdk_client_create_pod_requires_registry_auth_for_ghcr():
     client = rv.RunpodSdkPodClient(sdk=FakeSdk())
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="containerRegistryAuthId"):
         client.create_pod(image="ghcr.io/x:1", gpu_type_id="NVIDIA H200", env={},
-                          registry_auth_id="ra-123", ttl_seconds=1800)
+                          registry_auth_id=None, ttl_seconds=1800)
+
+
+def test_sdk_client_create_pod_forwards_registry_auth_id_over_rest():
+    calls = []
+
+    def transport(url, *, method="GET", headers=None, payload=None):
+        calls.append((method, url, payload))
+        return {"id": "pod-live-1"}
+
+    client = rv.RunpodSdkPodClient(sdk=FakeSdk(), rest_transport=transport, api_key="rpa_test")
+    out = client.create_pod(image="ghcr.io/x:1", gpu_type_id="NVIDIA H200", env={"VJ_VERIFY": "1"},
+                            registry_auth_id="cmqbz5bba0018e11d6bpcnu4n", ttl_seconds=1800,
+                            command="python -m vivijure_backend.verify")
+    assert out == {"id": "pod-live-1"}
+    assert len(calls) == 1
+    method, url, payload = calls[0]
+    assert method == "POST"
+    assert url.endswith("/pods")
+    assert payload["containerRegistryAuthId"] == "cmqbz5bba0018e11d6bpcnu4n"
+    assert payload["imageName"] == "ghcr.io/x:1"
+    assert payload["cloudType"] == "SECURE"
+    assert payload["dockerArgs"] == "python -m vivijure_backend.verify"
+    assert not any(c[0] == "create_pod" for c in client._sdk.calls)
 
 
 def test_sdk_client_read_logs_never_raises_and_defaults_empty():
@@ -363,8 +386,11 @@ def test_sdk_client_drives_run_verify_end_to_end_pass():
     # Inject a log_fetcher that replays a PASS @event stream: the whole harness runs against the live
     # client shape with no network, and PASS => the pod is TERMINATED (full teardown, no leak).
     sdk = FakeSdk()
-    client = rv.RunpodSdkPodClient(sdk=sdk, log_fetcher=lambda _pid: _pass_log())
-    cfg = rv.VerifyConfig(image="ghcr.io/x:1")
+    def transport(url, *, method="GET", headers=None, payload=None):
+        return {"id": "pod-live-1"}
+    client = rv.RunpodSdkPodClient(sdk=sdk, rest_transport=transport, api_key="rpa_x",
+                                   log_fetcher=lambda _pid: _pass_log())
+    cfg = rv.VerifyConfig(image="ghcr.io/x:1", registry_auth_id="cmqbz5bba0018e11d6bpcnu4n")
     report = rv.run_verify(client, cfg, clock=_clock(), evaluator=rv.evaluate)
     assert report["passed"] is True
     assert report["signal"] == "promote"
@@ -376,8 +402,11 @@ def test_sdk_client_missing_log_channel_fails_closed_and_tears_down():
     # No @event stream (null fetcher) => never reaches @event complete => TTL FAIL, and the pod is
     # DELETED (list-confirmed zero), never left stopped-but-billing.
     sdk = FakeSdk()
-    client = rv.RunpodSdkPodClient(sdk=sdk)  # default null fetcher
-    cfg = rv.VerifyConfig(image="ghcr.io/x:1", ttl_seconds=3)
+    def transport(url, *, method="GET", headers=None, payload=None):
+        return {"id": "pod-live-1"}
+    client = rv.RunpodSdkPodClient(sdk=sdk, rest_transport=transport, api_key="rpa_x")
+    cfg = rv.VerifyConfig(image="ghcr.io/x:1", ttl_seconds=3,
+                          registry_auth_id="cmqbz5bba0018e11d6bpcnu4n")
     report = rv.run_verify(client, cfg, clock=_clock(), evaluator=rv.evaluate)
     assert report["passed"] is False
     assert report["teardown"] == "deleted"
@@ -665,7 +694,7 @@ def test_run_verify_passes_pod_command_to_create_pod():
 def test_sdk_client_create_pod_sets_command_as_docker_args():
     sdk = FakeSdk()
     client = rv.RunpodSdkPodClient(sdk=sdk)
-    client.create_pod(image="ghcr.io/x:1", gpu_type_id="NVIDIA H200", env={}, registry_auth_id=None,
+    client.create_pod(image="runpod/stack:1", gpu_type_id="NVIDIA H200", env={}, registry_auth_id=None,
                       ttl_seconds=60, command="conda run -n vivijure python -m vivijure_backend.verify")
     (_, kw), = [c for c in sdk.calls if c[0] == "create_pod"]
     assert kw["docker_args"] == "conda run -n vivijure python -m vivijure_backend.verify"
@@ -674,7 +703,7 @@ def test_sdk_client_create_pod_sets_command_as_docker_args():
 def test_sdk_client_create_pod_omits_docker_args_without_command():
     sdk = FakeSdk()
     client = rv.RunpodSdkPodClient(sdk=sdk)
-    client.create_pod(image="ghcr.io/x:1", gpu_type_id="NVIDIA H200", env={}, registry_auth_id=None,
+    client.create_pod(image="runpod/stack:1", gpu_type_id="NVIDIA H200", env={}, registry_auth_id=None,
                       ttl_seconds=60)  # no command
     (_, kw), = [c for c in sdk.calls if c[0] == "create_pod"]
     assert "docker_args" not in kw                         # unset => the SDK default, no accidental empty

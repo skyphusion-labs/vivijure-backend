@@ -7,6 +7,12 @@ releases are summarized below from that history.
 
 ## Unreleased
 
+**Fix: verify pod pulls GHCR with the same RunPod registry auth as serverless.**
+
+The GraphQL SDK cannot attach `containerRegistryAuthId`. The harness was rejecting it
+and assuming GHCR was public. REST create now passes the serverless template's auth
+id (`cmqbz5bba0018e11d6bpcnu4n`). The PAT stays in RunPod; we never mint a second one.
+
 **Weights: seed `2-bf16` (canny ControlNet in the importable seed).**
 
 `ghcr.io/skyphusion-labs/vivijure-backend-seed:2-bf16@sha256:45d036fd50c83dfa0347cf837c43bcccb07e4d2c52c3fb5c02d3deee962a7e66`.
