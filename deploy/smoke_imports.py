@@ -35,6 +35,7 @@ CHECKS = [
     ("facexlib.utils.face_restoration_helper",   "facexlib face detection helper"),
     ("rife.RIFE_HDv3",                           "vendored RIFE HDv3 frame interpolator (Model loader)"),
     ("vivijure_backend.finish",                  "finishing stage (must stay CPU-importable)"),
+    ("diffusers.pipelines.wan.pipeline_wan_i2v", "Wan i2v pipeline (catches torchao/torch mismatch)"),
 ]
 
 REQUIRED_PROVIDER = "CUDAExecutionProvider"

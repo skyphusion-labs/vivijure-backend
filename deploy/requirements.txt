@@ -33,11 +33,12 @@ peft==0.20.0
 # diffusers 0.39.0 requires the stable safetensors 0.8.0 release; its 0.8.0rc1
 # predecessor does not satisfy >=0.8.0 and makes the runtime image unbuildable.
 safetensors==0.8.0
-torchao==0.18.0           # fp8 quant for the keyframe + i2v paths. NOTE: torchao 0.17 logs
-                          # "skipping cpp extensions (needs torch>=2.11)" on the cu128/torch-2.7
-                          # line; the fp8 quant still runs correctly (validated sharp on H200) via
-                          # the Python path. Revisit a torch-2.7-matched torchao for the fast
-                          # fp8 cuda kernels as a speed follow-up (not a correctness blocker).
+torchao==0.17.0           # fp8 quant for the keyframe + i2v paths. 0.18.0 imports
+                          # torch.nn.functional.ScalingType (torch 2.10+) at package load, so
+                          # `from diffusers import WanImageToVideoPipeline` dies on torch 2.7.1
+                          # (1.0.15 H200 smoke s1-41aa1926802e). 0.17 logs "skipping cpp
+                          # extensions (needs torch>=2.11)" on this cu128 line; fp8 still runs
+                          # via the Python path. Do not bump past 0.17 while torch stays 2.7.1.
 imageio==2.37.4
 imageio-ffmpeg==0.6.0     # Wan frame export (diffusers.utils.export_to_video)
 av==18.0.0                # PyAV: the imageio plugin="pyav" backend finish.py uses for frame-
