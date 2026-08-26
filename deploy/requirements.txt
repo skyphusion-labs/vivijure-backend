@@ -9,8 +9,8 @@
 # torch 2.7.1+cu128.
 
 # --- render engines (SDXL keyframe + Wan 2.2 i2v) : exact, pod-validated ---
-diffusers==0.39.0
-transformers==5.14.1
+diffusers==0.40.0
+transformers==5.15.1
 # huggingface_hub: PINNED (#206). Was unpinned (transitive via transformers/diffusers) and
 # drifted up to 1.x, which added an offline snapshot-completeness check
 # (_raise_if_incomplete_snapshot): it hard-fails when a baked tree listing names a curated-out
@@ -18,7 +18,7 @@ transformers==5.14.1
 # scrubs the tree cache so the check stays dormant; this pin stops silent behaviour drift (the
 # tested-with-pin doctrine). In-bounds for the stack: transformers 5.10.2 needs <2.0,>=1.5.0,
 # diffusers 0.38.0 needs >=0.34.0. Bump deliberately + re-validate on the pod, never by drift.
-huggingface_hub==1.27.0
+huggingface_hub==1.28.0
 # transformers 5.14.1 requires tokenizers<=0.23.0; PyPI never shipped 0.23.0 stable,
 # so 0.22.2 is the newest installable pin that satisfies the constraint.
 # Do NOT Dependabot-bump tokenizers to 0.23.1 while transformers stays on a
@@ -41,7 +41,7 @@ torchao==0.17.0           # fp8 quant for the keyframe + i2v paths. 0.18.0 impor
                           # via the Python path. Do not bump past 0.17 while torch stays 2.7.1.
 imageio==2.37.4
 imageio-ffmpeg==0.6.0     # Wan frame export (diffusers.utils.export_to_video)
-av==18.0.0                # PyAV: the imageio plugin="pyav" backend finish.py uses for frame-
+av==18.1.0                # PyAV: the imageio plugin="pyav" backend finish.py uses for frame-
                           # accurate clip read/write (immeta/imiter/imwrite). Without it the
                           # finishing stage imports fine (imageio is present) but raises at
                           # runtime: "The `pyav` plugin is not installed". ships manylinux wheels
@@ -92,7 +92,7 @@ boto3>=1.43.69
 
 # --- finishing stage (RIFE interpolation + face restore) ---
 # av / PyAV: the imageio pyav plugin that finish_clip uses to decode/encode video clips.
-av==18.0.0
+av==18.1.0
 # gfpgan: blind face restorer (GFPGAN path, the default). Pulls basicsr + facexlib as transitive deps.
 gfpgan==1.3.8
 # facexlib: face detection for gfpgan (and the optional codeformer path). Pinned explicitly
