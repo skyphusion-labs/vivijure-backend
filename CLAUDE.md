@@ -128,7 +128,7 @@ Never trust: CI green alone, bake green alone, or image size alone.
 
 ## Crew + identity + spend
 
-- Crew work as their own identity: FIRST command in any op is `sudo -u <member> bash -lc '<ops>'` (own
+- Crew work as their own identity: FIRST command in any op is `sudo -n -H -u <member> bash -lc '<ops>'` (own
   `$HOME`, own clone, own creds); commits/PRs land under `skyphusion-<member>`. This is the backend lane
   (Rollins owns the render contracts).
 - **Pre-prod GPU proof spend is authorized** (SecurePod or serverless workersMin=1). Do not thrift out
