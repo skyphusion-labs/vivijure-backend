@@ -103,7 +103,7 @@ our records). `release.yml` cuts releases; `docs/release-gate.md` records the in
 ## Pre-prod GPU test spend (Conrad, 2026-08-06) -- do not thrift here
 
 **Never hold back RunPod spend when proving an image before it is production-pinned.** A green
-Plane C bake is not a proven render. Pre-prod verification is **expected spend**, not an escalation.
+build is not a proven render. Pre-prod verification is **expected spend**, not an escalation.
 Community pods are not the gate.
 
 Pick **one** of these for the gate (either is fine; pick what fits the change):
