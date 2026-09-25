@@ -1,4 +1,20 @@
 name: Build seed image to GHCR (#537)
+# ############################################################################
+# DISABLED 2026-09-25 -- FAILS CLOSED. This bake stages ~87 GB from R2 and needs hundreds of GB of disk.
+#
+# The Hetzner fleet was decommissioned 2026-09-24 (cost), so Plane C and every
+# self-hosted label (`self-hosted`, `bake-capable`, `gpu`, `gpu-device`,
+# `vivijure-bake*`) match no runner, and the org runner group
+# `vivijure-gpu-builds` has no members. A dead label does NOT fail a job, it
+# QUEUES it, indefinitely and with no error anywhere. `runs-on` below is
+# `ubuntu-latest` only so this file carries no dead label; the job fails closed
+# on its first step with the reason. The recipe below the gate is UNMODIFIED:
+# re-enabling is deleting the `Disabled` step and pointing `runs-on` at a
+# suitable builder.
+#
+# Every mention of Plane C, propagandhi, fatmike or a runner group below is
+# HISTORY describing how this bake used to be scheduled, not a live pool.
+# ############################################################################
 
 # Build + push the SEED image -- the versioned, source-of-truth carrier for the curated model
 # seed. This is the EXPENSIVE, RARE half of the bake, split out of release.yml so a backend-v* release
@@ -98,10 +114,20 @@ jobs:
     # [self-hosted, bake-capable] -- the default path is unchanged.
     #
     # type: choice (not free text) closes the JSON-injection path on the format() call below.
-    runs-on: ${{ fromJSON(format('["self-hosted","bake-capable","{0}"]',
-                  inputs.runner_host == 'any' && 'self-hosted' || inputs.runner_host)) }}
+    # DISABLED 2026-09-25, FAILS CLOSED. The expression above resolved to
+    # ["self-hosted","bake-capable",<host>], every label of which is dead: that fleet was
+    # decommissioned 2026-09-24 (cost). Collapsed to the plain hosted label so this file no longer
+    # carries a dead label, and the job fails closed on its first step. The `runner_host` dispatch
+    # input is now vestigial; it is KEPT rather than removed because it pins WHICH builder takes the
+    # bake, which is meaningful again the moment a builder with the disk exists.
+    runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
+      - name: Disabled -- no builder with the required disk
+        run: |
+          echo "::error::vivijure-backend seed bake is DISABLED (2026-09-25). It stages ~87 GB of curated model weights out of R2, reconstructs the HF-cache symlink tree, bin-packs the layers, then builds and pushes the seed image, so both the staged tree and the image layers are on disk at once. It ran on Plane C [self-hosted, bake-capable]; that fleet was decommissioned 2026-09-24. ubuntu-latest has ~14 GB free (~70 GB after an aggressive reclaim) and cannot host this build. Failing closed rather than queueing forever on a dead label."
+          exit 1
+
       - name: Checkout repository
         uses: actions/checkout@v7
         with:

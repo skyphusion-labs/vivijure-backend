@@ -1,4 +1,20 @@
 name: Release worker image to GHCR (baked)
+# ############################################################################
+# DISABLED 2026-09-25 -- FAILS CLOSED. This release build needs a real NVIDIA GPU (and ~101 GB).
+#
+# The Hetzner fleet was decommissioned 2026-09-24 (cost), so Plane C and every
+# self-hosted label (`self-hosted`, `bake-capable`, `gpu`, `gpu-device`,
+# `vivijure-bake*`) match no runner, and the org runner group
+# `vivijure-gpu-builds` has no members. A dead label does NOT fail a job, it
+# QUEUES it, indefinitely and with no error anywhere. `runs-on` below is
+# `ubuntu-latest` only so this file carries no dead label; the job fails closed
+# on its first step with the reason. The recipe below the gate is UNMODIFIED:
+# re-enabling is deleting the `Disabled` step and pointing `runs-on` at a
+# suitable builder.
+#
+# Every mention of Plane C, propagandhi, fatmike or a runner group below is
+# HISTORY describing how this bake used to be scheduled, not a live pool.
+# ############################################################################
 
 # Build + push the BAKED worker image (the "one singular baked image": the curated model set is
 # baked in, so a worker is datacenter-agnostic and pays no R2 cold-pull tax). Image + version come
@@ -92,9 +108,18 @@ jobs:
     # vivijure-gpu-builds runner-group allowlist + the backend-v* tag ruleset (backend-release-tags);
     # a fork PR cannot create a backend-v* tag. A cold or stale local cache degrades to a one-time
     # base pull -- SLOW, never WRONG. Accelerator only; identical output.
-    runs-on: [self-hosted, gpu-device]
+    # DISABLED 2026-09-25, FAILS CLOSED. Pinned to Plane C `[self-hosted, gpu-device]` above;
+    # that fleet was decommissioned 2026-09-24 (cost) and the label matches no runner. `runs-on` is
+    # set to `ubuntu-latest` only so this file no longer carries a dead label; the job fails closed
+    # on its first step. Full reasoning in the `Disabled` step and in the header.
+    runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
+      - name: Disabled -- no GPU builder
+        run: |
+          echo "::error::vivijure-backend release build is DISABLED (2026-09-25). It requires a real NVIDIA GPU with the nvidia container runtime: the post-build smoke step runs 'docker run --gpus all' to create an actual CUDA execution-provider session, and smoke_imports.py downgrades itself to a loud SKIP + exit 0 when no GPU is visible (backend#349). Repointing this job at ubuntu-latest would make the release gate green while verifying nothing, which is exactly the state backend#349 was opened to end. It also needs ~101 GB for the runtime base. Plane C [self-hosted, gpu-device] was propagandhi + fatmike; that fleet was decommissioned 2026-09-24. Failing closed rather than queueing forever on a dead label."
+          exit 1
+
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
