@@ -1,4 +1,20 @@
 name: requirements resolve
+# ############################################################################
+# DISABLED 2026-09-25 -- FAILS CLOSED. ONLY the authoritative `resolve-in-base` job; `resolve-hosted` is unaffected and still runs.
+#
+# The Hetzner fleet was decommissioned 2026-09-24 (cost), so Plane C and every
+# self-hosted label (`self-hosted`, `bake-capable`, `gpu`, `gpu-device`,
+# `vivijure-bake*`) match no runner, and the org runner group
+# `vivijure-gpu-builds` has no members. A dead label does NOT fail a job, it
+# QUEUES it, indefinitely and with no error anywhere. `runs-on` below is
+# `ubuntu-latest` only so this file carries no dead label; the job fails closed
+# on its first step with the reason. The recipe below the gate is UNMODIFIED:
+# re-enabling is deleting the `Disabled` step and pointing `runs-on` at a
+# suitable builder.
+#
+# Every mention of Plane C, propagandhi, fatmike or a runner group below is
+# HISTORY describing how this bake used to be scheduled, not a live pool.
+# ############################################################################
 
 # deploy/requirements.txt is resolved in exactly ONE place today: when the runtime BASE image is
 # baked (deploy/runtime.Dockerfile, dispatch-gated runtime-build.yml). It is NOT installed by
@@ -136,11 +152,27 @@ jobs:
   resolve-in-base:
     name: resolve (inside the pinned runtime base)
     if: github.event_name != 'pull_request'
-    # Plane C. Present ONLY because the runtime base image lives here. No GPU is used by this job.
-    runs-on: [self-hosted, bake-capable]
+    # DISABLED 2026-09-25, FAILS CLOSED, and this one is NOT the whole workflow: `resolve-hosted`
+    # above is unaffected and still runs on every PR. Only the AUTHORITATIVE gate is gone.
+    #
+    # No GPU was ever used by this job. It sat on Plane C purely because the ~239 GB pinned runtime
+    # base image lives there, and resolving inside that exact image is the entire point of the gate.
+    # A hosted runner has ~14 GB free (~70 GB after an aggressive reclaim), so it cannot hold the
+    # base, and resolving somewhere else would not be this gate, it would be a second copy of
+    # `resolve-hosted` wearing the authoritative gate's name. That is the failure this workflow was
+    # written to prevent, so it fails closed instead.
+    #
+    # Skipping was considered and rejected: an absent check reads exactly like a passed one, and the
+    # header above records what that costs here (main unbuildable for eight days, nothing red).
+    # This workflow is path-filtered to deploy/requirements.txt, so the red lands precisely when
+    # someone changes a pin, which is the moment the missing gate matters.
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - name: Disabled -- the pinned runtime base does not fit a hosted runner
+        run: |
+          echo "::error::The AUTHORITATIVE requirements gate (resolve-in-base) is DISABLED (2026-09-25). It resolves deploy/requirements.txt INSIDE the ~239 GB runtime base image deploy/Dockerfile pins, which is the environment the bake actually resolves in. It ran on Plane C [self-hosted, bake-capable]; that fleet was decommissioned 2026-09-24, and a hosted runner cannot hold a 239 GB image. resolve-hosted still ran and its result stands, but it is the ADVISORY gate: plain CPython 3.11, not the conda env inside the base. A green resolve-hosted does NOT mean this pin resolves in the image that ships. Treat this red as: the authoritative check could not be performed."
+          exit 1
 
       # Read the base from deploy/Dockerfile rather than hardcoding it, so this gate can never
       # drift from what ships. Assert the anchor matched BEFORE using it: a grep that returns empty

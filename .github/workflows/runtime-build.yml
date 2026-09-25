@@ -1,4 +1,20 @@
 name: Build runtime base image to GHCR (#537)
+# ############################################################################
+# DISABLED 2026-09-25 -- FAILS CLOSED. This bake needs hundreds of GB of scratch disk (~87 GB seed in, ~101 GB out).
+#
+# The Hetzner fleet was decommissioned 2026-09-24 (cost), so Plane C and every
+# self-hosted label (`self-hosted`, `bake-capable`, `gpu`, `gpu-device`,
+# `vivijure-bake*`) match no runner, and the org runner group
+# `vivijure-gpu-builds` has no members. A dead label does NOT fail a job, it
+# QUEUES it, indefinitely and with no error anywhere. `runs-on` below is
+# `ubuntu-latest` only so this file carries no dead label; the job fails closed
+# on its first step with the reason. The recipe below the gate is UNMODIFIED:
+# re-enabling is deleting the `Disabled` step and pointing `runs-on` at a
+# suitable builder.
+#
+# Every mention of Plane C, propagandhi, fatmike or a runner group below is
+# HISTORY describing how this bake used to be scheduled, not a live pool.
+# ############################################################################
 
 # Build + push the RUNTIME BASE image (Shape Y, #537): the full validated runtime (CUDA/torch/conda +
 # render deps + finish patches + RIFE + HF config bake) with the model WEIGHTS COPY --from'd out of the
@@ -104,9 +120,15 @@ jobs:
     # `FROM seed` is a warm local cache hit on a repeat bake, skipping the ~87 GB seed pull (a cold
     # runner pays it once). Same runner release.yml uses; both bakes are dispatch-gated + infrequent,
     # so no meaningful contention.
-    runs-on: [self-hosted, gpu-device]
+    # DISABLED 2026-09-25, FAILS CLOSED. See the `Disabled` step below and the header.
+    runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
+      - name: Disabled -- no builder with the required disk
+        run: |
+          echo "::error::vivijure-backend runtime-base bake is DISABLED (2026-09-25). It pulls the ~87 GB seed image and emits a runtime image measured at ~101 GB, so it needs a builder with hundreds of GB of scratch disk. It ran on Plane C [self-hosted, gpu-device]; that fleet was decommissioned 2026-09-24. ubuntu-latest has ~14 GB free (~70 GB after an aggressive reclaim) and cannot host this build. Failing closed rather than queueing forever on a dead label."
+          exit 1
+
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
