@@ -14,6 +14,15 @@ name: Build runtime base image to GHCR (#537)
 #
 # Every mention of Plane C, propagandhi, fatmike or a runner group below is
 # HISTORY describing how this bake used to be scheduled, not a live pool.
+#
+# The `sync-gpu-allowlist` job that used to run here was REMOVED 2026-09-25 (runner-group
+# retirement lane, CR fleet-chezmoi#2160). It appended this repo's tag refs to the
+# `vivijure-gpu-builds` org runner group (id 9), the Plane C bake pool, which has had ZERO
+# runners since the 2026-09-24 fleet decommission. Its sync script was deleted from
+# fleet-chezmoi the same day (commit 0b5c8b4), so the job could no longer even succeed: it
+# would fail on the missing file and, through `needs`, SKIP the build-and-push job below. The group's 119
+# workflow refs and 8 repo pinnings are preserved untouched, so standing Plane C back up
+# re-adds this sync as part of provisioning the pool. Do not re-add it here.
 # ############################################################################
 
 # Build + push the RUNTIME BASE image (Shape Y, #537): the full validated runtime (CUDA/torch/conda +
@@ -91,30 +100,7 @@ env:
                                     # so FROM-inheritance dedups same-repo (#537 fix)
 
 jobs:
-  # Inline sync: public repo cannot workflow_call internal fleet-chezmoi.
-  # Without this, a dispatch sits queued forever on idle Plane C runners
-  # (group 9 is workflow-restricted; exact ref only). Same job as release.yml.
-  sync-gpu-allowlist:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout fleet-chezmoi (sync script)
-        uses: actions/checkout@v7
-        with:
-          repository: skyphusion-labs/fleet-chezmoi
-          ref: main
-          token: ${{ secrets.RUNNER_GROUP_ADMIN_TOKEN }}
-
-      - name: Sync vivijure-gpu-builds allowlist
-        env:
-          GH_TOKEN: ${{ secrets.RUNNER_GROUP_ADMIN_TOKEN }}
-        run: |
-          set -euo pipefail
-          bash scripts/sync-vivijure-gpu-builds-allowlist.sh --apply
-
   build-and-push:
-    needs: sync-gpu-allowlist
-    if: always() && (needs.sync-gpu-allowlist.result == 'success' || needs.sync-gpu-allowlist.result == 'skipped')
     # Plane C `[self-hosted, gpu-device]` (org runner group vivijure-gpu-builds, id 9; propagandhi + fatmike,
     # fc#754): a host-persistent JIT runner, so the local docker image store survives across jobs and
     # `FROM seed` is a warm local cache hit on a repeat bake, skipping the ~87 GB seed pull (a cold

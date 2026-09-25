@@ -14,6 +14,15 @@ name: Release worker image to GHCR (baked)
 #
 # Every mention of Plane C, propagandhi, fatmike or a runner group below is
 # HISTORY describing how this bake used to be scheduled, not a live pool.
+#
+# The `sync-gpu-allowlist` job that used to run here was REMOVED 2026-09-25 (runner-group
+# retirement lane, CR fleet-chezmoi#2160). It appended this repo's tag refs to the
+# `vivijure-gpu-builds` org runner group (id 9), the Plane C bake pool, which has had ZERO
+# runners since the 2026-09-24 fleet decommission. Its sync script was deleted from
+# fleet-chezmoi the same day (commit 0b5c8b4), so the job could no longer even succeed: it
+# would fail on the missing file and, through `needs`, SKIP the build-and-push job below. The group's 119
+# workflow refs and 8 repo pinnings are preserved untouched, so standing Plane C back up
+# re-adds this sync as part of provisioning the pool. Do not re-add it here.
 # ############################################################################
 
 # Build + push the BAKED worker image (the "one singular baked image": the curated model set is
@@ -78,31 +87,7 @@ env:
   WORKER_IMAGE: vivijure-backend
 
 jobs:
-  # Inline sync: public repo cannot workflow_call internal fleet-chezmoi.
-  sync-gpu-allowlist:
-    if: startsWith(github.ref, 'refs/tags/backend-v')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout fleet-chezmoi (sync script)
-        uses: actions/checkout@v7
-        with:
-          repository: skyphusion-labs/fleet-chezmoi
-          ref: main
-          token: ${{ secrets.RUNNER_GROUP_ADMIN_TOKEN }}
-
-      - name: Sync vivijure-gpu-builds allowlist
-        env:
-          GH_TOKEN: ${{ secrets.RUNNER_GROUP_ADMIN_TOKEN }}
-        run: |
-          set -euo pipefail
-          bash scripts/sync-vivijure-gpu-builds-allowlist.sh \
-            --apply \
-            --ensure-tag "vivijure-backend" "${{ github.ref_name }}"
-
   build-and-push:
-    needs: sync-gpu-allowlist
-    if: always() && (needs.sync-gpu-allowlist.result == 'success' || needs.sync-gpu-allowlist.result == 'skipped')
     # Plane C `[self-hosted, gpu-device]`: a host-persistent JIT runner, so a runtime base already pulled on
     # a prior bake is a local cache hit (assemble+push only, no cold base pull). Access control = the
     # vivijure-gpu-builds runner-group allowlist + the backend-v* tag ruleset (backend-release-tags);
