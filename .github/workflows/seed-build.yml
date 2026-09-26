@@ -1,4 +1,29 @@
 name: Build seed image to GHCR (#537)
+# ############################################################################
+# DISABLED 2026-09-25 -- FAILS CLOSED. This bake stages ~87 GB from R2 and needs hundreds of GB of disk.
+#
+# The Hetzner fleet was decommissioned 2026-09-24 (cost), so Plane C and every
+# self-hosted label (`self-hosted`, `bake-capable`, `gpu`, `gpu-device`,
+# `vivijure-bake*`) match no runner, and the org runner group
+# `vivijure-gpu-builds` has no members. A dead label does NOT fail a job, it
+# QUEUES it, indefinitely and with no error anywhere. `runs-on` below is
+# `ubuntu-latest` only so this file carries no dead label; the job fails closed
+# on its first step with the reason. The recipe below the gate is UNMODIFIED:
+# re-enabling is deleting the `Disabled` step and pointing `runs-on` at a
+# suitable builder.
+#
+# Every mention of Plane C, propagandhi, fatmike or a runner group below is
+# HISTORY describing how this bake used to be scheduled, not a live pool.
+#
+# The `sync-gpu-allowlist` job that used to run here was REMOVED 2026-09-25 (runner-group
+# retirement lane, CR fleet-chezmoi#2160). It appended this repo's tag refs to the
+# `vivijure-gpu-builds` org runner group (id 9), the Plane C bake pool, which has had ZERO
+# runners since the 2026-09-24 fleet decommission. Its sync script was deleted from
+# fleet-chezmoi the same day (commit 0b5c8b4), so the job could no longer even succeed: it
+# would fail on the missing file and, through `needs`, SKIP the build-and-push job below. The group's 119
+# workflow refs and 8 repo pinnings are preserved untouched, so standing Plane C back up
+# re-adds this sync as part of provisioning the pool. Do not re-add it here.
+# ############################################################################
 
 # Build + push the SEED image -- the versioned, source-of-truth carrier for the curated model
 # seed. This is the EXPENSIVE, RARE half of the bake, split out of release.yml so a backend-v* release
@@ -59,30 +84,7 @@ env:
   R2_BUCKET: vivijure
 
 jobs:
-  # Inline sync: public repo cannot workflow_call internal fleet-chezmoi.
-  # Without this, a dispatch sits queued forever on idle Plane C runners
-  # (group 9 is workflow-restricted; exact ref only). Same job as release.yml.
-  sync-gpu-allowlist:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout fleet-chezmoi (sync script)
-        uses: actions/checkout@v7
-        with:
-          repository: skyphusion-labs/fleet-chezmoi
-          ref: main
-          token: ${{ secrets.RUNNER_GROUP_ADMIN_TOKEN }}
-
-      - name: Sync vivijure-gpu-builds allowlist
-        env:
-          GH_TOKEN: ${{ secrets.RUNNER_GROUP_ADMIN_TOKEN }}
-        run: |
-          set -euo pipefail
-          bash scripts/sync-vivijure-gpu-builds-allowlist.sh --apply
-
   build-and-push:
-    needs: sync-gpu-allowlist
-    if: always() && (needs.sync-gpu-allowlist.result == 'success' || needs.sync-gpu-allowlist.result == 'skipped')
     # runner_host pins this bake to a named Plane C host (per-host runner labels, fc#1470),
     # so a fleet-infra job can target ONE box instead of "whichever gpu runner claims it".
     #
@@ -98,10 +100,20 @@ jobs:
     # [self-hosted, bake-capable] -- the default path is unchanged.
     #
     # type: choice (not free text) closes the JSON-injection path on the format() call below.
-    runs-on: ${{ fromJSON(format('["self-hosted","bake-capable","{0}"]',
-                  inputs.runner_host == 'any' && 'self-hosted' || inputs.runner_host)) }}
+    # DISABLED 2026-09-25, FAILS CLOSED. The expression above resolved to
+    # ["self-hosted","bake-capable",<host>], every label of which is dead: that fleet was
+    # decommissioned 2026-09-24 (cost). Collapsed to the plain hosted label so this file no longer
+    # carries a dead label, and the job fails closed on its first step. The `runner_host` dispatch
+    # input is now vestigial; it is KEPT rather than removed because it pins WHICH builder takes the
+    # bake, which is meaningful again the moment a builder with the disk exists.
+    runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
+      - name: Disabled -- no builder with the required disk
+        run: |
+          echo "::error::vivijure-backend seed bake is DISABLED (2026-09-25). It stages ~87 GB of curated model weights out of R2, reconstructs the HF-cache symlink tree, bin-packs the layers, then builds and pushes the seed image, so both the staged tree and the image layers are on disk at once. It ran on Plane C [self-hosted, bake-capable]; that fleet was decommissioned 2026-09-24. ubuntu-latest has ~14 GB free (~70 GB after an aggressive reclaim) and cannot host this build. Failing closed rather than queueing forever on a dead label."
+          exit 1
+
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
