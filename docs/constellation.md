@@ -38,9 +38,7 @@ flowchart TD
     end
 
     subgraph finish[Finish helper engines]
-        musetalk[vivijure-musetalk<br/>lip-sync]
         upscale[vivijure-upscale<br/>video upscale]
-        audioup[vivijure-audio-upscale<br/>audio cleanup]
     end
 
     discord --> slate
@@ -50,9 +48,7 @@ flowchart TD
     studio --> finishmods
     studio --> audiomods
     cloudmods --> backend
-    finishmods --> musetalk
     finishmods --> upscale
-    audiomods --> audioup
     studio --> backend
     studio --> local12
     studio --> local16
@@ -70,7 +66,9 @@ flowchart TD
   Workers) or **vivijure-local** (home PC or any cloud server); both sit on **vivijure-core**. It
   does not render video itself. It hands the heavy work to a **module**.
 - **A module** is a small, opt-in worker that does one job: make a video clip, upscale it, add a
-  music bed, sync lips to speech. You turn on only the modules you want. The Studio keeps a
+  music bed, put a title card on the front. (Talking is not a finish step: an audio-driven motion
+  door animates the mouth from the Cast voice while the clip is being made.) You turn on only the
+  modules you want. The Studio keeps a
   **registry** of the modules you have, and the web page builds itself from that registry, so a
   new module shows up in the UI on its own.
 - **The GPU engines** do the real rendering. You pick where that happens: **vivijure-backend** on

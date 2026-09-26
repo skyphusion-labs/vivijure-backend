@@ -29,7 +29,7 @@ satellite (`vivijure-wan-train`, image `train-*`); this repo no longer owns `:tr
             |
      +------+--------+----------------+------------------+
      |      |        |                |                  |
-  musetalk upscale audio-upscale  wan-train         local-12/16gb
+  upscale  wan-train         local-12/16gb
 ```
 
 Panels pin this image on RunPod endpoints. **Never freeze specific endpoint IDs** in this file.

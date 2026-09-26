@@ -23,7 +23,7 @@ Realized across the fleet as two tiers, both Blackwell-line:
 
 - **Heavy render backend** (`vivijure-backend`: SDXL keyframes, i2v, LoRA
   training) -> **datacenter top tier, B200 / H200.**
-- **Finish-chain endpoints** (upscale, audio-upscale, lipsync/MuseTalk) ->
+- **Finish-chain endpoints** (upscale, lipsync/MuseTalk; audio-upscale is RETIRED, see below) ->
   **RTX PRO 6000 Blackwell (96 GB).**
 
 This is the standing standard. Do not "save money" by dropping a finish endpoint
@@ -91,7 +91,7 @@ All endpoints: `workersMin = 0` (no always-active billing), flashboot on,
 | `vivijure-backend-local` | `uf4iwoen5r48zx` | **Local panel render**            | **B200 / H200** (datacenter)      | 3          | 3       | `vivijure-backend`           |
 | `vivijure-wan-train`     | `zqb7tougbqfkqa` | **CF Wan LoRA train**             | **B200 / H200** (datacenter)      | 3          | 3       | `vivijure-wan-train`         |
 | `vivijure-video-upscale` | `4q8idwbk6tyqbq` | CF finish                         | **RTX PRO 6000 Blackwell** (96 GB)| 5          | 5       | `vivijure-upscale`           |
-| `vivijure-audio-upscale` | `sj0btgpjdtswa7` | CF finish                         | **RTX PRO 6000 Blackwell** (96 GB)| 3          | 3       | `vivijure-audio-upscale`     |
+| ~~`vivijure-audio-upscale`~~ | ~~`sj0btgpjdtswa7`~~ | RETIRED (vivijure-cf#786: its only consumer, the `speech-upscale` module, is removed) | -- | -- | -- | -- |
 | `vivijure-musetalk`      | `zw6pt4lymf69pk` | CF finish                         | **RTX PRO 6000 Blackwell** (Server)| 3         | 3       | `vivijure-musetalk`          |
 
 **Worker quota (2026-07-23):** sum of `workersMax` across the six rows above = **25** (plan raised
@@ -120,7 +120,8 @@ Pin each endpoint's template image to its **`:version` tag** (e.g.
 `:sha-<digest>` pin does **not** work for these endpoints; the version tag is
 what RunPod resolves on the next cold start. The image build CI must therefore
 emit a `:version` tag (see the build-image workflow's "Compute tags" step, mirrored
-across `vivijure-upscale` / `vivijure-audio-upscale` / `vivijure-musetalk`); a
+across `vivijure-upscale` / `vivijure-musetalk` (and `vivijure-audio-upscale`, until it was
+retired); a
 build that only pushes `:sha` / `:latest` cannot be pinned.
 
 Pinning is a deliberate, separate step from building: a build does not touch the
@@ -141,7 +142,7 @@ finish endpoints and local Wan train are additional slots outside that sum.
 | CF Wan train | 3 |
 | Video upscale | 5 |
 | MuseTalk | 3 |
-| Audio upscale | 3 |
+| Audio upscale | RETIRED (vivijure-cf#786) |
 | **Sum** | **25** |
 
 IaC: `fleet-chezmoi/system/runpod/vivijure-worker-quota/spec.json`. **Do not**
