@@ -632,3 +632,82 @@ def test_onnx_provider_accessor_never_fails_a_render():
 
     assert GpuPipeline._onnx_provider_facts(_NoServer()) is None
     assert GpuPipeline._onnx_provider_facts(_Angry()) is None
+
+
+# ----------------------------------------- stored (prior-render) LoRA is loaded on a later render
+
+STORED_A = "loras/neon/A/pytorch_lora_weights.safetensors"   # keys.lora_key("neon", "A")
+
+
+class _PriorRenderStore(StagingStore):
+    """A project whose slot A adapter is already in R2 from a previous render (slot B is not)."""
+    def exists(self, key):
+        return key == STORED_A
+
+
+def _second_render(tmp_path, store, **over):
+    _extract_bundle(tmp_path)
+    pipe = StubPipeline(RenderConfig.for_tier(QualityTier.DRAFT))
+    job = {"action": "render", "project": "neon", "bundle_key": "bundles/neon.tar.gz",
+           "quality_tier": "draft", "render_overrides": {"finish_offloaded": True}, **over}
+    res = run_job(job, pipeline=pipe, store=store, workdir=tmp_path / "work", job_id="j")
+    return pipe, res
+
+
+def test_second_render_loads_the_stored_lora_it_counted_as_trained(tmp_path):
+    # The planner skips training for a slot whose adapter exists at lora_key, so that adapter has
+    # to be fetched and fed to keyframing; otherwise the slot renders without its identity LoRA
+    # while the plan and the result both say it was reused.
+    store = _PriorRenderStore(tmp_path / "b.tar.gz")
+    pipe, _ = _second_render(tmp_path, store)
+    assert pipe.trained == ["B"]                              # A reused -> only B trains
+    assert STORED_A in store.gets                             # the stored adapter was fetched
+    assert "/pretrained/A/" in pipe.pretrained_loras["A"]     # staged locally, like a passthrough
+    assert Path(pipe.pretrained_loras["A"]).is_file()
+    assert "A" in pipe.keyframe_loras["shot_01"]              # and it reached keyframing
+
+
+def test_a_pretrained_passthrough_supersedes_the_stored_lora(tmp_path):
+    # docs/architecture.md: "Pretrained adapters supersede prior-state ones."
+    other = "loras/neon/A/other.safetensors"
+    store = _PriorRenderStore(tmp_path / "b.tar.gz")
+    pipe, _ = _second_render(tmp_path, store, pretrained_loras={"A": other})
+    assert other in store.gets
+    assert STORED_A not in store.gets
+    assert pipe.pretrained_loras["A"].endswith("other.safetensors")
+
+
+def test_a_fresh_project_stages_no_stored_lora(tmp_path):
+    # CONTROL: nothing in R2 -> nothing staged, both slots train (the pre-existing behavior).
+    _extract_bundle(tmp_path)
+    store = StagingStore(tmp_path / "b.tar.gz")               # exists() -> False for every key
+    pipe, _ = _second_render(tmp_path, store)
+    assert sorted(pipe.trained) == ["A", "B"]
+    assert not [k for k in store.gets if k.startswith("loras/")]
+    assert pipe.pretrained_loras == {}
+
+
+def test_an_unfetchable_stored_lora_fails_before_any_gpu_work(tmp_path):
+    class Unfetchable(_PriorRenderStore):
+        def get_file(self, key, dest):
+            if str(key).endswith(".tar.gz"):
+                return super().get_file(key, dest)
+            raise FileNotFoundError(key)
+
+    pipe = None
+    with pytest.raises(HarnessError, match="could not stage pretrained LoRA"):
+        _extract_bundle(tmp_path)
+        pipe = StubPipeline(RenderConfig.for_tier(QualityTier.DRAFT))
+        run_job({"action": "render", "project": "neon", "bundle_key": "bundles/neon.tar.gz",
+                 "quality_tier": "draft", "render_overrides": {"finish_offloaded": True}},
+                pipeline=pipe, store=Unfetchable(tmp_path / "b.tar.gz"),
+                workdir=tmp_path / "work", job_id="j")
+    assert pipe.trained == []
+
+
+def test_a_train_only_job_does_not_stage_a_stored_lora_it_never_uses(tmp_path):
+    # train_lora draws no keyframes, so nothing consumes a reused slot's adapter: no download.
+    store = _PriorRenderStore(tmp_path / "b.tar.gz")
+    pipe, _ = _second_render(tmp_path, store, action="train_lora")
+    assert pipe.trained == ["B"]
+    assert STORED_A not in store.gets
