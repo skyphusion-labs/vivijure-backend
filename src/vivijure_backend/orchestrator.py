@@ -239,6 +239,10 @@ def plan(
         if to_train:
             skips.append(f"finalize: {len(to_train)} LoRA(s) not trained (i2v-only pass)")
         to_train = []
+    if action is Action.REGEN_SHOT:  # keyframe redraw only: the contract says regen_shot trains no LoRAs
+        if to_train:
+            skips.append(f"regen_shot: {len(to_train)} LoRA(s) not trained (keyframe redraw only)")
+        to_train = []
     for s in reused:
         why = "pretrained passthrough" if s in request.pretrained_loras else "already trained"
         skips.append(f"LoRA slot {s}: reused ({why})")
@@ -246,7 +250,7 @@ def plan(
 
     # --- per-scene keyframe + i2v plan ---
     # PREVIEW is RENDER minus motion: it draws keyframes (and trains the LoRAs they need, since
-    # to_train above is only zeroed for FINALIZE) but never runs i2v, so `_finish` assembles no
+    # to_train above is only zeroed for FINALIZE and REGEN_SHOT) but never runs i2v, so `_finish` assembles no
     # MP4 (no clips) and the user gets a keyframe preview before committing GPU-seconds to Wan.
     # keyframes_only (issue #119): a `render` (or finalize) carrying the flag draws its keyframes
     # but STOPS before i2v/finish, the same motion-skip the PREVIEW action takes. Without this the
