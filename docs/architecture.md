@@ -106,7 +106,7 @@ sequenceDiagram
     CP->>R2: write bundle.tar.gz
     CP->>W: submit render job {bundle_key, quality_tier, overrides}
     W->>R2: cold-start model mirror (rclone, if cold)
-    W->>R2: restore prior project state (best effort)
+    W->>R2: restore prior project state (a failed existence check aborts)
     W->>R2: get bundle.tar.gz
     W->>W: extract -> Storyboard + Cast + refs
     W->>W: validate() then plan() (CPU)
@@ -219,7 +219,7 @@ The decisions:
   trains. Pretrained adapters supersede prior-state ones.
 - **Keyframe: generate / reuse / inject.** `finalize` always reuses. A scene with an authored
   `start_image` injects it. Otherwise the planner compares a **hash of the keyframe render
-  params** (steps, guidance, seed, model, identity method, size, multi-char scales) against the
+  params** (steps, guidance, scheduler, seed, models, distill, identity method and scales, size, multi-char scales) against the
   hash stored beside the cached PNG; if they match, the keyframe is reused, else it regenerates.
   This is what makes a second render of a tweaked storyboard only redraw the shots that changed.
 - **i2v: animate or not.** `render` and `finalize` animate; `preview` and `regen_shot` stop at
