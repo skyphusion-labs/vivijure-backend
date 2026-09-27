@@ -168,7 +168,10 @@ if [ -n "$TPL_ID" ]; then
   template_json | rp PATCH "/templates/${TPL_ID}"
 else
   info "creating a new template"
-  template_json | rp POST /templates
+  # NOT `template_json | rp POST ...`: a pipeline runs rp in a subshell, so RP_BODY (read by
+  # json_field below) would never reach this shell. Capture the body first, feed rp by here-string.
+  TPL_BODY="$(template_json)"
+  rp POST /templates <<<"$TPL_BODY"
   TPL_ID="$(json_field id)"
 fi
 [ -n "$TPL_ID" ] || die "could not determine the template id after create/update."
@@ -183,7 +186,8 @@ if [ -n "$EP_ID" ]; then
   endpoint_json "$TPL_ID" | rp PATCH "/endpoints/${EP_ID}"
 else
   info "creating a new endpoint"
-  endpoint_json "$TPL_ID" | rp POST /endpoints
+  EP_BODY="$(endpoint_json "$TPL_ID")"   # see the template create above: no pipeline into rp
+  rp POST /endpoints <<<"$EP_BODY"
   EP_ID="$(json_field id)"
 fi
 [ -n "$EP_ID" ] || die "could not determine the endpoint id after create/update."
