@@ -23,7 +23,7 @@ Realized across the fleet as two tiers, both Blackwell-line:
 
 - **Heavy render backend** (`vivijure-backend`: SDXL keyframes, i2v, LoRA
   training) -> **datacenter top tier, B200 / H200.**
-- **Finish-chain endpoints** (upscale, lipsync/MuseTalk; audio-upscale is RETIRED, see below) ->
+- **Finish-chain endpoints** (upscale; audio-upscale and musetalk are both RETIRED, see below) ->
   **RTX PRO 6000 Blackwell (96 GB).**
 
 This is the standing standard. Do not "save money" by dropping a finish endpoint
@@ -92,10 +92,13 @@ All endpoints: `workersMin = 0` (no always-active billing), flashboot on,
 | `vivijure-wan-train`     | `zqb7tougbqfkqa` | **CF Wan LoRA train**             | **B200 / H200** (datacenter)      | 3          | 3       | `vivijure-wan-train`         |
 | `vivijure-video-upscale` | `4q8idwbk6tyqbq` | CF finish                         | **RTX PRO 6000 Blackwell** (96 GB)| 5          | 5       | `vivijure-upscale`           |
 | ~~`vivijure-audio-upscale`~~ | ~~`sj0btgpjdtswa7`~~ | RETIRED (vivijure-cf#786: its only consumer, the `speech-upscale` module, is removed) | -- | -- | -- | -- |
-| `vivijure-musetalk`      | `zw6pt4lymf69pk` | CF finish                         | **RTX PRO 6000 Blackwell** (Server)| 3         | 3       | `vivijure-musetalk`          |
+| ~~`vivijure-musetalk`~~ | ~~`zw6pt4lymf69pk`~~ | RETIRED (vivijure-cf#785: post-process lip-sync is removed; the repo is archived. Lip-sync moved to an audio-driven `motion.backend` door, which this backend does not provision) | -- | -- | -- | -- |
 
-**Worker quota (2026-07-23):** sum of `workersMax` across the six rows above = **25** (plan raised
-from 18). Fleet IaC: `fleet-chezmoi/system/runpod/vivijure-worker-quota/spec.json`. RunPod account
+**Worker quota:** sum of `workersMax` across the **four live rows** above = **19**
+(8 + 3 + 3 + 5). Two rows are retired and contribute nothing. The previous figure here was **25**,
+measured 2026-07-23 when six rows were live; it was not re-summed when `vivijure-audio-upscale`
+was struck, so it was already 3 too high before `vivijure-musetalk` retired. Plan was raised from
+18. Fleet IaC: `fleet-chezmoi/system/runpod/vivijure-worker-quota/spec.json`. RunPod account
 hard cap remains 30 until 2026-07-30 deposit/quota-40 (do not fund without Conrad).
 
 **Render `workersMax` policy (through 2026-07-30):** both render endpoints keep **at least 3**
@@ -116,13 +119,13 @@ has stock.
 ## Deploy constraint 1: pin by `:version`, never `:sha`
 
 Pin each endpoint's template image to its **`:version` tag** (e.g.
-`ghcr.io/skyphusion-labs/vivijure-musetalk:0.1.0`). RunPod's immutable
+`ghcr.io/skyphusion-labs/vivijure-upscale:0.1.0`). RunPod's immutable
 `:sha-<digest>` pin does **not** work for these endpoints; the version tag is
 what RunPod resolves on the next cold start. The image build CI must therefore
-emit a `:version` tag (see the build-image workflow's "Compute tags" step, mirrored
-across `vivijure-upscale` / `vivijure-musetalk` (and `vivijure-audio-upscale`, until it was
-retired); a
-build that only pushes `:sha` / `:latest` cannot be pinned.
+emit a `:version` tag (see the build-image workflow's "Compute tags" step); a
+build that only pushes `:sha` / `:latest` cannot be pinned. The now-retired
+`vivijure-musetalk` and `vivijure-audio-upscale` satellites followed the same
+rule, and their build workflows are the reference if you add a satellite.
 
 Pinning is a deliberate, separate step from building: a build does not touch the
 live endpoint (`docs/operations.md`). You pin the template, and the endpoint pulls
@@ -141,9 +144,9 @@ finish endpoints and local Wan train are additional slots outside that sum.
 | Local render | 3 |
 | CF Wan train | 3 |
 | Video upscale | 5 |
-| MuseTalk | 3 |
+| MuseTalk | RETIRED (vivijure-cf#785) |
 | Audio upscale | RETIRED (vivijure-cf#786) |
-| **Sum** | **25** |
+| **Sum of live rows** | **19** |
 
 IaC: `fleet-chezmoi/system/runpod/vivijure-worker-quota/spec.json`. **Do not**
 raise account quota to 40 or fund the $500 deposit for 2026-07-30 without Conrad.
