@@ -439,7 +439,7 @@ def run_finish_job(
         face_restore, face_fidelity, only_faces } }
     """
     from ..finish import FinishParams, finish_clip
-    from ..models import ModelServer
+    from ..worker import standalone_server
 
     project = str(job.get("project") or "untitled")
     shot_id = str(job.get("shot_id") or "shot")
@@ -479,7 +479,7 @@ def run_finish_job(
         if deadline is not None:
             deadline.check("fetch_clip")
 
-        server = ModelServer()
+        server = standalone_server()  # the warm process-global server, never a fresh per-job one
         result = finish_clip(shot_id, local_in, local_out, server, params=params, deadline=deadline)
 
         # keys._slug via the shared helper: the SAME slug as the full-render path, so one project
@@ -552,8 +552,8 @@ def run_i2v_clip_job(
     from .. import i2v as i2v_mod
     from ..config import I2VConfig
     from ..contract import Scene
-    from ..models import ModelServer
     from ..routing import QualityTier
+    from ..worker import standalone_server
 
     project = str(job.get("project") or "untitled")
     shot_id = str(job.get("shot_id") or "shot")
@@ -605,7 +605,7 @@ def run_i2v_clip_job(
 
         out_path = workdir / "out.mp4"
         result = i2v_mod.animate(
-            Scene(id=shot_id, prompt=prompt), local_kf, prompt, ModelServer(), out_path,
+            Scene(id=shot_id, prompt=prompt), local_kf, prompt, standalone_server(ic), out_path,
             params=params, progress_cb=progress.i2v_step_cb(shot_id),
         )
 
