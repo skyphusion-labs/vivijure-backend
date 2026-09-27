@@ -483,3 +483,44 @@ def test_finish_clip_fails_loud_when_the_audio_mux_fails(tmp_path, monkeypatch):
         with pytest.raises(RuntimeError, match="finish audio mux failed"):
             finish.finish_clip("shot_01", tmp_path / "in.mp4", tmp_path / "out.mp4",
                                server, params=params)
+
+
+# ----------------------------------- face_restored reports whether any frame was actually restored
+
+class _FlakyRestorer:
+    """Raises for the frame indices in `bad`; otherwise returns a marker so success is visible."""
+    def __init__(self, bad):
+        self.bad = set(bad)
+        self.calls = 0
+
+    def restore(self, frame, **k):
+        i = self.calls
+        self.calls += 1
+        if i in self.bad:
+            raise RuntimeError("detector miss")
+        return ("restored", frame)
+
+
+def _run_finish_with(restorer, tmp_path, monkeypatch, n=3):
+    rec = _EncodeRecorder()
+    monkeypatch.setattr(finish, "_encode_uniform", rec)
+    monkeypatch.setattr(finish, "_source_has_audio", lambda p, deadline=None: False)
+    params = FinishParams(interpolate=False, face_restore=True, face_restore_backend="gfpgan")
+    with _patched_modules(_fake_imageio(_frames(n))):
+        res = finish.finish_clip("shot_01", tmp_path / "in.mp4", tmp_path / "out.mp4",
+                                 _FakeServer(restorer=restorer), params=params)
+    return res, rec
+
+
+def test_face_restored_is_false_when_every_frame_failed_restore(tmp_path, monkeypatch, capsys):
+    res, rec = _run_finish_with(_FlakyRestorer(bad={0, 1, 2}), tmp_path, monkeypatch)
+    assert res.face_restored is False                        # nothing was restored: do not claim it
+    assert rec.frames == _frames(3)                          # frames still pass through untouched
+    assert "face_restore_degraded" in capsys.readouterr().out  # and the degrade is not silent
+
+
+def test_face_restored_stays_true_when_only_some_frames_failed(tmp_path, monkeypatch):
+    res, rec = _run_finish_with(_FlakyRestorer(bad={1}), tmp_path, monkeypatch)
+    assert res.face_restored is True                         # per-frame best-effort contract kept
+    assert rec.frames[0] == ("restored", ("frame", 0))
+    assert rec.frames[1] == ("frame", 1)                     # the one bad frame passed through
