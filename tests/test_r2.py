@@ -65,3 +65,71 @@ def test_put_dir_as_tar_packs_contents_at_root(tmp_path, monkeypatch):
     # The actual content files must be present.
     assert "./top.txt" in names
     assert "./sub/nested.txt" in names
+
+
+# ------------------------------------------------------------------------------ exists()
+
+class _FakeClientError(Exception):
+    """Same `.response` shape botocore's ClientError carries. CI does not install boto3, so the
+    tests build the error from its documented shape rather than importing botocore."""
+
+    def __init__(self, code: str, status: int):
+        super().__init__(code)
+        self.response = {"Error": {"Code": code, "Message": "x"},
+                         "ResponseMetadata": {"HTTPStatusCode": status}}
+
+
+def _r2_with_head(monkeypatch, head):
+    class FakeBoto:
+        def head_object(self, Bucket, Key):
+            return head()
+
+    cfg = R2Config(endpoint="https://x", access_key_id="k", secret_access_key="s", bucket="b")
+    client = R2(cfg)
+    monkeypatch.setattr(client, "_client", lambda: FakeBoto())
+    return client
+
+
+def test_exists_true_when_object_present(monkeypatch):
+    assert _r2_with_head(monkeypatch, lambda: {"ContentLength": 1}).exists("k") is True
+
+
+@pytest.mark.parametrize("code", ["404", "NoSuchKey", "NotFound"])
+def test_exists_false_only_for_a_real_not_found(monkeypatch, code):
+    def head():
+        raise _FakeClientError(code, 404)
+    assert _r2_with_head(monkeypatch, head).exists("k") is False
+
+
+@pytest.mark.parametrize("code,status", [
+    ("403", 403), ("AccessDenied", 403), ("ExpiredToken", 400), ("InvalidAccessKeyId", 403),
+    ("SlowDown", 503), ("InternalError", 500),
+])
+def test_exists_raises_on_non_404_errors(monkeypatch, code, status):
+    """A credential or throttle failure is not proof of absence: it must surface, not read as
+    'missing' (which would retrain every LoRA and redraw every keyframe on a paid GPU)."""
+    def head():
+        raise _FakeClientError(code, status)
+    with pytest.raises(_FakeClientError):
+        _r2_with_head(monkeypatch, head).exists("k")
+
+
+def test_exists_with_real_botocore_client_error(monkeypatch):
+    """The fake above mirrors botocore's shape; prove the real class classifies the same way
+    wherever boto3 is installed (the GPU image; not the CI test env)."""
+    botocore_exc = pytest.importorskip("botocore.exceptions")
+
+    def err(code, status):
+        return botocore_exc.ClientError(
+            {"Error": {"Code": code, "Message": "x"},
+             "ResponseMetadata": {"HTTPStatusCode": status}}, "HeadObject")
+
+    def missing():
+        raise err("404", 404)
+
+    def denied():
+        raise err("403", 403)
+
+    assert _r2_with_head(monkeypatch, missing).exists("k") is False
+    with pytest.raises(botocore_exc.ClientError):
+        _r2_with_head(monkeypatch, denied).exists("k")
