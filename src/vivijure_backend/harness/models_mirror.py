@@ -430,6 +430,12 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     # read weights straight off it and skip the R2 copy entirely. Falls through to the mirror below
     # on any miss, so the R2 path stays the universal fallback. Repoints HF_HOME/VJ_MODELS_ROOT.
     if _resolve_volume(e, model_version, log):
+        # `e` is mirror_env's COPY, so the repoint _resolve_volume made lands there only. Carry it
+        # to the environment we were asked to use (os.environ in production), or the deferred
+        # torch/diffusers loads never read the volume.
+        target = env if env is not None else os.environ
+        target["VJ_MODELS_ROOT"] = e["VJ_MODELS_ROOT"]
+        target["HF_HOME"] = e["HF_HOME"]
         return False
 
     hf_home = Path(e.get("HF_HOME", "/opt/models/hf-cache"))
