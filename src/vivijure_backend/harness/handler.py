@@ -345,13 +345,30 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
     return result
 
 
+def _stored_exists(store, key: str) -> bool:
+    """`store.exists(key)`, with any error from the store raised as a HarnessError.
+
+    R2.exists() answers False only for a genuine not-found and raises on everything else (an
+    expired or wrong credential, a permission error, throttling, transport). Such an error is not
+    evidence that the project has no prior state, so it must not read as "absent": that would
+    retrain every LoRA and redraw every keyframe on a paid GPU and then fail the upload anyway.
+    Failing here is cheap and happens before any GPU work."""
+    try:
+        return bool(store.exists(key))
+    except Exception as e:
+        raise HarnessError(f"could not check stored state at {key!r}: {e}") from e
+
+
 def _restore_prior_state(store, project: str, bundle: Bundle, *, model_family: str = "sdxl") -> tuple[set[str], dict[str, str | None]]:
     """Derive the planner's skip sets straight from R2's per-artifact objects (#112) and stage
     the reusable keyframe PNGs into the bundle tree.
 
     Returns (trained_slots, existing_keyframes). Both are empty on a fresh project (nothing in
-    R2 yet), and every per-item failure degrades to "regenerate" (best-effort: a redundant
-    re-render is the safe default; a fetch hiccup must not abort the job).
+    R2 yet). A failure to FETCH an object already known to exist degrades to "regenerate"
+    (best-effort: a redundant re-render is the safe default; a fetch hiccup must not abort the
+    job). A failure of the EXISTENCE check itself (anything but a real not-found; see
+    R2.exists) raises HarnessError: it cannot tell absent state from an unusable credential, and
+    the job fails before any GPU work rather than retraining on a bad credential.
 
     R2 is the ONLY source of truth. The old design extracted a shared projects/<slug>/state.tar.gz
     that every shard of a scattered render rewrote whole -- last-writer-wins, so concurrent
@@ -375,21 +392,18 @@ def _restore_prior_state(store, project: str, bundle: Bundle, *, model_family: s
     existing_keyframes: dict[str, str | None] = {}
     wan_family = str(model_family).strip().lower() == "wan"
     for slot in bundle.storyboard.use_characters:
-        try:
-            if wan_family:
-                # A Wan slot is trained iff BOTH experts exist; a half-upload is not "trained".
-                if (store.exists(keys.wan_lora_key(project, slot, "high"))
-                        and store.exists(keys.wan_lora_key(project, slot, "low"))):
-                    trained_slots.add(slot)
-            elif store.exists(keys.lora_key(project, slot)):
+        if wan_family:
+            # A Wan slot is trained iff BOTH experts exist; a half-upload is not "trained".
+            if (_stored_exists(store, keys.wan_lora_key(project, slot, "high"))
+                    and _stored_exists(store, keys.wan_lora_key(project, slot, "low"))):
                 trained_slots.add(slot)
-        except Exception:  # noqa: BLE001 -- unknown -> retrain (safe default)
-            pass
+        elif _stored_exists(store, keys.lora_key(project, slot)):
+            trained_slots.add(slot)
     kf_dir = bundle.root / "keyframes"
     for sc in bundle.storyboard.scenes:
+        if not _stored_exists(store, keys.keyframe_key(project, sc.id)):
+            continue
         try:
-            if not store.exists(keys.keyframe_key(project, sc.id)):
-                continue
             local_png = kf_dir / f"{sc.id}.png"
             if not local_png.exists():  # bundle-provided frames win; only fill the gaps
                 local_png.parent.mkdir(parents=True, exist_ok=True)

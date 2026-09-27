@@ -33,6 +33,9 @@ class RecordingStore:
     def get_bytes(self, key):
         return self.objects[key]
 
+    def exists(self, key):
+        return False  # FRESH project: the prior-state restore finds nothing (the real R2 contract)
+
 
 def _emitter(store=None, **kw):
     ticks = iter(range(1, 10_000))
