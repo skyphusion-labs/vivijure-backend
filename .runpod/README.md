@@ -18,9 +18,9 @@ worker reads at runtime (`src/vivijure_backend/harness/r2.py`):
 **Preset:** "Standard (shared Studio bucket)" sets `R2_BUCKET=vivijure`. Override if your Studio
 uses another bucket name; the Studio and this worker must agree.
 
-**Not the satellite name.** Finish satellites (`vivijure-musetalk`, `vivijure-upscale`,
-`vivijure-audio-upscale`) read `R2_ENDPOINT_URL`. This backend reads `R2_ENDPOINT` (no `_URL`).
-Copy-paste from a satellite endpoint will miss the bucket.
+**Not the satellite name.** Finish satellites (`vivijure-upscale`, `vivijure-blender`) read
+`R2_ENDPOINT_URL`. This backend reads `R2_ENDPOINT` (no `_URL`). Copy-paste from a satellite
+endpoint will miss the bucket.
 
 ## Required files (Hub probe)
 
