@@ -430,7 +430,9 @@ def run_finish_job(
         factor=int(cfg.get("interpolation_factor", 2)),
         target_fps=int(cfg.get("target_fps", 0)),
         face_restore=bool(cfg.get("face_restore") not in (None, False, "none", "")),
-        face_restore_backend=str(cfg.get("face_restore") or "gfpgan") if cfg.get("face_restore") not in (None, False, "none", "") else "gfpgan",
+        # `true` means "on, default backend"; only a string names a backend (str(True) is "True",
+        # which FaceRestore rejects).
+        face_restore_backend=str(cfg["face_restore"]) if isinstance(cfg.get("face_restore"), str) and cfg["face_restore"] not in ("none", "") else "gfpgan",
         face_fidelity=float(cfg.get("face_fidelity", 0.7)),
         only_faces=bool(cfg.get("only_faces", True)),
     )
