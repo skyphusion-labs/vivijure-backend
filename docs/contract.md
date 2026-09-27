@@ -323,6 +323,11 @@ Caching can never combine with the 4-step distill path: when the tier (or an ove
 `distill`, `feature_cache` is forced to `NONE` (nothing to cache at 4 steps), matching the full
 render path.
 
+`i2v_clip` and `finish_clip` run on the same process-global `ModelServer` as a render, so a warm
+worker reuses the models it already loaded. If an `i2v_clip` `config` carries `model` /
+`distill_model`, they apply on a cold worker; a warm worker whose loaded i2v models differ refuses
+the job (`ModelDivergenceError`), exactly as it does for a render.
+
 **Output:**
 
 | Field | Type | Notes |
