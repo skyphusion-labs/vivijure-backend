@@ -21,3 +21,4 @@ appropriately-licensed work.
 - [ ] Only my own original or appropriately-licensed work (no code I lack rights to)
 - [ ] Commits are signed off (`git commit -s`, DCO) for code changes
 - [ ] Did not add a CHANGELOG release heading or cut a tag (maintainers cut releases)
+- [ ] A `src/` change adds a `changelog.d/<issue>-<slug>.md` fragment (or the PR carries the `no-changelog` label)

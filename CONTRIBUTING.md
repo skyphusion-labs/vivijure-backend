@@ -41,6 +41,12 @@ before you invest time.
   The body explains the *why*.
 - Releases are SemVer-style `backend-vX.Y.Z` tags (PATCH for fixes, MINOR for features,
   pre-1.0).
+- **Release notes are fragment files, not edits to `CHANGELOG.md`.** A PR that touches `src/`
+  adds `changelog.d/<issue>-<slug>.md` (format in `changelog.d/README.md`), or carries the
+  `no-changelog` label as a recorded skip; the `changelog` CI job checks. Every entry used to
+  land under the one `## Unreleased` heading, so concurrent PRs collided on the same hunk. At
+  release, `python3 scripts/changelog-assemble.py <version> <date>` folds the fragments into
+  the `## [<version>] -- <date>` section and deletes them.
 - License: contributions are accepted under the project's **AGPL-3.0-only** license.
 
 ## Testing

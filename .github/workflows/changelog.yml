@@ -1,0 +1,52 @@
+name: changelog
+
+# Guards backend#471: fixes were shipping with no release note because every entry landed under
+# the one shared `## Unreleased` heading in CHANGELOG.md, so concurrent fix PRs collided on the same
+# hunk. This job fails a PR that touches src/ without also adding a changelog.d/ fragment (or
+# editing CHANGELOG.md, still accepted during the migration window). Ported from vivijure-cf's
+# `changelog` job (cf#510/cf#539); see scripts/changelog-entry-required.py.
+#
+# Deliberately narrow, as in cf:
+#   - src/ only (the code the image COPYs). Tests, docs, deploy/, scripts/ and workflow-only
+#     changes do not need an entry; a check that fires on everything gets bypassed on reflex.
+#   - Touch, not content. No parsing of the entry, no format enforcement. The check exists to make
+#     the author STOP and decide, not to grade prose.
+#   - The escape hatch is LOUD: the `no-changelog` label, so a deliberate skip is a recorded
+#     decision on the PR rather than a silent one.
+#
+# Not one of the required checks (ci / coverage / CodeQL); this job id can be renamed freely.
+#
+# THREE-DOT, NOT TWO: `git diff BASE...HEAD` diffs from the merge base, so once another PR merges
+# to main its files do not appear in this PR's changed list. tests/test_changelog_entry_required.py
+# reproduces the two-dot false pass as a fixture and proves three-dot fixes it.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: changelog-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  changelog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # The logic lives in a SCRIPT, not here, so a test can drive it against a synthetic
+      # repository (tests/test_changelog_entry_required.py runs in tests.yml).
+      - name: changelog.d/ fragment (or CHANGELOG.md entry) required for src/ changes
+        env:
+          LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/changelog-entry-required.py . "$BASE_SHA" "$HEAD_SHA" "$LABELS_JSON"

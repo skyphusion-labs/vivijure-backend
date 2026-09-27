@@ -5,6 +5,10 @@ pre-1.0: PATCH for fixes and backend-only tweaks, MINOR for new features). Entri
 newest-first. History before this file was introduced lives in the git tags; the recent
 releases are summarized below from that history.
 
+New entries are written as one file each under `changelog.d/` (see `changelog.d/README.md`) and
+folded into a release section by `scripts/changelog-assemble.py` when the release is cut, so
+`## Unreleased` below holds only what predates that convention.
+
 ## Unreleased
 
 **Fix: promote proof uses tenant-scoped verify bundle key.**
