@@ -59,6 +59,32 @@ def _server(req: RenderRequest | None = None):
     return _SERVER
 
 
+def standalone_server(i2v=None):
+    """The process-global ModelServer for a standalone finish_clip / i2v_clip job.
+
+    Same singleton as `_server`, so a warm worker reuses the models it already loaded instead of
+    reloading them per job. `i2v` is the job's typed `I2VConfig` (i2v_clip), or None (finish_clip,
+    which names no models). Cold start builds the server with the job's i2v repo ids; a warm server
+    whose loaded i2v models differ REFUSES the job exactly as a render does (`ModelDivergenceError`)."""
+    global _SERVER
+    from .models import ModelRole
+    if _SERVER is None:
+        # deferred: torch; validate_repo_id rejects path/URI/foreign-namespace ids before load
+        from .models import ModelServer, DEFAULT_SPECS, validate_repo_id
+        job_specs: dict = {}
+        if i2v is not None:
+            job_specs = {
+                ModelRole.I2V: dataclasses.replace(
+                    DEFAULT_SPECS[ModelRole.I2V], repo_id=validate_repo_id(i2v.model)),
+                ModelRole.I2V_DISTILL: dataclasses.replace(
+                    DEFAULT_SPECS[ModelRole.I2V_DISTILL], repo_id=validate_repo_id(i2v.distill_model)),
+            }
+        _SERVER = ModelServer(specs=job_specs or None)
+    if i2v is not None:
+        _refuse_divergence({ModelRole.I2V: i2v.model, ModelRole.I2V_DISTILL: i2v.distill_model}, _SERVER)
+    return _SERVER
+
+
 def build_pipeline(req: RenderRequest) -> GpuPipeline:
     """The GPU pipeline for one job: the job's typed config + its pretrained-LoRA references,
     over the shared model server. The server is initialized from `req.config` model fields on
@@ -92,6 +118,15 @@ def _check_model_divergence(req: RenderRequest, server) -> None:
             ModelRole.I2V: ic.model,
             ModelRole.I2V_DISTILL: ic.distill_model,
         }
+    except Exception:
+        return  # detection is best-effort; never invent a mismatch
+    _refuse_divergence(checks, server)
+
+
+def _refuse_divergence(checks: dict, server) -> None:
+    """Refuse when any role in `checks` (role -> requested repo id) differs from what `server` has
+    loaded. Shared by render jobs (all four roles) and standalone i2v_clip (the two i2v roles)."""
+    try:
         mismatches = {
             role: (loaded.repo_id, requested)
             for role, requested in checks.items()
