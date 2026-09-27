@@ -143,6 +143,8 @@ Never trust: CI green alone, bake green alone, or image size alone.
 
 Conventional Commits (`feat(i2v):`, `fix(keyframe):`, `docs:`); body explains the why. SemVer-style
 `0.MINOR.PATCH` while pre-1.0; a release commit bumps the version and updates `RELEASES.md` / `CHANGELOG.md`.
+A PR that touches `src/` adds a `changelog.d/<issue>-<slug>.md` fragment (see `changelog.d/README.md`; CI job
+`changelog`) instead of editing `CHANGELOG.md`; the release commit runs `scripts/changelog-assemble.py`.
 
 ## Release / deploy
 
