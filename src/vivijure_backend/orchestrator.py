@@ -127,8 +127,9 @@ class RenderPlan:
 
 
 def kf_hash(kc) -> str:
-    """Short SHA-256 hash of the keyframe render params (steps, guidance, seed, model, the
-    multi-char anti-bleed knobs, and the scene-lock two-pass knobs). Stored alongside each
+    """Short SHA-256 hash of the keyframe render params (steps, guidance, scheduler, seed, models,
+    the distill flag, the identity scales, the multi-char anti-bleed knobs, and the scene-lock
+    two-pass knobs). Stored alongside each
     keyframe in state so an incremental re-run with changed params forces regeneration instead
     of silently reusing a stale image.
 
@@ -143,9 +144,14 @@ def kf_hash(kc) -> str:
     payload = {
         "steps": kc.distill_steps if kc.distill else kc.steps,
         "guidance": kc.guidance_scale,
+        "scheduler": kc.scheduler.value,
         "seed": kc.seed,
         "base_model": kc.base_model,
+        "distill": kc.distill,
+        "distill_model": kc.distill_model,
         "identity_method": kc.identity_method.value,
+        "ip_adapter_scale": kc.ip_adapter_scale,
+        "instantid_ip_adapter_scale": kc.instantid_ip_adapter_scale,
         "width": kc.width,
         "height": kc.height,
         "lora_scale": kc.lora_scale,
