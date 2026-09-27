@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import threading
 import time
+from enum import Enum
 from pathlib import Path
 from typing import Callable
 
@@ -261,10 +262,117 @@ def _jitter_seconds(e: dict) -> float:
     return random.uniform(0, ceiling) if ceiling > 0 else 0.0
 
 
+# Job actions that can NEVER reach the Wan i2v stage. The volume readiness gate asks exactly one
+# question about i2v -- "can an i2v stage run here at all" -- and the answer is already declared in
+# code, so this introduces no new endpoint knob (#453):
+#   - orchestrator.Action.PREVIEW     "keyframes-only preview: train -> keyframes, NO i2v, no MP4"
+#   - orchestrator.Action.REGEN_SHOT  "regenerate named keyframes only, no i2v"
+#   - orchestrator.Action.TRAIN_LORA  "train LoRAs only"
+#   - the harness-only "finish_clip"  RIFE interpolation / face restore; never loads Wan
+# A DENYLIST on purpose: an action this module has not heard of counts as i2v-capable, which is the
+# conservative direction (the gate then demands the i2v corpus exactly as it always did), and it
+# matches `orchestrator.Action.parse`, which also resolves an unknown value to RENDER.
+#
+# NOT the same question as `harness.handler._wants_i2v_prefetch`, which asks whether eagerly
+# STARTING the ~120GB pull is worth it and deliberately keeps the prefetch for preview / regen_shot
+# to warm a worker that may get a render next. That is a cost call; this is a correctness gate. They
+# are kept apart on purpose -- merging them would make one of the two wrong.
+I2V_FREE_ACTIONS = frozenset({"preview", "regen_shot", "train_lora", "finish_clip"})
+
+
+def i2v_stage_possible(action: str | None) -> bool:
+    """True iff a job with this `action` can reach the Wan i2v stage, and so needs the i2v corpus.
+    Pure. `None` (an unnamed action) and any unrecognised action answer True: see I2V_FREE_ACTIONS
+    for why the unknown case must be the demanding one."""
+    return str(action if action is not None else "render").strip() not in I2V_FREE_ACTIONS
+
+
+class VolumeState(Enum):
+    """What the mounted network volume IS for the job in hand. A NAMED state, not a bare bool.
+
+    `_resolve_volume` used to return True/False, which collapsed two very different situations into
+    one reading: a volume preloaded with the honest post-2026-09-26 corpus (keyframes, no Wan) and a
+    volume whose preload genuinely did not finish. Both surfaced as False plus a log line reading
+    "not fully preloaded", i.e. "somebody botched the upload", and an operator re-ran a preload that
+    could not fix it (#453). A monitor must be able to tell them apart WITHOUT parsing prose, so the
+    distinction lives here, in the return value, and in the structured `@event` reason.
+
+    `__bool__` is defined deliberately: any caller not yet updated to read `.usable` still gets the
+    correct, fail-safe answer rather than the always-truthy behaviour of a plain Enum member. New
+    code reads `.usable` (or the member) explicitly."""
+
+    ABSENT = "absent"              # no VJ_VOLUME_ROOT, or it is not mounted on this worker
+    READY = "ready"                # every sentinel present, i2v corpus included
+    READY_NO_I2V = "ready_no_i2v"  # base corpus current; i2v corpus absent AND not needed here
+    INCOMPLETE = "incomplete"      # a sentinel this job NEEDS is missing -> degrade wholesale
+
+    @property
+    def usable(self) -> bool:
+        """True iff the worker should read its weights off the volume."""
+        return self in (VolumeState.READY, VolumeState.READY_NO_I2V)
+
+    def __bool__(self) -> bool:
+        return self.usable
+
+
+# The two env keys a volume repoint overwrites, and the values the ENDPOINT configured before any
+# repoint happened. Captured once per process (see _remember_pristine_roots) so a later job that
+# must NOT use the volume can be handed the endpoint own roots back instead of inheriting a stale
+# repoint from an earlier job on the same warm worker.
+_VOLUME_REPOINT_KEYS = ("VJ_MODELS_ROOT", "HF_HOME")
+_PRISTINE_ROOTS: dict[str, str | None] | None = None
+
+
+def _remember_pristine_roots(e: dict) -> None:
+    """Record the endpoint own model roots, once per process, BEFORE any repoint can have landed.
+    Only `_resolve_volume` and `_self_preload_volume` repoint, and the former calls this before it
+    can, so the first call always observes the pristine values."""
+    global _PRISTINE_ROOTS
+    if _PRISTINE_ROOTS is None:
+        _PRISTINE_ROOTS = {k: e.get(k) for k in _VOLUME_REPOINT_KEYS}
+
+
+def _decline(e: dict, state: "VolumeState") -> "VolumeState":
+    """Return `state` after taking BACK any volume repoint an earlier job on this warm worker made.
+
+    The repoint is process-global (it lands in os.environ so the deferred torch/diffusers loads see
+    it), but since #453 whether the volume is usable is a PER-JOB question: a `preview` job may
+    legitimately accept a keyframe-only volume, and the very next `render` job on the same warm
+    worker must not inherit that. Without this undo, that render would resolve its HF cache to the
+    volume, find the base sentinel current, skip the R2 pull, and then try to mirror Wan ONTO the
+    volume at i2v time -- precisely the failure the wholesale-degrade guard exists to prevent."""
+    if _PRISTINE_ROOTS is None:
+        return state
+    for key, value in _PRISTINE_ROOTS.items():
+        if value is None:
+            e.pop(key, None)
+        else:
+            e[key] = value
+    return state
+
+
 def _volume_sentinel_ok(path: Path, model_version: str) -> bool:
     """True iff the sentinel file at `path` exists and matches `model_version`. Raises only OSError,
     which the caller treats as a miss."""
     return path.exists() and path.read_text().strip() == model_version
+
+
+def _classify_volume(vol: Path, model_version: str, *,
+                     i2v_required: bool) -> tuple["VolumeState", bool, bool]:
+    """Read the volume sentinels and name what the volume is for a job with these requirements.
+
+    Returns (state, base_ok, i2v_ok). Pure apart from two stats; raises only OSError, which the
+    caller treats as a probe failure. The base sentinel is ALWAYS required: a volume without it has
+    no corpus this worker can use. The i2v sentinel is required only when an i2v stage can run, and
+    when it is required and missing the state is INCOMPLETE, which degrades wholesale exactly as
+    before -- the i2v-absent case is a distinct state, never a relaxation of the guard."""
+    base_ok = _volume_sentinel_ok(vol / SENTINEL, model_version)
+    i2v_ok = _volume_sentinel_ok(vol / I2V_SENTINEL, model_version)
+    if base_ok and i2v_ok:
+        return VolumeState.READY, base_ok, i2v_ok
+    if base_ok and not i2v_required:
+        return VolumeState.READY_NO_I2V, base_ok, i2v_ok
+    return VolumeState.INCOMPLETE, base_ok, i2v_ok
 
 
 def _truthy(v) -> bool:
@@ -308,14 +416,18 @@ def _acquire_volume_lock(lockpath: Path, log: Callable[[str], None], ttl_s: int 
     return False
 
 
-def _self_preload_volume(e: dict, model_version: str, log: Callable[[str], None]) -> bool:
+def _self_preload_volume(e: dict, model_version: str, log: Callable[[str], None],
+                         *, i2v_required: bool = True) -> "VolumeState":
     """First-worker self-preload (opt-in via `VJ_VOLUME_SELF_PRELOAD`): when the mounted volume is
     empty/partial, win the single-writer lock and mirror R2 -> the volume (base + i2v) so every
     later worker in this datacenter is hot -- no manual preload pod, and version bumps self-heal.
     The easiest scale-out: attach an empty volume to a DC and the first worker primes it.
 
-    Returns True (and repoints `HF_HOME`/`VJ_MODELS_ROOT` at the now-filled volume) iff WE filled it;
-    False to fall back to the local-disk R2 mirror for this job. Only the lock winner writes; the
+    Returns a `VolumeState`: a usable one (and a repoint of `HF_HOME`/`VJ_MODELS_ROOT` at the
+    now-filled volume) iff WE filled what this job needs, INCOMPLETE to fall back to the local-disk
+    R2 mirror for this job. `i2v_required` is the caller's readiness requirement and is applied to
+    the filled volume by the same `_classify_volume` the read path uses, so a self-preload and a
+    plain read can never disagree about what "preloaded" means. Only the lock winner writes; the
     losers fall back (correct, just not hot), which is what prevents concurrent-write corruption.
     The fill runs the standard mirror against a sub-env with the volume-read path disabled, so it
     does not recurse back into `_resolve_volume`."""
@@ -323,7 +435,7 @@ def _self_preload_volume(e: dict, model_version: str, log: Callable[[str], None]
     lock = vol / _PRELOAD_LOCK
     if not _acquire_volume_lock(lock, log):
         log(f"models_mirror: another worker is preloading {vol}; this job uses the R2 mirror.")
-        return False
+        return VolumeState.INCOMPLETE
     log(f"models_mirror: self-preloading volume {vol} from R2 (sole writer)...")
     try:
         sub = dict(e)
@@ -335,40 +447,51 @@ def _self_preload_volume(e: dict, model_version: str, log: Callable[[str], None]
         ensure_i2v_models(env=sub, log=log)      # Wan set + i2v sentinel  -> volume
     except Exception as exc:  # noqa: BLE001 -- a failed fill must never abort the job; fall back
         log(f"models_mirror: self-preload of {vol} failed ({exc}); this job uses the R2 mirror.")
-        return False
+        return VolumeState.INCOMPLETE
     finally:
         try:
             lock.unlink()
         except OSError:
             pass
     try:
-        if (_volume_sentinel_ok(vol / SENTINEL, model_version)
-                and _volume_sentinel_ok(vol / I2V_SENTINEL, model_version)):
-            e["VJ_MODELS_ROOT"] = str(vol)
-            e["HF_HOME"] = str(vol / "hf-cache")
-            log(f"models_mirror: self-preload complete; reading weights from {vol}.")
-            log(_skip_event("volume_self_preload"))
-            return True
+        state, base_ok, i2v_ok = _classify_volume(vol, model_version, i2v_required=i2v_required)
     except OSError:
-        pass
-    log(f"models_mirror: self-preload of {vol} did not complete both sentinels; using R2 mirror.")
-    return False
+        state, base_ok, i2v_ok = VolumeState.INCOMPLETE, False, False
+    if state.usable:
+        e["VJ_MODELS_ROOT"] = str(vol)
+        e["HF_HOME"] = str(vol / "hf-cache")
+        log(f"models_mirror: self-preload complete; reading weights from {vol}.")
+        log(_skip_event("volume_self_preload"))
+        return state
+    log(f"models_mirror: self-preload of {vol} did not complete the sentinels this job needs "
+        f"(base={base_ok}, i2v={i2v_ok}, i2v_required={i2v_required}); using R2 mirror.")
+    return VolumeState.INCOMPLETE
 
 
-def _resolve_volume(e: dict, model_version: str, log: Callable[[str], None]) -> bool:
-    """If a fully preloaded RunPod network volume is mounted (`VJ_VOLUME_ROOT`) and carries BOTH the
-    base AND the i2v sentinel at the wanted `model_version`, repoint `HF_HOME` + `VJ_MODELS_ROOT` at
-    it so the worker reads the weights straight off the local-datacenter volume -- no 223 GB R2 copy
-    -- and return True. Else return False so the caller falls back to the R2 mirror on writable
-    local disk (issue #55 Phase C: per-datacenter preloaded volumes, R2 mirror as the universal
-    fallback).
+def _resolve_volume(e: dict, model_version: str, log: Callable[[str], None],
+                    *, action: str | None = None) -> "VolumeState":
+    """Name what the mounted RunPod network volume (`VJ_VOLUME_ROOT`) is for THIS job, and when it is
+    usable repoint `HF_HOME` + `VJ_MODELS_ROOT` at it so the worker reads its weights straight off
+    the local-datacenter volume -- no 223 GB R2 copy (issue #55 Phase C: per-datacenter preloaded
+    volumes, R2 mirror as the universal fallback). Returns a `VolumeState`, never a bare bool; an
+    unusable state means the caller falls back to the R2 mirror on writable local disk.
 
-    BOTH sentinels are required, not just the base one: after the repoint, a standalone `i2v_clip`
-    calls `ensure_i2v_models` against the volume root, and if the volume held the base set but NOT
-    the i2v set (a partial preload that still wrote the base sentinel, or a base-only volume), that
-    would try to mirror Wan ONTO the volume and fail instead of falling back. So an incompletely
-    preloaded volume degrades wholesale rather than throwing mysterious i2v failures in that DC.
-    (One full volume per DC is the design.)
+    WHICH SENTINELS ARE REQUIRED IS THE JOB'S QUESTION, NOT THE VOLUME'S. The base sentinel is
+    always required. The i2v sentinel is required only when this job's `action` can actually reach
+    the Wan i2v stage (`i2v_stage_possible`). Conrad retired the local i2v path on 2026-09-26, so
+    the honest post-ruling corpus is keyframes and no Wan: 60% of the old 107.8 GB weight set is
+    simply not there any more. Requiring the i2v sentinel unconditionally made that correctly
+    preloaded volume fail EVERY resolve, forever, with no error and nothing to show for it but a
+    cold-start bill that reads as a volume nobody configured (#453).
+
+    THE ORIGINAL GUARD IS KEPT, NOT WEAKENED. When an i2v stage CAN run and the volume lacks the
+    i2v corpus, the volume is still refused WHOLESALE (INCOMPLETE) rather than repointed: after a
+    repoint a standalone `i2v_clip` calls `ensure_i2v_models` against the volume root and would try
+    to mirror Wan ONTO the volume, failing instead of falling back. That reasoning was right; only
+    its premise moved. So the guard now fires on "the corpus this job needs is incomplete" instead
+    of on "the corpus a 2026-06 worker needed is incomplete", and the deliberately-absent i2v corpus
+    gets its own state (READY_NO_I2V) instead of being reported as a botched upload.
+    (One volume per DC is still the design.)
 
     READ-ONLY by default: RunPod warns that concurrent writes from multiple workers corrupt a
     volume, so a worker normally never writes it. The exception is opt-in self-preload
@@ -378,41 +501,58 @@ def _resolve_volume(e: dict, model_version: str, log: Callable[[str], None]) -> 
     loads, which read `HF_HOME` at call time."""
     vol = e.get("VJ_VOLUME_ROOT")
     if not vol:
-        return False
+        return VolumeState.ABSENT
+    # Before anything can repoint, record the roots the endpoint configured (see _decline).
+    _remember_pristine_roots(e)
     # The volume must actually be mounted. If VJ_VOLUME_ROOT is set but the path isn't there (the
     # endpoint is configured for volumes but this worker landed in a DC without one, or the env was
     # set before the volume was attached), treat it as a clean miss -> R2 mirror. Without this, the
     # self-preload lock attempt would os.open() a non-existent dir and crash the worker.
     if not Path(vol).is_dir():
         log(f"models_mirror: VJ_VOLUME_ROOT={vol} is not mounted here; falling back to R2 mirror.")
-        return False
+        return _decline(e, VolumeState.ABSENT)
+    i2v_required = i2v_stage_possible(action)
     try:
-        base_ok = _volume_sentinel_ok(Path(vol) / SENTINEL, model_version)
-        i2v_ok = _volume_sentinel_ok(Path(vol) / I2V_SENTINEL, model_version)
+        state, base_ok, i2v_ok = _classify_volume(Path(vol), model_version,
+                                                  i2v_required=i2v_required)
     except OSError as exc:  # noqa: BLE001 -- a volume probe failure must never abort the job
         log(f"models_mirror: volume probe at {vol} failed ({exc}); falling back to R2 mirror.")
-        return False
-    if base_ok and i2v_ok:
+        return _decline(e, VolumeState.INCOMPLETE)
+    if state.usable:
         e["VJ_MODELS_ROOT"] = str(vol)
         e["HF_HOME"] = str(Path(vol) / "hf-cache")
-        log(f"models_mirror: fully preloaded network volume at {vol} (v{model_version}); "
-            "reading weights from it, skipping the R2 mirror.")
-        log(_skip_event("volume"))
-        return True
-    log(f"models_mirror: volume at {vol} not fully preloaded for v{model_version} "
-        f"(base={base_ok}, i2v={i2v_ok}).")
+        if state is VolumeState.READY:
+            log(f"models_mirror: fully preloaded network volume at {vol} (v{model_version}); "
+                "reading weights from it, skipping the R2 mirror.")
+            log(_skip_event("volume"))
+        else:
+            # NOT a partial preload. Said in full so nobody re-runs a preload that cannot help.
+            log(f"models_mirror: network volume at {vol} carries the corpus this job needs "
+                f"(v{model_version}, base sentinel current). The i2v corpus is absent and "
+                f"action={action!r} runs no i2v stage, so this is a DELIBERATELY i2v-free volume, "
+                "not an unfinished preload. Reading weights from it, skipping the R2 mirror.")
+            log(_skip_event("volume_no_i2v"))
+        return state
+    log(f"models_mirror: volume at {vol} is missing a sentinel THIS JOB NEEDS for v{model_version} "
+        f"(base={base_ok}, i2v={i2v_ok}, i2v_required={i2v_required}); degrading wholesale.")
     if _truthy(e.get("VJ_VOLUME_SELF_PRELOAD")):
-        return _self_preload_volume(e, model_version, log)
+        filled = _self_preload_volume(e, model_version, log, i2v_required=i2v_required)
+        return filled if filled.usable else _decline(e, filled)
     log("models_mirror: falling back to R2 mirror.")
-    return False
+    return _decline(e, state)
 
 
 def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print,
-                  skip_repos: tuple[str, ...] = DEFAULT_SKIP_REPOS) -> bool:
+                  skip_repos: tuple[str, ...] = DEFAULT_SKIP_REPOS,
+                  action: str | None = None) -> bool:
     """Mirror the kept model set from R2 into the local HF cache + antelopev2 dir.
 
     Returns True if a pull ran, False if it was skipped (warm worker, or no R2 creds so weights
     are assumed pre-provisioned). Raises on a hard failure (missing rclone, failed pull).
+
+    `action` is the job's action, and it is the ONLY thing that decides whether the network-volume
+    readiness gate requires the i2v corpus (see `_resolve_volume`). Omitting it keeps the
+    conservative pre-#453 behaviour: the i2v corpus is required.
     """
     e = mirror_env(env)
     model_version = e.get("VJ_MODEL_VERSION") or _DEFAULT_MODEL_VERSION
@@ -429,13 +569,19 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     # Preloaded per-datacenter network volume (issue #55 Phase C): if one is mounted and current,
     # read weights straight off it and skip the R2 copy entirely. Falls through to the mirror below
     # on any miss, so the R2 path stays the universal fallback. Repoints HF_HOME/VJ_MODELS_ROOT.
-    if _resolve_volume(e, model_version, log):
-        # `e` is mirror_env's COPY, so the repoint _resolve_volume made lands there only. Carry it
-        # to the environment we were asked to use (os.environ in production), or the deferred
-        # torch/diffusers loads never read the volume.
-        target = env if env is not None else os.environ
-        target["VJ_MODELS_ROOT"] = e["VJ_MODELS_ROOT"]
-        target["HF_HOME"] = e["HF_HOME"]
+    volume = _resolve_volume(e, model_version, log, action=action)
+    # `e` is mirror_env's COPY, so the repoint -- or its UNDO -- lands there only. Carry both root
+    # keys to the environment we were asked to use (os.environ in production), or the deferred
+    # torch/diffusers loads never read the volume. Carried on EVERY outcome, not just a usable one:
+    # readiness is per-job since #453, so a decline on a warm worker whose PREVIOUS job repointed at
+    # the volume has to take that repoint back (see _decline).
+    target = env if env is not None else os.environ
+    for key in _VOLUME_REPOINT_KEYS:
+        if key in e:
+            target[key] = e[key]
+        else:
+            target.pop(key, None)
+    if volume.usable:
         return False
 
     hf_home = Path(e.get("HF_HOME", "/opt/models/hf-cache"))

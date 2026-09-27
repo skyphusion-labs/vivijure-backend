@@ -760,7 +760,10 @@ def handler(job: dict) -> dict:
         if deadline is not None:
             deadline.check("r2_client")
         try:
-            mirrored = ensure_models()
+            # The job's action is handed to the mirror because the network-volume readiness gate
+            # needs it: whether the volume must carry the Wan i2v corpus depends on whether an i2v
+            # stage can run at all (models_mirror.i2v_stage_possible, backend#453).
+            mirrored = ensure_models(action=action_in)
         except Exception as e:
             ProgressEmitter(store, project, job_id, on_progress=on_progress).error("mirror", e)
             raise
