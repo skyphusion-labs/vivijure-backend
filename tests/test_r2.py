@@ -133,3 +133,30 @@ def test_exists_with_real_botocore_client_error(monkeypatch):
     assert _r2_with_head(monkeypatch, missing).exists("k") is False
     with pytest.raises(botocore_exc.ClientError):
         _r2_with_head(monkeypatch, denied).exists("k")
+
+
+# ------------------------------------------------------------------------- is_not_found()
+
+@pytest.mark.parametrize("code", ["404", "NoSuchKey", "NotFound"])
+def test_is_not_found_true_for_a_real_not_found(code):
+    """The one classifier exists() and every other read of a maybe-absent object share, so a
+    read (get_object reports NoSuchKey) and a probe (head_object reports the bare 404) agree."""
+    from vivijure_backend.harness.r2 import is_not_found
+    assert is_not_found(_FakeClientError(code, 404)) is True
+
+
+@pytest.mark.parametrize("code,status", [
+    ("403", 403), ("AccessDenied", 403), ("ExpiredToken", 400), ("InvalidAccessKeyId", 403),
+    ("SlowDown", 503), ("InternalError", 500),
+])
+def test_is_not_found_false_for_every_other_client_error(code, status):
+    from vivijure_backend.harness.r2 import is_not_found
+    assert is_not_found(_FakeClientError(code, status)) is False
+
+
+@pytest.mark.parametrize("exc", [KeyError("k"), RuntimeError("boom"), ConnectionError("reset"),
+                                 TimeoutError("slow")])
+def test_is_not_found_false_for_errors_that_carry_no_response(exc):
+    """A transport failure or a stray KeyError is not proof of absence."""
+    from vivijure_backend.harness.r2 import is_not_found
+    assert is_not_found(exc) is False

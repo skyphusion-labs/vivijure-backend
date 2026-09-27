@@ -265,6 +265,22 @@ def _extract_bundle(tmp_path):
     return Bundle.extract(tarp, tmp_path / "restore_project")
 
 
+class _StoreNotFound(Exception):
+    """The `.response` shape botocore's ClientError carries for a missing object."""
+
+    def __init__(self, key):
+        super().__init__(key)
+        self.response = {"Error": {"Code": "NoSuchKey", "Message": "x"},
+                         "ResponseMetadata": {"HTTPStatusCode": 404}}
+
+
+class _StoreDenied(Exception):
+    def __init__(self, code="AccessDenied", status=403):
+        super().__init__(code)
+        self.response = {"Error": {"Code": code, "Message": "x"},
+                         "ResponseMetadata": {"HTTPStatusCode": status}}
+
+
 class R2StateStore:
     """Per-artifact fake: `objects` maps key -> bytes; exists/get_file/get_bytes serve it."""
     def __init__(self, objects):
@@ -281,6 +297,11 @@ class R2StateStore:
         return dest
 
     def get_bytes(self, key):
+        # A missing object reads back as R2's own not-found error (get_object: NoSuchKey / 404),
+        # not a KeyError: the code under test classifies the error, so a fake that raised a
+        # different shape than the real store would pin behaviour the real store never shows.
+        if key not in self.objects:
+            raise _StoreNotFound(key)
         return self.objects[key]
 
 
@@ -385,6 +406,43 @@ def test_restore_aborts_when_a_keyframe_existence_check_errors(tmp_path):
     bundle = _extract_bundle(tmp_path)
     with pytest.raises(HarnessError, match="403 Forbidden"):
         _restore_prior_state(KeyframeProbeFails({}), "fresh", bundle)
+
+
+@pytest.mark.parametrize("make_err", [
+    lambda: _StoreDenied("AccessDenied", 403),
+    lambda: _StoreDenied("ExpiredToken", 400),
+    lambda: _StoreDenied("SlowDown", 503),
+    lambda: ConnectionError("connection reset"),
+])
+def test_restore_aborts_when_the_keyframe_hash_read_errors(tmp_path, make_err):
+    """The .hash read is a get_bytes on an object exists() already confirmed the KEYFRAME for.
+    Only a real not-found means "no sidecar" (legacy state: reuse conservatively). Any other
+    failure (credential, throttle, transport) is not evidence there is no sidecar; reading it as
+    one would serve a keyframe drawn with different parameters as current. It must fail the job
+    before GPU work, as the existence checks do (#460, #475)."""
+    from vivijure_backend.harness.handler import _restore_prior_state
+
+    class HashReadFails(R2StateStore):
+        def get_bytes(self, key):
+            if key.endswith(".hash"):
+                raise make_err()
+            return super().get_bytes(key)
+
+    bundle = _extract_bundle(tmp_path)
+    store = HashReadFails({keys.keyframe_key("neon", "shot_01"): b"PNG"})
+    with pytest.raises(HarnessError, match="hash"):
+        _restore_prior_state(store, "neon", bundle)
+
+
+def test_restore_reads_a_missing_hash_sidecar_as_legacy_none(tmp_path):
+    """The other side of the rule: a real not-found on the sidecar is the legacy no-sidecar
+    state and stays None (reuse conservatively), unchanged."""
+    from vivijure_backend.harness.handler import _restore_prior_state
+
+    bundle = _extract_bundle(tmp_path)
+    store = R2StateStore({keys.keyframe_key("neon", "shot_01"): b"PNG"})
+    _, existing = _restore_prior_state(store, "neon", bundle)
+    assert existing == {"shot_01": None}
 
 
 def test_run_job_uploads_keyframe_hash_sidecars(tmp_path):

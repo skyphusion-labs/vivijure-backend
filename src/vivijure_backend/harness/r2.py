@@ -54,6 +54,22 @@ R2_ALLOWED_HOSTS_ENV = "R2_ALLOWED_ENDPOINT_HOSTS"
 R2_ACCOUNT_ID_ENV = "CLOUDFLARE_ACCOUNT_ID"
 # head_object codes that mean "no such object" (botocore reports the bare HTTP status for HEAD).
 _NOT_FOUND_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
+
+
+def is_not_found(exc: BaseException) -> bool:
+    """True iff `exc` is a real R2 not-found (404 / NoSuchKey / NotFound): the only failure that
+    means "the object is not there". Auth, an expired credential, throttling and transport errors
+    are NOT proof of absence. Shared by exists() and every read of an object that may legitimately
+    be absent, so a probe (head_object: bare 404) and a read (get_object: NoSuchKey) agree.
+    Duck-typed on botocore's ClientError.response, so this needs no botocore import."""
+    resp = getattr(exc, "response", None)
+    if not isinstance(resp, dict):
+        return False
+    code = str((resp.get("Error") or {}).get("Code", ""))
+    status = (resp.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+    return code in _NOT_FOUND_CODES or status == 404
+
+
 _R2_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _BLOCKED_ENDPOINT_HOSTS = frozenset({
     "localhost",
@@ -302,12 +318,8 @@ class R2:
             self._client().head_object(Bucket=self.config.bucket, Key=key)
             return True
         except Exception as e:
-            resp = getattr(e, "response", None)
-            if isinstance(resp, dict):
-                code = str((resp.get("Error") or {}).get("Code", ""))
-                status = (resp.get("ResponseMetadata") or {}).get("HTTPStatusCode")
-                if code in _NOT_FOUND_CODES or status == 404:
-                    return False
+            if is_not_found(e):
+                return False
             raise
 
     def put_file(self, path: Path, key: str, *, content_type: str | None = None,
@@ -337,7 +349,9 @@ class R2:
         return key
 
     def get_bytes(self, key: str) -> bytes:
-        """Read one object into memory (for reading a progress snapshot back)."""
+        """Read one object into memory (for reading a progress snapshot back). Raises on every
+        failure, a missing object included; a caller that treats "absent" as a normal state must
+        classify with `is_not_found` and let every other error propagate."""
         return self._client().get_object(Bucket=self.config.bucket, Key=key)["Body"].read()
 
     def put_dir_as_tar(self, src_dir: Path, key: str, *, metadata: dict[str, str] | None = None) -> str:

@@ -25,6 +25,7 @@ from ..orchestrator import (Action, KeyframeMode, RenderPlan, plan as make_plan,
                             resolve_lora_family, validate)
 from . import keys
 from .progress import NullEmitter, ProgressEmitter
+from .r2 import is_not_found
 from . import job_done_diag
 
 
@@ -379,7 +380,9 @@ def _restore_prior_state(store, project: str, bundle: Bundle, *, model_family: s
       in _finish happens only after a successful train, so existence == trained.
     - Shot `sc.id` has a reusable keyframe iff its PNG exists at keyframe_key(project, sc.id);
       its param hash comes from the .hash sidecar (absent sidecar -> None, which _keyframe_mode
-      treats as "reuse conservatively", the same contract as the old no-hash-file state).
+      treats as "reuse conservatively", the same contract as the old no-hash-file state). Only a
+      real not-found is "absent": any other failure reading the sidecar raises HarnessError, for
+      the same reason as the existence checks.
 
     Trusting R2 existence is also what #108 wanted: there is no stale state object left to name
     a phantom keyframe.
@@ -411,12 +414,23 @@ def _restore_prior_state(store, project: str, bundle: Bundle, *, model_family: s
             stored: str | None = None
             try:
                 raw = store.get_bytes(keys.keyframe_hash_key(project, sc.id))
-                stored = raw.decode("utf-8", "replace").strip() or None
-                if stored:
-                    local_png.with_suffix(".hash").write_text(stored)
-            except Exception:  # noqa: BLE001 -- no/unreadable sidecar -> reuse conservatively
-                pass
+            except Exception as e:  # noqa: BLE001 -- classified below
+                if not is_not_found(e):
+                    # Not "no sidecar": a credential, throttle or transport failure. Reading it
+                    # as legacy state would reuse a keyframe drawn with other parameters.
+                    raise HarnessError(
+                        f"could not read keyframe hash sidecar for {sc.id!r}: {e}") from e
+                raw = None  # a real not-found: legacy no-sidecar state -> reuse conservatively
+            if raw is not None:
+                try:
+                    stored = raw.decode("utf-8", "replace").strip() or None
+                    if stored:
+                        local_png.with_suffix(".hash").write_text(stored)
+                except Exception:  # noqa: BLE001 -- a local staging hiccup -> reuse conservatively
+                    pass
             existing_keyframes[sc.id] = stored
+        except HarnessError:
+            raise  # the sidecar read failed for a reason other than not-found: fail before GPU work
         except Exception:  # noqa: BLE001 -- any per-shot failure -> the planner GENERATEs it
             continue
     return trained_slots, existing_keyframes
