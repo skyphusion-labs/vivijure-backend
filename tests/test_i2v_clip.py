@@ -232,3 +232,46 @@ def test_run_finish_job_sidecar_failure_never_fails_the_render(tmp_path, fake_fi
     store = BoomStore()
     out = h.run_finish_job(_finish_job(output_hash="deadbeef"), store=store, workdir=tmp_path)
     assert out["clip_key"].endswith("_finished.mp4")  # artifact up; sidecar miss is best-effort, no raise
+
+
+# --- face_restore selector mapping (run_finish_job) ---------------------------------------------
+
+def _finish_params_for(tmp_path, monkeypatch, face_restore):
+    """Run run_finish_job with the given config.face_restore and return the FinishParams it built."""
+    import types as _t
+    from vivijure_backend import finish as _finish_mod
+
+    seen = {}
+
+    def _spy(shot_id, in_path, out_path, server, params=None, deadline=None):
+        seen["params"] = params
+        Path(out_path).write_bytes(b"MP4")
+        return _t.SimpleNamespace(interpolated=False, face_restored=False, out_fps=16, frames_out=8)
+
+    monkeypatch.setattr(_finish_mod, "finish_clip", _spy)
+    monkeypatch.setattr("vivijure_backend.models.ModelServer", lambda *a, **k: object())
+    h.run_finish_job(_finish_job(config={"face_restore": face_restore}),
+                     store=KFStore(), workdir=tmp_path)
+    return seen["params"]
+
+
+def test_face_restore_true_selects_the_default_backend(tmp_path, monkeypatch):
+    # `true` means "on, default backend". It used to become the backend name "True", which
+    # ModelServer.face_restorer (FaceRestore(str(backend).lower())) rejects with ValueError.
+    from vivijure_backend.config import FaceRestore
+    p = _finish_params_for(tmp_path, monkeypatch, True)
+    assert p.face_restore is True
+    assert FaceRestore(str(p.face_restore_backend).lower()) is FaceRestore.GFPGAN
+
+
+@pytest.mark.parametrize("name", ["gfpgan", "codeformer"])
+def test_face_restore_named_backend_is_kept(tmp_path, monkeypatch, name):
+    from vivijure_backend.config import FaceRestore
+    p = _finish_params_for(tmp_path, monkeypatch, name)
+    assert p.face_restore is True
+    assert FaceRestore(str(p.face_restore_backend).lower()) is FaceRestore(name)
+
+
+@pytest.mark.parametrize("off", [None, False, "none", ""])
+def test_face_restore_off_values_disable_it(tmp_path, monkeypatch, off):
+    assert _finish_params_for(tmp_path, monkeypatch, off).face_restore is False

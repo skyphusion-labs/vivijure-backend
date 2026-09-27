@@ -22,6 +22,7 @@ pipeline. The frame / fps math and the run/skip decisions are pure and CPU-teste
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -315,8 +316,10 @@ def finish_clip(
         if deadline is not None:
             deadline.check("restorer_load")
         restorer = server.face_restorer(cfg.face_restore_backend)
-        frames = _restore_clip(restorer, frames, cfg, progress_cb, deadline=deadline)
-        face_restored = True
+        frames, restored = _restore_clip(restorer, frames, cfg, progress_cb, deadline=deadline)
+        # Report the pass only if it restored at least one frame; a clip whose every frame failed
+        # (per-frame errors are best-effort) is an unrestored clip and must not claim otherwise.
+        face_restored = restored > 0
 
     interp = None
     passes = 0
@@ -402,9 +405,13 @@ def _restore_clip(restorer, frames, cfg: FinishParams, progress_cb=None, deadlin
     with the SAME loaded model (rather than re-loading or re-detecting per call) keeps the relocked
     identity consistent across the clip, which is what avoids the frame-to-frame identity flicker a
     naive per-frame restore produces. Per-frame errors stay best-effort (one bad frame passes
-    through untouched) so a single detector miss does not drop the clip."""
+    through untouched) so a single detector miss does not drop the clip.
+
+    Returns `(frames, restored)`, `restored` being how many frames the restorer actually handled,
+    so the caller does not report a restore that failed on every frame."""
     n = len(frames)
     out = []
+    restored = 0
     for i, f in enumerate(frames):
         # BEFORE _restore_frame, never inside it: _restore_frame swallows Exception by design so a
         # bad frame passes through untouched, and a check placed inside it would be eaten by that
@@ -412,9 +419,13 @@ def _restore_clip(restorer, frames, cfg: FinishParams, progress_cb=None, deadlin
         # the check outside means the guard does not DEPEND on that.)
         if deadline is not None:
             deadline.check("face_restore")
-        out.append(_restore_frame(restorer, f, cfg))
+        fr, ok = _try_restore(restorer, f, cfg)
+        out.append(fr)
+        restored += ok
         _tick(progress_cb, "face_restore", i + 1, n)
-    return out
+    if n and not restored:
+        print("@event face_restore_degraded " + json.dumps({"frames": n, "restored": 0}), flush=True)
+    return out, restored
 
 
 def _restore_frame(restorer, frame, cfg: FinishParams):
@@ -425,10 +436,15 @@ def _restore_frame(restorer, frame, cfg: FinishParams):
     wiring live in the restorer wrapper (models.py), so this passes the uniform knobs only:
     `fidelity` and `only_faces`. `only_faces` is now LIVE -- the old `paste_back=not only_faces or
     True` was always True, making the flag dead; the wrapper honors it."""
+    return _try_restore(restorer, frame, cfg)[0]
+
+
+def _try_restore(restorer, frame, cfg: FinishParams):
+    """`_restore_frame`'s body, also reporting whether the restorer succeeded: (frame, 1 or 0)."""
     try:
-        return restorer.restore(frame, fidelity=cfg.face_fidelity, only_faces=cfg.only_faces)
+        return restorer.restore(frame, fidelity=cfg.face_fidelity, only_faces=cfg.only_faces), 1
     except Exception:  # noqa: BLE001
-        return frame
+        return frame, 0
 
 
 def _probe_nvenc() -> bool:
