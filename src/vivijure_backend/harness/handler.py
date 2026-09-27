@@ -731,7 +731,8 @@ def handler(job: dict) -> dict:
             action = str(payload.get("action", "render"))
             if action == "finish_clip":
                 return run_finish_job(payload, store=store, workdir=workdir,
-                                      job_id=job_id, on_progress=on_progress)
+                                      job_id=job_id, on_progress=on_progress,
+                                      deadline=deadline)
             if action == "i2v_clip":
                 return run_i2v_clip_job(payload, store=store, workdir=workdir,
                                         job_id=job_id, on_progress=on_progress)

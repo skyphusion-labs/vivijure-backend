@@ -463,3 +463,21 @@ def test_run_finish_job_forwards_the_budget_into_finish_clip(tmp_path, monkeypat
          "clip_key": "renders/neon/clips/s1_i2v.mp4", "config": {}},
         store=_Store(), workdir=tmp_path, deadline=budget)
     assert seen["deadline"] is budget
+
+
+def test_handler_passes_the_deadline_it_builds_into_run_finish_job(monkeypatch):
+    # The seam ABOVE run_finish_job. handler() builds the Deadline and checks it at r2_client and
+    # model_mirror, but the finish_clip dispatch must also hand it down; otherwise every in-engine
+    # check in finish_clip and the fetch/upload checks see None and are skipped, while the tests
+    # that call run_finish_job(deadline=...) directly still pass.
+    _stub_handler_deps(monkeypatch)
+    seen = {}
+
+    def spy(payload, **kw):
+        seen.update(kw)
+        return {"ok": True}
+
+    monkeypatch.setattr(handler_mod, "run_finish_job", spy)
+    out = handler_mod.handler({"id": "j3", "input": {"action": "finish_clip", "project": "p"}})
+    assert out == {"ok": True}
+    assert isinstance(seen.get("deadline"), Deadline)
