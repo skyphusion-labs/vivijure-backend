@@ -52,6 +52,8 @@ PAYLOAD_REQUIRED = ("endpoint", "access_key_id", "secret_access_key", "bucket")
 R2_ENDPOINT_HOST_SUFFIX = "r2.cloudflarestorage.com"
 R2_ALLOWED_HOSTS_ENV = "R2_ALLOWED_ENDPOINT_HOSTS"
 R2_ACCOUNT_ID_ENV = "CLOUDFLARE_ACCOUNT_ID"
+# head_object codes that mean "no such object" (botocore reports the bare HTTP status for HEAD).
+_NOT_FOUND_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
 _R2_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _BLOCKED_ENDPOINT_HOSTS = frozenset({
     "localhost",
@@ -290,15 +292,23 @@ class R2:
         """True iff an object is actually present at `key`. Used to verify a state-claimed
         artifact really exists in R2 before trusting it: a stale/partial state tar can name a
         keyframe whose R2 object was since cleared, and reusing it ships a key to a nonexistent
-        object (#108). Any head failure (404, transport, auth) returns False -- "absent" is the
-        safe default here, since it triggers a (wasteful but correct) re-render rather than a
-        phantom reuse."""
-        from botocore.exceptions import ClientError
+        object (#108). Only a real not-found (404 / NoSuchKey / NotFound) returns False, which
+        triggers a (wasteful but correct) re-render rather than a phantom reuse. Any other
+        failure (auth, expired credential, throttle, transport) is NOT proof of absence and
+        propagates: reading it as "missing" would retrain every LoRA and redraw every keyframe
+        on a paid GPU, then fail the final upload anyway. Duck-typed on botocore's
+        ClientError.response so this needs no botocore import."""
         try:
             self._client().head_object(Bucket=self.config.bucket, Key=key)
             return True
-        except ClientError:
-            return False
+        except Exception as e:
+            resp = getattr(e, "response", None)
+            if isinstance(resp, dict):
+                code = str((resp.get("Error") or {}).get("Code", ""))
+                status = (resp.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+                if code in _NOT_FOUND_CODES or status == 404:
+                    return False
+            raise
 
     def put_file(self, path: Path, key: str, *, content_type: str | None = None,
                  metadata: dict[str, str] | None = None) -> str:
