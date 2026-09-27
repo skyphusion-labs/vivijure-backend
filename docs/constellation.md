@@ -27,7 +27,7 @@ flowchart TD
 
     subgraph modules[Modules: one job each, opt-in]
         cloudmods[Cloud video modules<br/>Seedance, Kling, Veo, Wan, ...]
-        finishmods[Finish modules<br/>upscale, smooth, lip-sync, titles]
+        finishmods[Finish modules<br/>upscale, smooth, grade, titles]
         audiomods[Audio modules<br/>music, narration]
     end
 

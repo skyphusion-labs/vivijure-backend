@@ -212,6 +212,9 @@ failure is genuinely non-fatal.
 - A `pretrained_loras` adapter that cannot be staged from R2 (better to fail early than render
   silently without identity).
 - A truncated R2 download (`get_file` verifies size against `ContentLength`).
+- A prior-state existence check that errors (a credential or permission error, throttling,
+  transport): it is not proof the project is fresh, so the job fails before any GPU work rather
+  than retraining. Only a genuine not-found restores to empty.
 - Bad R2 config or a model-mirror failure on cold start.
 
 **Best-effort (the render continues):**
@@ -219,8 +222,8 @@ failure is genuinely non-fatal.
 - An unfetchable `audio_key` ONLY when the job set `render_overrides.audio_optional: true`
   (emits `audio_missing`, surfaces `audio_missing: true` in the result, ships silent). Without
   the opt-in this is a HARD failure, not best-effort.
-- Prior-state restore failure (falls back to a fresh render; safer to redundantly re-render
-  than to silently skip work).
+- Failing to fetch a prior keyframe or its hash sidecar after its existence is confirmed (falls
+  back to regenerating it; safer to redundantly re-render than to silently skip work).
 
 ## See also
 

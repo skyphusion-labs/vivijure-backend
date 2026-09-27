@@ -197,6 +197,23 @@ def test_run_job_never_stamps_submitter_identity(tmp_path):
     assert not hasattr(RenderRequest.from_dict(_job(user_email="x@y.z")), "user_email")
 
 
+def test_run_job_aborts_before_gpu_work_when_stored_state_check_errors(tmp_path):
+    # A credential error on the prior-state existence check must fail the job before the pipeline
+    # runs: it is not proof the project is fresh, and retraining on a paid GPU only to fail the
+    # upload afterwards is the worst outcome.
+    class ForbiddenStore(FakeStore):
+        def exists(self, key):
+            raise RuntimeError("403 Forbidden")
+
+    class NoGpuPipeline(FakePipeline):
+        def execute(self, plan, bundle, workdir):
+            raise AssertionError("GPU work started despite a failed stored-state check")
+
+    store = ForbiddenStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    with pytest.raises(HarnessError, match="403 Forbidden"):
+        run_job(_job(), pipeline=NoGpuPipeline(), store=store, workdir=tmp_path / "work")
+
+
 def test_run_job_rejects_empty_bundle_key(tmp_path):
     # A render with no bundle_key must fail with a clear HarnessError, not a botocore
     # ParamValidationError from a head_object on an empty Key.
@@ -329,21 +346,45 @@ def test_restore_skips_keyframe_absent_from_r2(tmp_path):
     assert "shot_02" not in existing
 
 
-def test_restore_returns_empty_on_fresh_project_and_on_store_failure(tmp_path):
-    """A fresh project (nothing in R2) and a store that throws both degrade to empty sets:
-    the safe default is a full render, never an aborted job."""
+def test_restore_returns_empty_on_fresh_project(tmp_path):
+    """A fresh project (nothing in R2; exists() answers False for a genuine not-found) restores
+    to empty sets: the safe default is a full render."""
     from vivijure_backend.harness.handler import _restore_prior_state
 
     bundle = _extract_bundle(tmp_path)
     trained, existing = _restore_prior_state(R2StateStore({}), "fresh", bundle)
     assert trained == set() and existing == {}
 
+
+@pytest.mark.parametrize("family", ["sdxl", "wan"])
+def test_restore_aborts_when_a_lora_existence_check_errors(tmp_path, family):
+    """R2.exists() raises on anything but a real not-found (#460), so a raise here is a
+    credential/permission/transport error, NOT proof the project is fresh. Reading it as absence
+    would retrain every slot on a paid GPU; the job must fail before any GPU work."""
+    from vivijure_backend.harness.handler import _restore_prior_state
+
     class ExplodingStore:
         def exists(self, key):
-            raise RuntimeError("store down")
+            raise RuntimeError("403 Forbidden")
 
-    trained, existing = _restore_prior_state(ExplodingStore(), "fresh", bundle)
-    assert trained == set() and existing == {}
+    bundle = _extract_bundle(tmp_path)
+    with pytest.raises(HarnessError, match="403 Forbidden"):
+        _restore_prior_state(ExplodingStore(), "fresh", bundle, model_family=family)
+
+
+def test_restore_aborts_when_a_keyframe_existence_check_errors(tmp_path):
+    """Same rule for the per-shot keyframe check: LoRA probes answer, the keyframe probe errors."""
+    from vivijure_backend.harness.handler import _restore_prior_state
+
+    class KeyframeProbeFails(R2StateStore):
+        def exists(self, key):
+            if key.endswith(".png"):
+                raise RuntimeError("403 Forbidden")
+            return super().exists(key)
+
+    bundle = _extract_bundle(tmp_path)
+    with pytest.raises(HarnessError, match="403 Forbidden"):
+        _restore_prior_state(KeyframeProbeFails({}), "fresh", bundle)
 
 
 def test_run_job_uploads_keyframe_hash_sidecars(tmp_path):

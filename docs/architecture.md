@@ -106,7 +106,7 @@ sequenceDiagram
     CP->>R2: write bundle.tar.gz
     CP->>W: submit render job {bundle_key, quality_tier, overrides}
     W->>R2: cold-start model mirror (rclone, if cold)
-    W->>R2: restore prior project state (best effort)
+    W->>R2: restore prior project state (a failed existence check aborts)
     W->>R2: get bundle.tar.gz
     W->>W: extract -> Storyboard + Cast + refs
     W->>W: validate() then plan() (CPU)
