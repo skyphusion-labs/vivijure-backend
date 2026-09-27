@@ -25,7 +25,9 @@ from vivijure_backend.harness.models_mirror import (
     _self_preload_volume,
     _skip_event,
     _truthy,
+    VolumeState,
     ensure_i2v_models,
+    i2v_stage_possible,
     mirror_cmd,
     rclone_env,
     start_i2v_prefetch,
@@ -50,31 +52,35 @@ def _seed_volume(root: Path, version: str, *, base: bool = True, i2v: bool = Tru
 def test_resolve_volume_repoints_and_skips_on_a_fully_preloaded_volume(tmp_path):
     vol = _seed_volume(tmp_path / "vol", _DEFAULT_MODEL_VERSION)  # both sentinels
     e = {"VJ_VOLUME_ROOT": str(vol)}
-    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is True
+    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is VolumeState.READY
     # repointed at the volume so the deferred torch/diffusers loads read from it
     assert e["VJ_MODELS_ROOT"] == str(vol)
     assert e["HF_HOME"] == str(vol / "hf-cache")
 
 
-def test_resolve_volume_requires_BOTH_sentinels_base_only_falls_back(tmp_path):
-    # Partial preload: base sentinel written but i2v missing. Must NOT repoint, else a standalone
+def test_resolve_volume_base_only_falls_back_when_an_i2v_stage_can_run(tmp_path):
+    # Partial preload FOR THIS JOB: base sentinel written but i2v missing, and the default action
+    # (unnamed -> treated as render) can reach the Wan stage. Must NOT repoint, else a standalone
     # i2v_clip would try to mirror Wan onto the read-only volume and fail (Mackaye's catch).
+    # The i2v-free relaxation (#453) is keyed on the ACTION and never reaches this case.
     vol = _seed_volume(tmp_path / "vol", _DEFAULT_MODEL_VERSION, base=True, i2v=False)
     e = {"VJ_VOLUME_ROOT": str(vol)}
-    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is False
+    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION,
+                           log=lambda *_: None) is VolumeState.INCOMPLETE
     assert "HF_HOME" not in e  # falls back to R2 wholesale
 
 
 def test_resolve_volume_i2v_only_also_falls_back(tmp_path):
     vol = _seed_volume(tmp_path / "vol", _DEFAULT_MODEL_VERSION, base=False, i2v=True)
     e = {"VJ_VOLUME_ROOT": str(vol)}
-    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is False
+    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION,
+                           log=lambda *_: None) is VolumeState.INCOMPLETE
     assert "HF_HOME" not in e
 
 
 def test_resolve_volume_noop_when_unset(tmp_path):
     e = {}
-    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is False
+    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is VolumeState.ABSENT
     assert "VJ_MODELS_ROOT" not in e and "HF_HOME" not in e  # untouched -> R2 fallback runs
 
 
@@ -82,7 +88,7 @@ def test_resolve_volume_falls_back_on_version_mismatch(tmp_path):
     vol = _seed_volume(tmp_path / "vol", "1")  # both sentinels at v1
     e = {"VJ_VOLUME_ROOT": str(vol)}
     # want v2 but the volume carries v1 (e.g. mid-refresh): do NOT use it, do NOT repoint
-    assert _resolve_volume(e, "2", log=lambda *_: None) is False
+    assert _resolve_volume(e, "2", log=lambda *_: None) is VolumeState.INCOMPLETE
     assert "HF_HOME" not in e
 
 
@@ -90,7 +96,8 @@ def test_resolve_volume_falls_back_when_sentinel_absent(tmp_path):
     vol = tmp_path / "vol"
     (vol / "hf-cache").mkdir(parents=True)            # mounted but never preloaded (no sentinel)
     e = {"VJ_VOLUME_ROOT": str(vol)}
-    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is False
+    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION,
+                           log=lambda *_: None) is VolumeState.INCOMPLETE
     assert "HF_HOME" not in e
 
 
@@ -99,6 +106,146 @@ def test_resolve_volume_emits_volume_skip_event(tmp_path):
     msgs: list[str] = []
     _resolve_volume({"VJ_VOLUME_ROOT": str(vol)}, _DEFAULT_MODEL_VERSION, log=msgs.append)
     assert any('"reason": "volume"' in m for m in msgs)
+
+
+# ---------------------- readiness is the JOB'S question, not the volume's (backend#453)
+#
+# Conrad retired the local i2v path on 2026-09-26 ("our own local i2v paths is depreciated due to
+# its speed"). The Wan corpus is 60% of the old weight set, so a volume preloaded with the honest
+# post-ruling corpus has NO i2v sentinel. `_resolve_volume` demanded it unconditionally, so that
+# volume was refused on every call forever, silently, and every worker paid the R2 cold start.
+
+def test_i2v_stage_possible_names_the_actions_that_reach_no_i2v_stage():
+    for action in ("preview", "regen_shot", "train_lora", "finish_clip"):
+        assert i2v_stage_possible(action) is False
+    for action in ("render", "finalize", "i2v_clip"):
+        assert i2v_stage_possible(action) is True
+
+
+def test_i2v_stage_possible_is_conservative_about_what_it_does_not_know():
+    # An unnamed or unrecognised action must DEMAND the i2v corpus: the fail-safe direction is the
+    # one that leaves the wholesale-degrade guard armed, and it matches Action.parse, which also
+    # resolves an unknown value to RENDER.
+    assert i2v_stage_possible(None) is True
+    assert i2v_stage_possible("") is True
+    assert i2v_stage_possible("teleport") is True
+
+
+def test_keyframe_only_volume_is_ACCEPTED_for_a_job_that_runs_no_i2v_stage(tmp_path):
+    """THE #453 DEFECT, in one assertion. A correctly preloaded keyframe-only volume, a job that
+    can never reach the Wan stage: the volume is usable and the worker reads off it."""
+    vol = _seed_volume(tmp_path / "vol", _DEFAULT_MODEL_VERSION, base=True, i2v=False)
+    e = {"VJ_VOLUME_ROOT": str(vol)}
+    state = _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None, action="preview")
+    assert state is VolumeState.READY_NO_I2V
+    assert state.usable is True
+    assert e["VJ_MODELS_ROOT"] == str(vol)
+    assert e["HF_HOME"] == str(vol / "hf-cache")
+
+
+def test_keyframe_only_volume_is_STILL_REFUSED_when_an_i2v_stage_can_run(tmp_path):
+    """The original guard, unweakened. A render can reach the Wan stage, so on that job a volume
+    with no i2v corpus IS a partial preload: refuse it wholesale rather than repoint, or
+    ensure_i2v_models would try to mirror Wan onto the shared, read-only volume."""
+    vol = _seed_volume(tmp_path / "vol", _DEFAULT_MODEL_VERSION, base=True, i2v=False)
+    e = {"VJ_VOLUME_ROOT": str(vol)}
+    state = _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None, action="render")
+    assert state is VolumeState.INCOMPLETE
+    assert state.usable is False
+    assert "VJ_MODELS_ROOT" not in e and "HF_HOME" not in e
+
+
+def test_a_genuinely_partial_preload_degrades_wholesale_for_a_keyframe_only_job_too(tmp_path):
+    """Base sentinel MISSING: nothing here is usable whatever the job is. The i2v-free relaxation
+    must never reach this state, or #453 would have bought its fix by weakening the guard."""
+    vol = _seed_volume(tmp_path / "vol", _DEFAULT_MODEL_VERSION, base=False, i2v=True)
+    e = {"VJ_VOLUME_ROOT": str(vol)}
+    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None,
+                           action="preview") is VolumeState.INCOMPLETE
+    assert "HF_HOME" not in e
+
+
+def test_a_stale_version_is_incomplete_for_a_keyframe_only_job_too(tmp_path):
+    # Mid-refresh volume at v1 while the worker wants v2: still a degrade, i2v-free or not.
+    vol = _seed_volume(tmp_path / "vol", "1", base=True, i2v=False)
+    e = {"VJ_VOLUME_ROOT": str(vol)}
+    assert _resolve_volume(e, "2", log=lambda *_: None,
+                           action="preview") is VolumeState.INCOMPLETE
+    assert "HF_HOME" not in e
+
+
+def test_the_two_states_are_distinguishable_in_the_RETURN_VALUE(tmp_path):
+    """A monitor has to tell "the i2v corpus was retired" from "the preload did not finish"
+    WITHOUT parsing prose. The two are IDENTICAL on disk, so the discriminator cannot be the
+    volume; it is the returned state."""
+    vol = _seed_volume(tmp_path / "vol", _DEFAULT_MODEL_VERSION, base=True, i2v=False)
+    root = {"VJ_VOLUME_ROOT": str(vol)}
+    retired = _resolve_volume(dict(root), _DEFAULT_MODEL_VERSION,
+                              log=lambda *_: None, action="preview")
+    unfinished = _resolve_volume(dict(root), _DEFAULT_MODEL_VERSION,
+                                 log=lambda *_: None, action="render")
+    assert retired is not unfinished
+    assert (retired.value, unfinished.value) == ("ready_no_i2v", "incomplete")
+    # and a fully preloaded volume is a THIRD distinct state, not folded into either
+    full = _seed_volume(tmp_path / "full", _DEFAULT_MODEL_VERSION)
+    ready = _resolve_volume({"VJ_VOLUME_ROOT": str(full)}, _DEFAULT_MODEL_VERSION,
+                            log=lambda *_: None, action="render")
+    assert ready is VolumeState.READY and ready is not retired
+
+
+def test_volume_state_truthiness_is_fail_safe_for_a_caller_not_yet_converted():
+    # A plain Enum member is ALWAYS truthy, which would turn a missed caller into a silent accept
+    # of an incomplete volume. __bool__ mirrors .usable so the failure mode is the safe one.
+    assert bool(VolumeState.READY) and bool(VolumeState.READY_NO_I2V)
+    assert not bool(VolumeState.INCOMPLETE) and not bool(VolumeState.ABSENT)
+    assert VolumeState.READY.usable and VolumeState.READY_NO_I2V.usable
+    assert not VolumeState.INCOMPLETE.usable and not VolumeState.ABSENT.usable
+
+
+def test_the_skip_event_reason_separates_the_two_usable_states(tmp_path):
+    # The structured @event channel is the machine-readable half; it must not fold the i2v-free
+    # volume into the same reason as a full one, or a monitor counting cold starts learns nothing.
+    kf = _seed_volume(tmp_path / "kf", _DEFAULT_MODEL_VERSION, base=True, i2v=False)
+    msgs: list[str] = []
+    _resolve_volume({"VJ_VOLUME_ROOT": str(kf)}, _DEFAULT_MODEL_VERSION,
+                    log=msgs.append, action="preview")
+    assert any('"reason": "volume_no_i2v"' in m for m in msgs)
+    assert not any('"reason": "volume"' in m for m in msgs)
+
+
+def test_the_degrade_log_names_the_requirement_not_just_the_sentinels(tmp_path):
+    # The old line said "not fully preloaded (base=True, i2v=False)", which reads as a botched
+    # upload. The requirement is what makes it a degrade, so the line has to carry it.
+    vol = _seed_volume(tmp_path / "vol", _DEFAULT_MODEL_VERSION, base=True, i2v=False)
+    msgs: list[str] = []
+    _resolve_volume({"VJ_VOLUME_ROOT": str(vol)}, _DEFAULT_MODEL_VERSION,
+                    log=msgs.append, action="render")
+    assert any("i2v_required=True" in m for m in msgs)
+
+
+def test_self_preload_honours_the_same_requirement_as_the_read_path(tmp_path, monkeypatch):
+    # A self-preload whose i2v leg wrote nothing is READY_NO_I2V for a keyframe-only job and
+    # INCOMPLETE for an i2v one: one classifier, so fill and read can never disagree.
+    def fake_base(env=None, log=None, **k):
+        (Path(env["VJ_MODELS_ROOT"]) / SENTINEL).write_text(_DEFAULT_MODEL_VERSION + "\n")
+        return True
+
+    def fake_i2v(env=None, log=None, **k):
+        return False                                  # i2v corpus deliberately not filled
+
+    monkeypatch.setattr(models_mirror, "ensure_models", fake_base)
+    monkeypatch.setattr(models_mirror, "ensure_i2v_models", fake_i2v)
+    vol = tmp_path / "vol"
+    (vol / "hf-cache").mkdir(parents=True)
+    e = {"VJ_VOLUME_ROOT": str(vol)}
+    assert _self_preload_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None,
+                                i2v_required=False) is VolumeState.READY_NO_I2V
+    assert e["VJ_MODELS_ROOT"] == str(vol)
+
+    e2 = {"VJ_VOLUME_ROOT": str(vol)}
+    assert _self_preload_volume(e2, _DEFAULT_MODEL_VERSION, log=lambda *_: None,
+                                i2v_required=True) is VolumeState.INCOMPLETE
+    assert "VJ_MODELS_ROOT" not in e2
 
 
 # --------------------------------------------------- self-preloading volumes (#55 Phase D)
@@ -130,9 +277,10 @@ def test_resolve_volume_unmounted_volume_falls_back_no_crash(tmp_path, monkeypat
     # VJ_VOLUME_ROOT set + self-preload on, but the path is NOT mounted: must fall back cleanly,
     # never attempt the lock (which would os.open a missing dir and crash the worker).
     called = []
-    monkeypatch.setattr(models_mirror, "_self_preload_volume", lambda *a: called.append(1) or True)
+    monkeypatch.setattr(models_mirror, "_self_preload_volume",
+                        lambda *a, **k: called.append(1) or VolumeState.READY)
     e = {"VJ_VOLUME_ROOT": str(tmp_path / "not-mounted"), "VJ_VOLUME_SELF_PRELOAD": "1"}
-    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is False
+    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is VolumeState.ABSENT
     assert not called
     assert "HF_HOME" not in e
 
@@ -144,20 +292,22 @@ def test_acquire_lock_missing_dir_returns_false(tmp_path):
 
 def test_resolve_volume_no_self_preload_when_flag_unset(tmp_path, monkeypatch):
     called = []
-    monkeypatch.setattr(models_mirror, "_self_preload_volume", lambda *a: called.append(1) or True)
+    monkeypatch.setattr(models_mirror, "_self_preload_volume",
+                        lambda *a, **k: called.append(1) or VolumeState.READY)
     vol = _seed_volume(tmp_path / "vol", _DEFAULT_MODEL_VERSION, base=False, i2v=False)
     e = {"VJ_VOLUME_ROOT": str(vol)}                # flag NOT set
-    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is False
+    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION,
+                           log=lambda *_: None) is VolumeState.INCOMPLETE
     assert not called                              # default stays read-only, no self-preload
 
 
 def test_resolve_volume_routes_to_self_preload_when_enabled(tmp_path, monkeypatch):
     called = []
     monkeypatch.setattr(models_mirror, "_self_preload_volume",
-                        lambda e, v, l: called.append(1) or True)
+                        lambda e, v, l, **k: called.append(1) or VolumeState.READY)
     vol = _seed_volume(tmp_path / "vol", _DEFAULT_MODEL_VERSION, base=False, i2v=False)
     e = {"VJ_VOLUME_ROOT": str(vol), "VJ_VOLUME_SELF_PRELOAD": "1"}
-    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is True
+    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is VolumeState.READY
     assert called                                  # routed to self-preload
 
 
@@ -171,7 +321,8 @@ def test_self_preload_lock_loser_falls_back_without_mirroring(tmp_path, monkeypa
     monkeypatch.setattr(models_mirror, "ensure_models", boom)
     monkeypatch.setattr(models_mirror, "ensure_i2v_models", boom)
     e = {"VJ_VOLUME_ROOT": str(vol)}
-    assert _self_preload_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is False
+    assert _self_preload_volume(e, _DEFAULT_MODEL_VERSION,
+                                log=lambda *_: None) is VolumeState.INCOMPLETE
     assert "HF_HOME" not in e
 
 
@@ -187,7 +338,8 @@ def test_self_preload_winner_fills_repoints_and_releases_lock(tmp_path, monkeypa
     monkeypatch.setattr(models_mirror, "ensure_models", fake_base)
     monkeypatch.setattr(models_mirror, "ensure_i2v_models", fake_i2v)
     e = {"VJ_VOLUME_ROOT": str(vol)}
-    assert _self_preload_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None) is True
+    assert _self_preload_volume(e, _DEFAULT_MODEL_VERSION,
+                                log=lambda *_: None) is VolumeState.READY
     assert e["VJ_MODELS_ROOT"] == str(vol)
     assert e["HF_HOME"] == str(vol / "hf-cache")
     assert (vol / SENTINEL).exists() and (vol / I2V_SENTINEL).exists()
