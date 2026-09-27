@@ -46,8 +46,9 @@ update the matching doc.
 - `docs/runpod-endpoint-config.md` -- the RunPod serverless endpoint config.
 - `docs/operations.md` + `docs/release-gate.md` + `docs/regression-plan.md` -- run, gate, and regress.
 - `docs/development.md` -- local dev loop.
-- `THIRD_PARTY_MODELS.md` -- model licenses/attributions (SDXL, Wan, MuseTalk, etc.). Keep it current
-  when a model is added or swapped.
+- `THIRD_PARTY_MODELS.md` -- model licenses/attributions (SDXL, Wan, RIFE, etc.). Keep it current
+  when a model is added or swapped. It has no MuseTalk entry and should not gain one: that
+  provider is retired and ruled out permanently.
 
 ## Commands
 

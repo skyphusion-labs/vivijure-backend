@@ -280,8 +280,9 @@ def finish_clip(
     disagree on parameters and force the slow re-encode fallback.
 
     Audio: the re-encode is fed a rawvideo stream and is therefore video-only, so if the SOURCE
-    clip carries an audio track (dialogue shots lipsync before finish since core v0.17.0, so
-    MuseTalk audio reaches this stage) it is muxed back onto the finished clip with a stream copy.
+    clip carries an audio track it is muxed back onto the finished clip with a stream copy. A clip
+    can arrive here with audio because an audio-driven motion door produced it that way; the step
+    is not tied to any one provider and must survive one being retired.
     RIFE keeps the wall-clock duration fixed, so the audio lines up 1:1. If that mux fails the shot
     FAILS loud (#245): it never silently ships a video-only clip when audio was present.
     """
@@ -330,11 +331,14 @@ def finish_clip(
     out_fps = output_fps(src_fps, cfg) if interpolated else src_fps
     frames_out = interpolated_frame_count(frames_in, cfg.factor) if interpolated else frames_in
 
-    # The re-encode rebuilds the clip from a rawvideo stream, so it is video-only. Dialogue shots
-    # now lipsync BEFORE finish (core v0.17.0 / vivijure#595: lipsync -> rife -> upscale), so
-    # MuseTalk muxes the dialogue audio onto `in_path`; without this step it is silently dropped and
-    # the shot -- plus every clip after it in the stream-copy concat -- plays silent (#240). RIFE
-    # keeps wall-clock duration fixed, so the source audio lines up 1:1 with the finished video.
+    # The re-encode rebuilds the clip from a rawvideo stream, so it is video-only. A dialogue shot
+    # can reach finish already carrying its audio, because the mouth is animated at MOTION time by
+    # an audio-driven door rather than as a later pass. Without this mux-back the audio is silently
+    # dropped and the shot -- plus every clip after it in the stream-copy concat -- plays silent
+    # (#240). RIFE keeps wall-clock duration fixed, so the source audio lines up 1:1.
+    #
+    # Do not delete this on the grounds that the provider that first exercised it is gone: the
+    # condition is "the source clip has audio", not "MuseTalk ran".
     has_audio = _source_has_audio(in_path, deadline=deadline)
     encode_target = out_path.with_name(out_path.stem + ".noaudio" + out_path.suffix) if has_audio else out_path
     _encode_uniform(_finished_stream(interp, frames, passes, progress_cb, deadline=deadline),
