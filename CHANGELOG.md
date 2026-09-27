@@ -16,23 +16,30 @@ folded into a release section by `scripts/changelog-assemble.py` when the releas
 `SMOKE_BUNDLE_KEY` was `bundles/verify-smoke/...`. Serverless `_job_bundle_key`
 rejects that for project `verify`. Use `bundles/verify/Verify_Smoke.tar.gz`.
 
-**Fix: pin torchao 0.17.0; 0.18.0 breaks Wan i2v on torch 2.7.1.**
+**Fix: Dependabot ignores `torchao>=0.18.0` while the runtime is torch 2.7.1 (#443).**
+
+Stops Dependabot re-proposing the bump that broke Wan i2v in 1.0.15 (see the 1.0.16 entry
+below). `deploy/smoke_imports.py` now also lists `torchao`, and `tests/test_torchao_pin.py`
+covers the pin, the Dependabot ignore and the smoke-import list. Merged after the
+`backend-v1.0.16` tag.
+
+## [1.0.16] -- 2026-08-20
+
+**Fix: pin torchao 0.17.0; 0.18.0 breaks Wan i2v on torch 2.7.1 (#441).**
 
 Dependabot #419 bumped torchao to 0.18.0. That release imports
-`torch.nn.functional.ScalingType` (torch 2.10+) at package load via
-`quantization/quantize_/workflows/float8/float8_tensor.py`, so
+`torch.nn.functional.ScalingType` (torch 2.10+) at package load, so
 `from diffusers import WanImageToVideoPipeline` died on the 1.0.15 H200
-smoke (`s1-41aa1926802e`). Revert to 0.17.0. Dependabot now ignores
-`torchao>=0.18.0`. Overlay runtime-2-bf16-t2 from t1 (deps only; seed
-2-bf16 unchanged).
+smoke (`s1-41aa1926802e`). Revert to 0.17.0. Overlay runtime-2-bf16-t2
+from t1 (deps only; seed 2-bf16 unchanged).
 
-**Fix: verify report includes R2 channel error stage and message.**
+**Fix: verify report includes R2 channel error stage and message (#439).**
 
 A `status=error` smoke no longer dies as a generic hold. `channel_error` lands in
 the report. `print-verify-error.yml` dumps a prior run's stage+message from R2
 with no GPU.
 
-**Fix: verify pod pulls GHCR with the same RunPod registry auth as serverless.**
+**Fix: verify pod pulls GHCR with the same RunPod registry auth as serverless (#436, #438).**
 
 The GraphQL SDK cannot attach `containerRegistryAuthId`. The harness was rejecting it
 and assuming GHCR was public. REST create now passes the serverless template's auth
@@ -40,24 +47,45 @@ id (`cmqbz5bba0018e11d6bpcnu4n`). The PAT stays in RunPod; we never mint a secon
 Pod create is REST v2 (`POST https://api.runpod.io/v2/pods`: `image`, `registry`,
 `gpu`, `args`, `disk`). Promote/flush stay on v1 (v2 endpoint mutations 500).
 
-**Weights: seed `2-bf16` (canny ControlNet in the importable seed).**
+**Fix: the verify pod's REST create body uses `dockerStartCmd` (#437).**
+
+`dockerArgs` is not in the REST v1 `PodCreateInput`; the live gate got a 400 from
+`https://rest.runpod.io/v1/pods`. The field is `dockerStartCmd` (argv). This was superseded within
+the release by the REST v2 create described in the GHCR entry above (#438).
+
+**Fix: `print-verify-error` uses boto3 only (#440).**
+
+The dump job imported `vivijure_backend` and crashed on `yaml`. It is now standalone boto3 and
+still prints only the stage and message.
+
+**Build: runtime repinned to `runtime-2-bf16-t2` (#444).**
+
+`RUNTIME_REF_BF16` in `deploy/Dockerfile` and `.runpod/Dockerfile` now names
+`ghcr.io/skyphusion-labs/vivijure-backend:runtime-2-bf16-t2@sha256:babdb3821d7cbac5ac47dc281e4e3bba6cf18a259e693754ddb3c9ae4af80b8a`,
+a deps-only overlay from `runtime-2-bf16-t1` carrying torchao 0.17.0; seed `2-bf16` unchanged.
+This release is src-only on that runtime. Everything in this release other than the torchao pin
+(#441) touches the verify harness under `deploy/` and `.github/workflows/`, not the worker code.
+
+## [1.0.15] -- 2026-08-19
+
+**Weights: seed `2-bf16` (canny ControlNet in the importable seed) (#434).**
 
 `ghcr.io/skyphusion-labs/vivijure-backend-seed:2-bf16@sha256:45d036fd50c83dfa0347cf837c43bcccb07e4d2c52c3fb5c02d3deee962a7e66`.
 Runtime imports this; `backend-v*` still only COPY src.
 
-**Fix: seed-build and runtime-build register on Plane C before they bake.**
+**Fix: seed-build and runtime-build register on Plane C before they bake (#433).**
 
 Group 9 is workflow-restricted. `release.yml` already ran `sync-gpu-allowlist` on
 ubuntu-latest first. The seed and runtime workflows did not, so a dispatch sat
 queued on idle bake runners. Same job, `--apply` (these are main-ref, not tags).
 
-**Fix: tests.yml concurrency no longer cancels against the dummy coverage check.**
+**Fix: tests.yml concurrency no longer cancels against the dummy coverage check (#432).**
 
 `tests.yml` and `coverage.yml` both used `group: coverage-${{ github.ref }}`. GitHub
 concurrency is repository-wide, so the org-ruleset dummy `coverage` job cancelled the
 real pytest + required `ci` job (PR 432). tests.yml now uses `tests-${{ github.ref }}`.
 
-**Fix: keyframes stay in the scene (plate then canny face, not studio portraits).**
+**Fix: keyframes stay in the scene (plate then canny face, not studio portraits) (#432).**
 
 Live LoRA scale was 0.7 on every shot, including single-char, via `keyframe_params_from`
 always reading `multi_char.lora_scale_per_slot`, plus a full-frame IP-Adapter of the
@@ -73,7 +101,23 @@ cast portrait. That reconstructed the LoRA training studio. There is no img2img 
 - `scene_lock` defaults true in this src. Do not tag `backend-v*` until seed-build and
   runtime-build contain the canny weights.
 
-**Fix: job-authored bundle paths and job-supplied R2 endpoints stay in contract.**
+**Build: runtime repinned to `runtime-2-bf16-t1`, which imports seed `2-bf16` (#435).**
+
+`RUNTIME_REF_BF16` in `deploy/Dockerfile` and `.runpod/Dockerfile` now names
+`ghcr.io/skyphusion-labs/vivijure-backend:runtime-2-bf16-t1@sha256:c8528fbc7b0280ca5af3633dd4dbcfacb4dfb62d568744f7c44e6ec9b0452fb7`
+(previously `runtime-1-bf16-t5@sha256:db752274...`). This release is src-only on that runtime,
+which is what makes the keyframe scene-lock default above safe to ship. The 1.0.16 entry records
+that this runtime also carried torchao 0.18.0, which fails `from diffusers import
+WanImageToVideoPipeline` on torch 2.7.1 (found on the 1.0.15 H200 smoke, fixed in 1.0.16).
+
+**CI: the adversarial-audit workflow is removed (#431).**
+
+Deletes `.github/workflows/adversarial-audit.yml` (the PR states the decision: no automated paid
+security scanners). No `src/` or `deploy/` change.
+
+## [1.0.14] -- 2026-08-17
+
+**Fix: job-authored bundle paths and job-supplied R2 endpoints stay in contract (#426).**
 
 - `start_image` and `refs_dir` must be relative paths inside the extracted bundle (no absolute
   paths, no `..`). The resolved realpath is checked against the bundle root, so a symlink that
@@ -86,6 +130,141 @@ cast portrait. That reconstructed the LoRA training studio. There is no img2img 
   (`/opt/models`, `/opt/conda`) and RunPod serverless writes workdirs from the entrypoint. A
   non-root USER in the consumer Dockerfile would break that contract without a runtime-base
   rebuild.
+
+**Fix: `finish_clip` is bounded by one wall-clock guard (#423).**
+
+`finish_clip` had no wall-clock guard: of the subprocess sites on its path only the two inside
+the cached NVENC probe were timed. One monotonic budget now opens on the first line of the
+RunPod handler (so the R2 client build and the cold-start model mirror are inside it), is checked
+between stages and inside the per-frame loops, and on expiry the handler RETURNS
+`{"ok": false, "detail": "finish_clip deadline: <elapsed>s of <budget>s budget at stage <stage>"}`
+instead of raising, which is the shape the `vivijure-cf` soft-degrade reader treats as a
+completed-with-degrade output rather than a failed job. `VJ_FINISH_MAX_SECONDS` sets the budget
+(seconds, default 420; junk, empty, zero and negative values fall back to the default, and there
+is no value that turns the guard off). `FinishDeadlineExceeded` derives from `BaseException` so
+the broad `except Exception` handlers on the path cannot swallow an expiry.
+`assemble.probe_has_audio`, a fifth untimed subprocess on this path, takes an optional `timeout`
+that defaults to `None`, so its render/assemble callers are unchanged.
+
+Coverage is stated in `docs/finish-deadline.md`: 13 of 14 compute steps are inside the budget and
+6 of those 13 are interruptible mid-step. Not covered: R2 GET/PUT (botocore socket timeouts
+only), the two model loads, a stall inside a single decoded frame or one `interp.interpolate`
+call, and the best-effort `.hash` sidecar. The PR says this does NOT license declaring a
+`max_invocation_seconds` for the module.
+
+**Build: runtime base re-baked and repinned (#390).**
+
+`RUNTIME_REF_BF16` in `deploy/Dockerfile` and `.runpod/Dockerfile` moved from
+`runtime-1-bf16-t5@sha256:0f3c9bd6...` to `runtime-1-bf16-t5@sha256:db75227454bdd6196c978475309f353cb082f93929fdb195419efb5580f9cf65`:
+the same `t5` tag re-baked on the scheduled cadence, which the PR says refreshes the shipped CVE
+posture.
+
+**Deps and CI changes in this release (no worker behaviour change beyond the two entries above).**
+
+- **`deploy/requirements.txt` and `deploy/requirements-verify.txt`:** `huggingface_hub`
+  1.25.1 -> 1.27.0 (#410, #419), `torchao` 0.17.0 -> 0.18.0 (#419), `boto3` floor 1.43.58 -> 1.43.69 (#411,
+  #420). These install in the runtime base, and the bumps merged after the base repin above
+  (#390, 2026-08-03), so whether they reached the 1.0.14 image is not recoverable from the
+  record. The `torchao` 0.18.0 pin is the one that later broke Wan i2v on torch 2.7.1 (see 1.0.15
+  and 1.0.16).
+- **`github/codeql-action` bumps (#412, #421)** in a workflow that #424 removed later in the
+  same release.
+- **CI:** `seed-build.yml` gains a `runner_host` dispatch input to pin the Plane C bake host
+  (#402, #404) and extracts rclone into `RUNNER_TEMP` with an exactly-one-match assertion after a
+  `cp` failure on a host carrying two extracted versions (#406); bakes routed to the
+  `bake-capable` label (#415), with the card-dependent release smoke and CUDA-EP steps moved back
+  to `gpu-device` because a runner without a GPU makes the release smoke print SKIP and exit 0
+  (#416); the adversarial audit no longer skips Dependabot PRs (#414); the CodeQL workflow is
+  removed (#424) and a free `coverage` check job is restored in `coverage.yml` (#425).
+- **Docs and repo hygiene:** `RELEASES.md` pre-cut GHCR check scoped to the active release line
+  and the 1.0.13 snapshot recorded (#399); `CLAUDE.md` refreshed (#413), a pre-prod GPU test
+  spend rule added (#418) and a tag-gated-deploy note added (#417, whose diff here is `CLAUDE.md`
+  only); Cursor Cloud `AGENTS.md` removed (#408); `dependabot.yml` comment dashes replaced with
+  `--` (#409).
+
+## [1.0.13] -- 2026-08-01
+
+**Feat: a per-job tenant R2 credential, so one pooled endpoint can serve many tenants (#393).**
+
+A job payload may carry an `r2` block (`endpoint`, `access_key_id`, `secret_access_key`,
+`bucket`, optional `session_token`). When present and valid it is used for that job's tenant I/O
+only (bundle, LoRAs, keyframes, clips, manifest, progress channel, reuse probes, `finish_clip`
+and `i2v_clip`), and the handler strips it from the payload before anything downstream sees it.
+Absent, the endpoint's `R2_*` environment is used exactly as before. Present but malformed,
+including an explicit `"r2": null`, fails the job rather than falling back to the environment.
+Contract: `docs/contract.md`, "Tenant R2 credential (all job types)".
+
+The models mirror is a separate purpose on a separate credential: it now reads
+`MODELS_R2_ENDPOINT`, `MODELS_R2_ACCESS_KEY_ID`, `MODELS_R2_SECRET_ACCESS_KEY` and
+`MODELS_R2_BUCKET`, each falling back field by field to its legacy `R2_*` name. That fallback
+deliberately keeps today's behaviour, including the mirror following a tenant's `R2_BUCKET`. An
+endpoint that carries `MODELS_R2_ACCESS_KEY_ID` refuses any job without an `r2` block, even if a
+complete `R2_*` credential sits in its environment. The PR states the deploy order: the control
+plane sends the block on every submit, then this image ships, then templates are repinned with
+`MODELS_R2_*`. Not done here and filed separately: removing the legacy `R2_*` fallback (#395,
+which the PR marks as gating the shared tier accepting a real tenant) and short-lived per-job
+credentials (#396). A per-job credential is bounded by tenant and job, not absent, so it is
+weaker than a credentialless design.
+
+**Feat: `health` attests the build, and keyframe records say which identity path ran (#375).**
+
+`health` returns `baked`, the parsed bake stamp (`baked_utc`, `precision`, `model_version`,
+`overlay`, `base_runtime`), beside the existing booleans; `null` means no stamp and `{}` means a
+stamp that yielded nothing readable. `vj_baked` and `ok` are unchanged and the probe still
+answers before the harness import. `keyframe_done` now carries `identity_requested` and
+`identity_path`, recorded separately because InstantID falls back to the shared IP-Adapter pipe
+when insightface finds no face and a slot with no usable reference renders from its LoRA alone,
+and `onnx_providers`, read from `session.get_providers()` after `prepare()` (never the requested
+list) and summarised as `all_cuda`, or `null` when the analyzer never loaded on that worker. It
+does not make a CPU-only face path fail a render (the CPU fallback in `face_analyzer()` is by
+design); it makes the question answerable from render history after the CPU-bound face path of
+1.0.9 to 1.0.11 (#346, fixed in 1.0.12). The tests run against a fake ONNX session; the PR names
+the first live `health` call and InstantID render on the next image as the real proof, and that
+check is not recorded here.
+
+**Fix: the i2v precision is measured, not asserted (#367).**
+
+`plan()` reported the card's best possible precision (`quant_for`) as if it were a state; it now
+reports what the loaders load (new `loaded_quant_for()`), for example bf16 for a 96 GB card that
+CPU-offloads the inactive Wan expert instead of quantizing. A `model_precision` event, which the
+verify gate had always read and nothing in `src/` sent, is now emitted, measured as the dominant
+parameter dtype across `transformer` and `transformer_2` with a per-module dtype histogram
+(`i2v_dtype` is `null` when unmeasurable, never a guessed string). The load compares requested
+against resident dtype and raises `I2VPrecisionMismatch` on a mismatch: under the pinned
+diffusers a `float8_e4m3fn` request silently yields fp32, unreachable today because no fp8 repo
+is baked. The verify gate's BAK-4 became three fail-closed checks (reported, valid, matches the
+request). `ensure_i2v_models(force=)` lets the FINAL tier's bf16 pull happen on an fp8-baked image
+(the mechanism half of #339), and the cold-start log line that claimed fp8 weights were baked in
+on every production worker now says only what the sentinel proves. The PR did not observe the
+resident dtype under torchao and the real Wan load on a GPU.
+
+**Deps and CI changes in this release (no worker behaviour change beyond the three entries above).**
+
+- **`deploy/requirements.txt`:** `numpy` 2.3.5 -> 2.4.6, `huggingface_hub` 1.24.0 -> 1.25.1,
+  `peft` 0.19.1 -> 0.20.0 (#377); `github/codeql-action` 4 -> 4.37.3 (#383). This release did not
+  repin the runtime base (`RUNTIME_REF_BF16` stayed at `runtime-1-bf16-t5@sha256:0f3c9bd6...`, as
+  in 1.0.12), and `deploy/requirements.txt` installs there, so the record does not show these pins
+  reaching the 1.0.13 image.
+- **Resolve gate for `deploy/requirements.txt` (#365):** a PR gate on `ubuntu-latest` and a
+  push/dispatch gate inside the pinned runtime base, plus Dependabot `ignore` entries for
+  `numpy>=2.5.0` and `tokenizers>0.22.2` (the two bumps behind the eight-day unbuildable `main`
+  of 1.0.12, #351). #380 and #388 only change what the gate says: the `onnxruntime` line in a
+  resolve is the CPU wheel, the gate has only been seen red on the numpy pin, and a green does not
+  mean a dependency fix is live.
+- **Image smoke needs a GPU (#368):** the smoke steps in `release.yml` and `runtime-build.yml`
+  run with `--gpus all`, and a new `deploy/smoke_cuda_ep.py` checks a CUDA session in the runtime
+  base and fails rather than skips when no GPU is visible.
+- **Repin step (#370):** the runtime-build repin edits both `deploy/Dockerfile` and
+  `.runpod/Dockerfile` (`hub-files-sync` requires them byte-identical) and opens its PR through
+  the REST API, failing the run if it cannot (`gh` is absent on the Plane C runners).
+- **Stacked PRs (#387):** the `tests.yml`, `adversarial-audit.yml`, `hub-files-sync.yml` and
+  `requirements-resolve.yml` `pull_request` triggers fire on any base, and `ci` refuses a PR whose
+  base is not `main`.
+- **Comment-only or repo hygiene:** `runtime-build.yml` and `release.yml` comments retargeted at
+  Plane C (#382); `.coverage` and `coverage.xml` gitignored (#394).
+- **Docs:** `RELEASES.md` ledger rows for 1.0.12 (#361), 1.0.11/1.0.9/1.0.8/1.0.5 (#366) and the
+  four `(tag SHA)` placeholders (#373); `docs/derisk-3arch.md` R2-credential scaffold corrected
+  (#369).
 
 ## [1.0.12] -- 2026-07-31
 
