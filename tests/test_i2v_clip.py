@@ -232,3 +232,51 @@ def test_run_finish_job_sidecar_failure_never_fails_the_render(tmp_path, fake_fi
     store = BoomStore()
     out = h.run_finish_job(_finish_job(output_hash="deadbeef"), store=store, workdir=tmp_path)
     assert out["clip_key"].endswith("_finished.mp4")  # artifact up; sidecar miss is best-effort, no raise
+
+
+# --- a failing standalone job is recorded on the R2 progress channel -----------------------------
+
+def _snapshot(store, project="p", job_id="j"):
+    import json
+    from vivijure_backend.harness import keys
+    return json.loads(store.bodies[keys.progress_snapshot_key(project, job_id)])
+
+
+class _FetchFailsStore(KFStore):
+    def get_file(self, key, dest):
+        raise RuntimeError("no such key")
+
+
+def test_failed_finish_clip_marks_the_progress_snapshot_error(tmp_path):
+    store = _FetchFailsStore()
+    with pytest.raises(HarnessError, match="could not fetch clip"):
+        h.run_finish_job(
+            {"action": "finish_clip", "project": "p", "shot_id": "s",
+             "clip_key": "renders/p/clips/s_i2v.mp4", "config": {}},
+            store=store, workdir=tmp_path, job_id="j")
+    snap = _snapshot(store)
+    assert snap["status"] == "error"
+    assert snap["error"]["stage"] == "finish_clip"
+
+
+def test_failed_i2v_clip_marks_the_progress_snapshot_error(tmp_path, fake_engine):
+    store = _FetchFailsStore()
+    with pytest.raises(HarnessError, match="could not fetch keyframe"):
+        h.run_i2v_clip_job(
+            {"action": "i2v_clip", "project": "p", "shot_id": "s", "prompt": "x",
+             "config": {"quality": "draft"}},
+            store=store, workdir=tmp_path, job_id="j")
+    snap = _snapshot(store)
+    assert snap["status"] == "error"
+    assert snap["error"]["stage"] == "i2v_clip"
+
+
+def test_successful_standalone_jobs_still_end_complete(tmp_path, fake_engine, fake_finish):
+    # CONTROL: the error path must not change the success path.
+    store = KFStore()
+    h.run_i2v_clip_job({"action": "i2v_clip", "project": "p", "shot_id": "s", "prompt": "x",
+                        "config": {"quality": "draft"}}, store=store, workdir=tmp_path, job_id="j")
+    assert _snapshot(store)["status"] == "complete"
+    store = KFStore()
+    h.run_finish_job(_finish_job(), store=store, workdir=tmp_path, job_id="j")
+    assert _snapshot(store, "neon")["status"] == "complete"
