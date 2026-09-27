@@ -449,75 +449,79 @@ def run_finish_job(
     progress = ProgressEmitter(store, project, job_id, on_progress=on_progress)
     progress.emit("started", action="finish_clip", project=project)
 
-    if not clip_key_in:
-        raise HarnessError("finish_clip: clip_key is required")
-    _job_scoped_key(clip_key_in, project=project, prefixes=("renders/",),
-                    what="finish_clip: clip_key")
-
-    params = FinishParams(
-        interpolate=bool(cfg.get("interpolate", True)),
-        factor=int(cfg.get("interpolation_factor", 2)),
-        target_fps=int(cfg.get("target_fps", 0)),
-        face_restore=bool(cfg.get("face_restore") not in (None, False, "none", "")),
-        # `true` means "on, default backend"; only a string names a backend (str(True) is "True",
-        # which FaceRestore rejects).
-        face_restore_backend=str(cfg["face_restore"]) if isinstance(cfg.get("face_restore"), str) and cfg["face_restore"] not in ("none", "") else "gfpgan",
-        face_fidelity=float(cfg.get("face_fidelity", 0.7)),
-        only_faces=bool(cfg.get("only_faces", True)),
-    )
-
-    local_in = workdir / "input.mp4"
-    local_out = workdir / "output.mp4"
-
-    if deadline is not None:
-        deadline.check("fetch_clip")
     try:
-        store.get_file(clip_key_in, local_in)
-    except Exception as e:
-        raise HarnessError(f"finish_clip: could not fetch clip {clip_key_in!r}: {e}")
-    if deadline is not None:
-        deadline.check("fetch_clip")
+        if not clip_key_in:
+            raise HarnessError("finish_clip: clip_key is required")
+        _job_scoped_key(clip_key_in, project=project, prefixes=("renders/",),
+                        what="finish_clip: clip_key")
 
-    server = ModelServer()
-    result = finish_clip(shot_id, local_in, local_out, server, params=params, deadline=deadline)
+        params = FinishParams(
+            interpolate=bool(cfg.get("interpolate", True)),
+            factor=int(cfg.get("interpolation_factor", 2)),
+            target_fps=int(cfg.get("target_fps", 0)),
+            face_restore=bool(cfg.get("face_restore") not in (None, False, "none", "")),
+            # `true` means "on, default backend"; only a string names a backend (str(True) is "True",
+            # which FaceRestore rejects).
+            face_restore_backend=str(cfg["face_restore"]) if isinstance(cfg.get("face_restore"), str) and cfg["face_restore"] not in ("none", "") else "gfpgan",
+            face_fidelity=float(cfg.get("face_fidelity", 0.7)),
+            only_faces=bool(cfg.get("only_faces", True)),
+        )
 
-    # keys._slug via the shared helper: the SAME slug as the full-render path, so one project
-    # never scatters its clips across two slug spellings ("My  Film" -> My_Film everywhere).
-    clip_key_out = keys.finished_clip_key(project, shot_id)
-    # Checked BEFORE the upload and never during it: once the artifact exists the GPU time is
-    # already banked, and aborting mid-PUT would discard finished work for nothing. Past the budget
-    # HERE we still degrade, because the ceiling has to mean what it says and core has moved on.
-    # The PUT itself is bounded by botocore socket timeouts (harness/r2.py sets retries only), NOT
-    # by this guard -- see docs/finish-deadline.md.
-    if deadline is not None:
-        deadline.check("upload")
-    store.put_file(local_out, clip_key_out)
-    # #583 provenance: stamp the core-computed param-hash to `<clip_key_out>.hash` AFTER the artifact
-    # (artifact first, sidecar last -- the only safe order; studio CONTRACT.md 3.3.1). Opaque: write
-    # `output_hash` verbatim, never recompute it. Best-effort -- a failed sidecar only disables reuse (the
-    # core re-runs), it must NEVER fail a good render. Absent output_hash (legacy core) -> no sidecar.
-    output_hash = job.get("output_hash")
-    if output_hash:
+        local_in = workdir / "input.mp4"
+        local_out = workdir / "output.mp4"
+
+        if deadline is not None:
+            deadline.check("fetch_clip")
         try:
-            store.put_bytes(str(output_hash).encode("utf-8"), f"{clip_key_out}.hash", content_type="text/plain")
-        except Exception:  # noqa: BLE001 -- best-effort provenance; a miss = safe re-run, never a failed render
-            pass
+            store.get_file(clip_key_in, local_in)
+        except Exception as e:
+            raise HarnessError(f"finish_clip: could not fetch clip {clip_key_in!r}: {e}")
+        if deadline is not None:
+            deadline.check("fetch_clip")
 
-    applied: list[str] = []
-    if result.interpolated:
-        applied.append(f"interpolate:{params.factor}x")
-    if result.face_restored:
-        applied.append(f"face_restore:{params.face_restore_backend}")
+        server = ModelServer()
+        result = finish_clip(shot_id, local_in, local_out, server, params=params, deadline=deadline)
 
-    progress.complete(output_key=clip_key_out)
-    # Pointer-only return: keep the job-done payload small so RunPod's job-done endpoint
-    # does not reject it. All state lives in R2; the caller only needs the output key.
-    return {
-        "clip_key": clip_key_out,
-        "out_fps": result.out_fps,
-        "frames": result.frames_out,
-        "applied": applied,
-    }
+        # keys._slug via the shared helper: the SAME slug as the full-render path, so one project
+        # never scatters its clips across two slug spellings ("My  Film" -> My_Film everywhere).
+        clip_key_out = keys.finished_clip_key(project, shot_id)
+        # Checked BEFORE the upload and never during it: once the artifact exists the GPU time is
+        # already banked, and aborting mid-PUT would discard finished work for nothing. Past the budget
+        # HERE we still degrade, because the ceiling has to mean what it says and core has moved on.
+        # The PUT itself is bounded by botocore socket timeouts (harness/r2.py sets retries only), NOT
+        # by this guard -- see docs/finish-deadline.md.
+        if deadline is not None:
+            deadline.check("upload")
+        store.put_file(local_out, clip_key_out)
+        # #583 provenance: stamp the core-computed param-hash to `<clip_key_out>.hash` AFTER the artifact
+        # (artifact first, sidecar last -- the only safe order; studio CONTRACT.md 3.3.1). Opaque: write
+        # `output_hash` verbatim, never recompute it. Best-effort -- a failed sidecar only disables reuse (the
+        # core re-runs), it must NEVER fail a good render. Absent output_hash (legacy core) -> no sidecar.
+        output_hash = job.get("output_hash")
+        if output_hash:
+            try:
+                store.put_bytes(str(output_hash).encode("utf-8"), f"{clip_key_out}.hash", content_type="text/plain")
+            except Exception:  # noqa: BLE001 -- best-effort provenance; a miss = safe re-run, never a failed render
+                pass
+
+        applied: list[str] = []
+        if result.interpolated:
+            applied.append(f"interpolate:{params.factor}x")
+        if result.face_restored:
+            applied.append(f"face_restore:{params.face_restore_backend}")
+
+        progress.complete(output_key=clip_key_out)
+        # Pointer-only return: keep the job-done payload small so RunPod's job-done endpoint
+        # does not reject it. All state lives in R2; the caller only needs the output key.
+        return {
+            "clip_key": clip_key_out,
+            "out_fps": result.out_fps,
+            "frames": result.frames_out,
+            "applied": applied,
+        }
+    except Exception as e:
+        progress.error("finish_clip", e)  # best-effort failure marker, then fail the job
+        raise
 
 
 def run_i2v_clip_job(
@@ -559,65 +563,69 @@ def run_i2v_clip_job(
     progress = ProgressEmitter(store, project, job_id, on_progress=on_progress)
     progress.emit("started", action="i2v_clip", project=project, shot_id=shot_id)
 
-    if not prompt:
-        raise HarnessError("i2v_clip: prompt is required (the motion description)")
-
-    keyframe_key = str(job.get("keyframe_key") or "")
-    if keyframe_key:  # a job-supplied key must sit under this project's renders/ prefix
-        _job_scoped_key(keyframe_key, project=project, prefixes=("renders/",),
-                        what="i2v_clip: keyframe_key")
-    else:
-        keyframe_key = keys.keyframe_key(project, shot_id)
-    local_kf = workdir / "keyframe.png"
     try:
-        store.get_file(keyframe_key, local_kf)
+        if not prompt:
+            raise HarnessError("i2v_clip: prompt is required (the motion description)")
+
+        keyframe_key = str(job.get("keyframe_key") or "")
+        if keyframe_key:  # a job-supplied key must sit under this project's renders/ prefix
+            _job_scoped_key(keyframe_key, project=project, prefixes=("renders/",),
+                            what="i2v_clip: keyframe_key")
+        else:
+            keyframe_key = keys.keyframe_key(project, shot_id)
+        local_kf = workdir / "keyframe.png"
+        try:
+            store.get_file(keyframe_key, local_kf)
+        except Exception as e:
+            raise HarnessError(f"i2v_clip: could not fetch keyframe {keyframe_key!r}: {e}")
+
+        # Build the engine params from the tier baseline + the job's overrides, reusing the typed
+        # I2VConfig so clamping AND the distill<->feature-cache invariant (no caching a 4-step render)
+        # are enforced exactly as in the full render path. height/width live only on the engine
+        # I2VParams (I2VConfig follows the keyframe's native dims), so they are read from cfg directly;
+        # a falsy value (null/0/"") means "follow the keyframe".
+        tier = QualityTier.parse(cfg.get("quality"))
+        ic = I2VConfig.from_dict(cfg, tier=tier)
+        params = i2v_mod.I2VParams(
+            num_frames=i2v_mod.snap_frames(ic.num_frames),  # temporal VAE wants 4k+1
+            fps=ic.fps,
+            steps=ic.distill_steps if ic.distill else ic.steps,
+            guidance_scale=ic.guidance_scale,
+            distill=ic.distill,
+            seed=ic.seed,
+            height=int(cfg["height"]) if cfg.get("height") else None,
+            width=int(cfg["width"]) if cfg.get("width") else None,
+            feature_cache=ic.feature_cache,
+            flow_shift=ic.flow_shift,
+        )
+        # Custom negative is additive over the engine's anti-static guard (the #25 fix), never a
+        # replacement -- a bare custom negative would drop the anti-freeze default and risk a still clip.
+        if ic.negative_prompt:
+            params.negative_prompt = ic.negative_prompt + ", " + i2v_mod.I2VParams.negative_prompt
+
+        out_path = workdir / "out.mp4"
+        result = i2v_mod.animate(
+            Scene(id=shot_id, prompt=prompt), local_kf, prompt, ModelServer(), out_path,
+            params=params, progress_cb=progress.i2v_step_cb(shot_id),
+        )
+
+        # Same shared slug as run_finish_job (see the comment there).
+        clip_key_out = keys.i2v_clip_key(project, shot_id)
+        store.put_file(result.path, clip_key_out, content_type="video/mp4")
+
+        progress.complete(output_key=clip_key_out)
+        # Pointer-only return (same rationale as run_finish_job): small job-done payload; R2 holds state.
+        return {
+            "clip_key": clip_key_out,
+            "shot_id": shot_id,
+            "num_frames": result.num_frames,
+            "fps": result.fps,
+            "seconds": result.seconds,
+            "distilled": result.distilled,
+        }
     except Exception as e:
-        raise HarnessError(f"i2v_clip: could not fetch keyframe {keyframe_key!r}: {e}")
-
-    # Build the engine params from the tier baseline + the job's overrides, reusing the typed
-    # I2VConfig so clamping AND the distill<->feature-cache invariant (no caching a 4-step render)
-    # are enforced exactly as in the full render path. height/width live only on the engine
-    # I2VParams (I2VConfig follows the keyframe's native dims), so they are read from cfg directly;
-    # a falsy value (null/0/"") means "follow the keyframe".
-    tier = QualityTier.parse(cfg.get("quality"))
-    ic = I2VConfig.from_dict(cfg, tier=tier)
-    params = i2v_mod.I2VParams(
-        num_frames=i2v_mod.snap_frames(ic.num_frames),  # temporal VAE wants 4k+1
-        fps=ic.fps,
-        steps=ic.distill_steps if ic.distill else ic.steps,
-        guidance_scale=ic.guidance_scale,
-        distill=ic.distill,
-        seed=ic.seed,
-        height=int(cfg["height"]) if cfg.get("height") else None,
-        width=int(cfg["width"]) if cfg.get("width") else None,
-        feature_cache=ic.feature_cache,
-        flow_shift=ic.flow_shift,
-    )
-    # Custom negative is additive over the engine's anti-static guard (the #25 fix), never a
-    # replacement -- a bare custom negative would drop the anti-freeze default and risk a still clip.
-    if ic.negative_prompt:
-        params.negative_prompt = ic.negative_prompt + ", " + i2v_mod.I2VParams.negative_prompt
-
-    out_path = workdir / "out.mp4"
-    result = i2v_mod.animate(
-        Scene(id=shot_id, prompt=prompt), local_kf, prompt, ModelServer(), out_path,
-        params=params, progress_cb=progress.i2v_step_cb(shot_id),
-    )
-
-    # Same shared slug as run_finish_job (see the comment there).
-    clip_key_out = keys.i2v_clip_key(project, shot_id)
-    store.put_file(result.path, clip_key_out, content_type="video/mp4")
-
-    progress.complete(output_key=clip_key_out)
-    # Pointer-only return (same rationale as run_finish_job): small job-done payload; R2 holds state.
-    return {
-        "clip_key": clip_key_out,
-        "shot_id": shot_id,
-        "num_frames": result.num_frames,
-        "fps": result.fps,
-        "seconds": result.seconds,
-        "distilled": result.distilled,
-    }
+        progress.error("i2v_clip", e)  # best-effort failure marker, then fail the job
+        raise
 
 
 def _wants_i2v_prefetch(action: str) -> bool:
