@@ -21,7 +21,8 @@ from typing import Protocol, runtime_checkable
 from ..assemble import ClipInput, assemble, build_manifest, order_for_storyboard, write_manifest
 from ..contract import Bundle, RenderRequest, RenderResult, Keyframe, Clip
 from ..finish import Deadline, FinishDeadlineExceeded
-from ..orchestrator import Action, RenderPlan, plan as make_plan, resolve_lora_family, validate
+from ..orchestrator import (Action, KeyframeMode, RenderPlan, plan as make_plan,
+                            resolve_lora_family, validate)
 from . import keys
 from .progress import NullEmitter, ProgressEmitter
 from . import job_done_diag
@@ -125,7 +126,13 @@ def run_job(
         # to local disk before keyframing and hand the local-path map to the pipeline. Fail-fast
         # (before any GPU work) if a requested adapter cannot be fetched, rather than silently
         # rendering the character without its identity LoRA.
-        staged = _stage_pretrained_loras(req, store, workdir, progress)
+        # Slots reused from a PRIOR render (adapter at lora_key) are staged too, but only when a
+        # keyframe will be drawn with them; a train-only / all-reuse job has no consumer for them.
+        stored_slots: list[str] = []
+        if lora_family != "wan" and any(
+                sp.keyframe_mode is KeyframeMode.GENERATE for sp in plan.scenes):
+            stored_slots = [s for s in plan.lora.reuse if s in trained_slots]
+        staged = _stage_pretrained_loras(req, store, workdir, progress, stored_slots=stored_slots)
 
         # --- GPU stages (only what the plan kept) ---
         _inject_progress(pipeline, progress)
@@ -176,9 +183,15 @@ def _job_scoped_key(key: str, *, project: str, prefixes: tuple[str, ...], what: 
         raise HarnessError(str(e)) from None
 
 
-def _stage_pretrained_loras(req: RenderRequest, store, workdir: Path, progress) -> dict[str, str]:
+def _stage_pretrained_loras(req: RenderRequest, store, workdir: Path, progress,
+                            stored_slots=()) -> dict[str, str]:
     """Download each reused-LoRA R2 key to a local file so the GPU pipeline can load it without
     touching R2. Returns slot -> local path.
+
+    `stored_slots` are slots the plan reused because a prior render left their adapter at
+    lora_key (see _restore_prior_state): they are staged from that key exactly like a
+    passthrough, so a reused slot keeps its identity adapter. A `pretrained_loras` entry for the
+    same slot supersedes the stored one.
 
     A ref that is already a local file (a pre-staged deploy, or a test) is taken as-is. A ref the
     store cannot serve is a hard error (HarnessError): the plan already skipped training that slot,
@@ -186,7 +199,9 @@ def _stage_pretrained_loras(req: RenderRequest, store, workdir: Path, progress) 
     worse than failing the job here, cheaply, before any GPU work. (R2 transient failures are the
     store's own retry concern.)"""
     staged: dict[str, str] = {}
-    for slot, ref in req.pretrained_loras.items():
+    refs = {s: keys.lora_key(req.project, s) for s in stored_slots}
+    refs.update(req.pretrained_loras)
+    for slot, ref in refs.items():
         if Path(ref).is_file():
             staged[slot] = str(ref)
             continue
