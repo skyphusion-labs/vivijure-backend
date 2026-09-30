@@ -82,7 +82,7 @@ insightface>=1.0.1
 # Raising this cap REQUIRES moving the runtime base to CUDA 13 and re-validating the whole
 # pipeline (torch/torchvision/torchaudio off the cu128 index, InstantID, finish) on a pod.
 # CI has no GPU, so CI can never prove that for you.
-onnxruntime-gpu>=1.21.0,<1.27.0
+onnxruntime-gpu>=1.30.0,<1.31.0
 # sentencepiece / protobuf are unneeded by the SDXL + Wan stack (transformers ran without them in
 # the validated env); add only if a future tokenizer requires them.
 
