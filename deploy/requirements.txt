@@ -71,7 +71,7 @@ PyYAML>=6.0               # contract.py storyboard parse (no version sensitivity
 # last owns the native module -- and the CPU build has no CUDA execution provider compiled in.
 # deploy/ensure_onnxruntime_gpu.py removes it and repairs onnxruntime-gpu AFTER this file is
 # installed; do not drop that step (backend#346 defect A).
-insightface>=1.0.1
+insightface>=2.0
 # CAPPED UNDER THE CUDA-13 SWITCH (backend#346 defect B). onnxruntime-gpu moved its DEFAULT
 # wheel from a CUDA 12.8 build to a CUDA 13.0 build at 1.27.0, and the CUDA/cuDNN packages it
 # names are optional extras we do not install, so the wheel relies on the system CUDA matching
