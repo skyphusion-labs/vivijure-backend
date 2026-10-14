@@ -82,6 +82,33 @@ def test_bake_manifest_keep_set_includes_canny_controlnet():
     assert DEFAULT_SPECS[ModelRole.CONTROLNET_CANNY].repo_id == "xinsir/controlnet-canny-sdxl-1.0"
 
 
+def test_bake_manifest_drops_wan_i2v_and_keeps_the_still_stack():
+    # The keyframe image must not carry Wan image-to-video weights. The i2v code path stays.
+    # RealVisXL, InstantID, IP-Adapter, both ControlNets, and the few-step opt-in stay.
+    import json
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    m = json.loads((root / "deploy" / "bake-manifest.json").read_text())
+    keep = {e["repo"] for e in m["keep_repos"]}
+    drop = {e["repo"] for e in m["drop_repos"]}
+    for repo in (
+        "models--Wan-AI--Wan2.2-I2V-A14B-Diffusers",
+        "models--lightx2v--Wan2.2-Lightning",
+    ):
+        assert repo not in keep
+        assert repo in drop
+    for repo in (
+        "models--SG161222--RealVisXL_V5.0",
+        "models--InstantX--InstantID",
+        "models--h94--IP-Adapter",
+        "models--xinsir--controlnet-openpose-sdxl-1.0",
+        "models--xinsir--controlnet-canny-sdxl-1.0",
+        "models--ByteDance--Hyper-SD",
+    ):
+        assert repo in keep
+        assert repo not in drop
+
+
 def test_missing_canny_weights_raise_harness_error_naming_the_role():
     from vivijure_backend.harness.handler import HarnessError
     from vivijure_backend.models import controlnet_load_failure

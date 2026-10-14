@@ -59,26 +59,28 @@ def _guidance(cfg: "KeyframeParams") -> float:
 
 @dataclass
 class KeyframeParams:
-    """Engine knobs for one keyframe render. Defaults suit the few-step distilled base (the
-    keyframe gets animated, so 6-8 steps is plenty); the control plane's KeyframeConfig fills
-    these per job."""
-    steps: int = 8
+    """Engine knobs for one keyframe render.
+
+    The hosted default is the frame the movie keeps: full steps, guidance 5.0, 1280x720,
+    InstantID for one person. `few_step` is an explicit opt-in (the draft tier), not the
+    default. The control plane's KeyframeConfig fills these per job.
+    """
+    steps: int = 30
     guidance_scale: float = 5.0
-    width: int = 1024                # SDXL native side; non-square (16:9 / vertical) is honored
-    height: int = 1024               # the two dims are threaded independently through the engine
+    width: int = 1280                # 16:9 film frame; non-square is honored, not squared
+    height: int = 720
     seed: int = 0
-    few_step: bool = True            # use the Hyper-SD/DMD2 distilled path the ModelServer loaded
-    scheduler: str = "ddim_trailing" # config.Scheduler value; few-step wants ddim_trailing, final a solver
+    few_step: bool = False           # Hyper-SD/DMD2. Off unless a caller opts in.
+    scheduler: str = "dpmpp_2m_karras"  # config.Scheduler value; few-step wants ddim_trailing
     lora_scale: float = DEFAULT_LORA_SCALE          # single-char; regional uses lora_scale_per_slot
     lora_scale_per_slot: float = DEFAULT_LORA_SCALE_PER_SLOT
     ip_adapter_scale: float = DEFAULT_IP_ADAPTER_SCALE
     scene_lock: bool = True          # Pass A scene plate, Pass B canny + face-crop; off is a debug hatch
     canny_scale: float = DEFAULT_CANNY_SCALE
-    # Identity method for the SINGLE-character path: "ip_adapter" (h94 IP-Adapter, the default) or
-    # "instantid" (insightface face-embed projected through InstantID's image-projection + IP attn,
-    # higher face fidelity). Multi-character shots ignore this and always take the masked-IP-Adapter
-    # regional path.
-    identity_method: str = "ip_adapter"
+    # Identity method for the SINGLE-character path. InstantID is the default: insightface
+    # face-embed through InstantID's image projection. "ip_adapter" is the h94 fallback.
+    # Two-person shots ignore this and stay on the masked IP-Adapter regional path.
+    identity_method: str = "instantid"
     instantid_ip_adapter_scale: float = 0.8  # InstantID face-embedding (image-proj) scale
     pose_conditioning: bool = True   # ControlNet-OpenPose to separate bodies in multi-char shots
     controlnet_pose_scale: float = 0.55  # OpenPose ControlNet conditioning scale (regional path)
@@ -198,12 +200,31 @@ def plan_keyframe_passes(scene: Scene, cast: Cast, storyboard: Storyboard,
 
 
 def keyframe_render_path(engine: str, cfg: KeyframeParams, *, has_instantid_ref: bool) -> str:
-    """Which GPU body `render_keyframe` takes. InstantID is not Pass B: scene_lock wins."""
-    if cfg.scene_lock:
-        return "scene_lock"
+    """Which GPU body `render_keyframe` takes.
+
+    Two people stay regional (scene_lock when it is on). One person with InstantID and a
+    reference still takes InstantID even when scene_lock is on. Scene lock covers the
+    other single-person shots.
+    """
+    if engine == "regional":
+        return "scene_lock" if cfg.scene_lock else "regional"
     if engine == "single" and cfg.identity_method == "instantid" and has_instantid_ref:
         return "instantid"
+    if cfg.scene_lock:
+        return "scene_lock"
     return engine
+
+
+class LoraOnlyKeyframe(RuntimeError):
+    """A still with a LoRA and no reference image is not a frame a clip model may animate."""
+
+
+def refuse_lora_only_still(identity_path: str) -> None:
+    """Fail the still before it is saved. `lora_only` must not leave the keyframe endpoint."""
+    if identity_path == "lora_only":
+        raise LoraOnlyKeyframe(
+            "keyframe identity_path is lora_only; the still has no reference image and is not returned"
+        )
 
 
 # ------------------------------------------------------------------------- region geometry
@@ -287,9 +308,9 @@ def render_keyframe(
     has_instantid_ref = bool(single_slot and _ref_images(cast, single_slot, count=1))
     path = keyframe_render_path(engine, cfg, has_instantid_ref=has_instantid_ref)
 
-    # InstantID is not Pass B. scene_lock (default) is plate then canny + face-crop IP-Adapter;
-    # InstantID still records as identity_requested. The debug hatch (scene_lock off) keeps the
-    # old InstantID / single / regional bodies.
+    # One person with an InstantID ref takes InstantID even when scene_lock is on.
+    # Two people stay on the regional body. scene_lock is plate then canny + face-crop
+    # IP-Adapter for every other shot.
     if path == "scene_lock":
         image, identity_path, prompt = _render_scene_lock(
             server, scene, cast, storyboard, cfg, loras, pose_image)
@@ -307,6 +328,7 @@ def render_keyframe(
             image, identity_path = _render_regional(
                 pipe, prompt, scene, cast, cfg, loras, generator, pose_image)
 
+    refuse_lora_only_still(identity_path)
     image.save(out_path)
     return KeyframeResult(shot_id=scene.id or "shot", path=out_path, slots=slots,
                           multi_char=(engine == "regional"), prompt=prompt, seed=cfg.seed,

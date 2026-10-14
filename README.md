@@ -92,8 +92,8 @@ knob per job.
 | Tier | Keyframe | Video | Finish | Best for |
 |---|---|---|---|---|
 | `draft` | fast 4-step | fast 4-step | none | a quick preview |
-| `standard` | 8-step | full, sped up | smoother motion | the balanced middle |
-| `final` | full 30-step | full 40-step | smoother motion + face touch-up | the hero deliverable |
+| `standard` | full 30-step, 1280x720 | full, sped up | smoother motion | the balanced middle |
+| `final` | full 30-step, 1280x720 | full 40-step | smoother motion + face touch-up | the hero deliverable |
 
 Every field, its default, and its safe range is spelled out in
 [docs/configuration.md](docs/configuration.md).
