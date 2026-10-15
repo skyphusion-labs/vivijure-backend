@@ -284,14 +284,36 @@ def test_dockerfile_runs_the_finish_sha_gate_before_the_sentinel():
 def test_consumer_dockerfile_is_from_runtime_with_no_weight_bake():
     """#537 Shape Y: the consumer deploy/Dockerfile is FROM the pinned runtime base + COPY src only --
     it must NOT re-bake weights (no seed COPY, no assert chain, no .vj-baked stamp); those belong to
-    the runtime base so a src-only release inherits + dedups them."""
-    df = (Path(__file__).resolve().parents[1] / "deploy" / "Dockerfile").read_text()
-    assert "vivijure-backend-runtime" in df, "consumer must FROM the runtime base"
+    the runtime base so a src-only release inherits + dedups them.
+
+    #495: the fp8 runtime pin was an all-zeros digest and that package does not resolve on a public
+    pull. Both consumer Dockerfiles keep the bf16 pin only. release.yml must not offer fp8 or tell
+    an operator to set vars.VJ_BAKE_PRECISION."""
+    root = Path(__file__).resolve().parents[1]
+    df = (root / "deploy" / "Dockerfile").read_text()
+    runpod = (root / ".runpod" / "Dockerfile").read_text()
+    assert runpod == df, ".runpod/Dockerfile must stay byte-identical to deploy/Dockerfile"
+    assert "RUNTIME_REF_BF16=" in df
+    assert "ghcr.io/skyphusion-labs/vivijure-backend:runtime-" in df
+    assert "FROM ${RUNTIME_REF_BF16} AS runtime-bf16" in df
+    assert "FROM runtime-${VJ_BAKE_PRECISION}" in df
     assert "COPY src/vivijure_backend" in df
+    zeros = "sha256:" + ("0" * 64)
+    assert zeros not in df
+    assert "RUNTIME_REF_FP8" not in df
+    assert "runtime-fp8" not in df
     # no weight-bake in the consumer: the assert chain + weight COPY belong to the runtime base, so a
     # src-only release inherits + dedups them (a mention in a comment is fine; a RUN/COPY is not).
     assert "assert-weights" not in df, "the consumer must not run the weight-bake gate (the runtime does)"
     assert "seed-bins" not in df and "COPY --from=seed" not in df, "no weight bake in the consumer"
+    release = (root / ".github" / "workflows" / "release.yml").read_text()
+    assert "vars.VJ_BAKE_PRECISION" not in release
+    assert "Set vars.VJ_BAKE_PRECISION=fp8" not in release
+    assert "fp8|bf16" not in release
+    assert "options: [bf16, fp8]" not in release
+    assert 'case "${PREC}" in bf16)' in release
+    assert 'PREC="bf16"' in release
+    assert "VJ_BAKE_PRECISION=${{ steps.cfg.outputs.precision }}" in release
 
 
 def test_stage_script_asserts_the_manifest_pin_not_a_literal():
