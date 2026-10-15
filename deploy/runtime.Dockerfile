@@ -25,15 +25,14 @@
 # seed FROM by design. Built by .github/workflows/runtime-build.yml (dispatch-gated).
 
 # ------------------------------------------------------------------ SEED (weights source of truth)
-# The curated model seed lives in the immutable per-precision SEED image; pinned by TAG AND DIGEST
-# (design law #2). Two precisions from one Dockerfile via `FROM seed-${VJ_BAKE_PRECISION}` selection;
-# BuildKit pulls only the selected stage. Repin BOTH tag and @sha256 (matching precision) after a
-# seed rebuild. bf16 = self-contained public/prod; fp8 = partial-prod.
+# The curated model seed lives in the immutable SEED image, pinned by TAG AND DIGEST
+# (design law #2). bf16 is the only seed. runtime-build.yml passes VJ_BAKE_PRECISION=bf16 and
+# BuildKit builds that stage. There is no fp8 seed: tag 1-fp8 does not resolve on a public GHCR
+# pull, and the old pin was an all-zeros digest. Repin the tag and the @sha256 together after a
+# seed rebuild.
 ARG SEED_REF_BF16=ghcr.io/skyphusion-labs/vivijure-backend-seed:2-bf16@sha256:45d036fd50c83dfa0347cf837c43bcccb07e4d2c52c3fb5c02d3deee962a7e66
-ARG SEED_REF_FP8=ghcr.io/skyphusion-labs/vivijure-backend-seed:1-fp8@sha256:0000000000000000000000000000000000000000000000000000000000000000
 ARG VJ_BAKE_PRECISION=bf16
 FROM ${SEED_REF_BF16} AS seed-bf16
-FROM ${SEED_REF_FP8} AS seed-fp8
 FROM seed-${VJ_BAKE_PRECISION} AS seed
 
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
@@ -193,8 +192,8 @@ RUN cd /opt/models && sha256sum -c weights-manifest.sha256 --quiet \
 # Baked-image marker (harness/models_mirror.BAKED_SENTINEL = .vj-baked). is_baked() checks its
 # EXISTENCE to short-circuit volume + R2; the contents are operator-facing metadata. Bumping
 # VJ_MODEL_VERSION re-stamps the marker (and, paired with a re-staged seed, signals a new model set).
-# Precision defaults to bf16 (the self-contained public/prod track); the release workflow passes it
-# explicitly. fp8 stays selectable for the partial-prod image.
+# Precision is bf16, the only seed this Dockerfile can pull. runtime-build.yml passes it
+# explicitly. There is no fp8 seed stage.
 ARG VJ_BAKE_PRECISION=bf16
 ARG VJ_MODEL_VERSION=1
 # SELF-DEFENDING GATE (the #4 empty-bake fix): never stamp .vj-baked over an empty/stub weight tree.

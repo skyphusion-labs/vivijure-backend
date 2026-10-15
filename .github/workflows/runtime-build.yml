@@ -52,11 +52,11 @@ on:
   workflow_dispatch:
     inputs:
       precision:
-        description: 'Baked weight precision (selects the pinned seed stage in runtime.Dockerfile).'
+        description: 'Baked weight precision. bf16 is the only pinned seed.'
         required: true
         default: bf16
         type: choice
-        options: [bf16, fp8]
+        options: [bf16]
       model_version:
         description: 'Model set version (must match the seed the Dockerfile pins).'
         required: true
@@ -136,7 +136,7 @@ jobs:
           if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
             # CVE-refresh floor: rebuild WHATEVER is currently shipped -- read the bf16 pin from
             # deploy/Dockerfile so a frozen cron input can never refresh a config nobody ships.
-            REF="$(grep -oE 'vivijure-backend:runtime-[0-9]+-(bf16|fp8)-t[0-9]+' deploy/Dockerfile | head -1)"
+            REF="$(grep -oE 'vivijure-backend:runtime-[0-9]+-bf16-t[0-9]+' deploy/Dockerfile | head -1)"
             [ -n "${REF}" ] || { echo "::error::could not read a RUNTIME_REF pin from deploy/Dockerfile"; exit 1; }
             TAG="${REF#*:}"                                  # e.g. runtime-1-bf16-t1
             CORE="${TAG#runtime-}"                           # 1-bf16-t1
@@ -151,7 +151,7 @@ jobs:
             TVER='${{ github.event.inputs.toolchain_version }}'
             OVERLAY='${{ github.event.inputs.overlay_from }}'
           fi
-          case "${PREC}" in fp8|bf16) ;; *) echo "::error::precision must be fp8 or bf16"; exit 1;; esac
+          case "${PREC}" in bf16) ;; *) echo "::error::precision must be bf16"; exit 1;; esac
           case "${MVER}" in ''|*[!0-9]*) echo "::error::model_version must be a positive integer"; exit 1;; esac
           case "${TVER}" in ''|*[!0-9]*) echo "::error::toolchain_version must be a positive integer"; exit 1;; esac
           TAG="runtime-${MVER}-${PREC}-t${TVER}"

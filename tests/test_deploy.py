@@ -316,6 +316,33 @@ def test_consumer_dockerfile_is_from_runtime_with_no_weight_bake():
     assert "VJ_BAKE_PRECISION=${{ steps.cfg.outputs.precision }}" in release
 
 
+def test_runtime_dockerfile_has_no_all_zero_fp8_seed_pin():
+    """The fp8 seed pin was an all-zeros digest. Tag 1-fp8 does not resolve on a public GHCR
+    pull, so deploy/runtime.Dockerfile keeps the bf16 seed only and runtime-build.yml must not
+    offer fp8 as a seed choice. The bake stays disabled."""
+    root = Path(__file__).resolve().parents[1]
+    df = (root / "deploy" / "runtime.Dockerfile").read_text()
+    assert "SEED_REF_BF16=" in df
+    assert "ghcr.io/skyphusion-labs/vivijure-backend-seed:2-bf16@" in df
+    assert "sha256:45d036fd50c83dfa0347cf837c43bcccb07e4d2c52c3fb5c02d3deee962a7e66" in df
+    assert "FROM ${SEED_REF_BF16} AS seed-bf16" in df
+    assert "FROM seed-${VJ_BAKE_PRECISION} AS seed" in df
+    zeros = "sha256:" + ("0" * 64)
+    assert zeros not in df
+    assert "SEED_REF_FP8" not in df
+    assert "seed-fp8" not in df
+    assert "VJ_BAKE_PRECISION=fp8" not in df
+    assert "Repin BOTH" not in df
+    wf = (root / ".github" / "workflows" / "runtime-build.yml").read_text()
+    assert "options: [bf16]" in wf
+    assert "options: [bf16, fp8]" not in wf
+    assert "fp8|bf16" not in wf
+    assert "bf16|fp8" not in wf
+    assert "(bf16|fp8)" not in wf
+    assert 'case "${PREC}" in bf16)' in wf
+    assert "name: Disabled -- no builder with the required disk" in wf
+
+
 def test_stage_script_asserts_the_manifest_pin_not_a_literal():
     """The staging upload must assert the manifest sha256 pin (single source of truth), not a hardcoded
     literal or a size-band-only gate."""
