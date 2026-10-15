@@ -38,8 +38,8 @@ name: Release worker image to GHCR (baked)
 # workflows/runpod-verify.yml) -- see docs/release-gate.md. An iteration tag never re-pins prod.
 #
 # WEIGHTS + RUNTIME COME FROM THE PINNED RUNTIME BASE (#537, Shape Y): this build is assemble + push
-# only -- `FROM ghcr.io/skyphusion-labs/vivijure-backend-runtime:<ver>@sha256:<digest>` (selected by
-# VJ_BAKE_PRECISION) + COPY src. No R2 stage, no bin-pack, no weight COPY. A src-only release re-pushes
+# only -- `FROM` the digest-pinned bf16 runtime base (RUNTIME_REF_BF16) + COPY src. No R2 stage, no
+# bin-pack, no weight COPY. A src-only release re-pushes
 # ONLY the app layers; the runtime + weight layers dedup on GHCR. The runtime base itself is built by
 # runtime-build.yml (from the seed image, which stages R2 once per weight version); see
 # docs/deploy.md for the release contract and docs/weights-base-and-snapshots.md for the chain.
@@ -67,11 +67,11 @@ on:
         required: true
         type: string
       precision:
-        description: 'Baked weight precision (selects the pinned runtime base).'
+        description: 'Baked weight precision. bf16 is the only pinned runtime base.'
         required: true
         default: bf16
         type: choice
-        options: [bf16, fp8]
+        options: [bf16]
 
 permissions:
   contents: read
@@ -135,12 +135,11 @@ jobs:
               echo "::error::Tag '${TAG}' is not a backend-vX.Y.Z release tag; nothing to build."
               exit 1
             fi
-            # Precision for a tag build comes from a repo variable (default bf16, the self-contained
-            # public/prod track). Set vars.VJ_BAKE_PRECISION=fp8 to cut an fp8 (partial-prod) release.
-            PREC="${{ vars.VJ_BAKE_PRECISION }}"
-            [ -n "${PREC}" ] || PREC="bf16"
+            # Tag builds are bf16. There is no fp8 runtime base, so a repo variable must not
+            # select a precision.
+            PREC="bf16"
           fi
-          case "${PREC}" in fp8|bf16) ;; *) echo "::error::precision must be fp8 or bf16"; exit 1;; esac
+          case "${PREC}" in bf16) ;; *) echo "::error::precision must be bf16"; exit 1;; esac
           echo "version=${VER}"   >> "$GITHUB_OUTPUT"
           echo "precision=${PREC}" >> "$GITHUB_OUTPUT"
           echo "Building ${WORKER_IMAGE}:${VER} (precision=${PREC}; FROM the pinned runtime base)."
