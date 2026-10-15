@@ -138,7 +138,7 @@ flowchart LR
     REFS["character refs<br/>characters/refs/SLOT/"] --> LORA["lora_train<br/>SDXL UNet LoRA<br/>(GPU, bf16)"]
     LORA --> KF["keyframe<br/>SDXL + identity<br/>(GPU)"]
     SB["scene prompt<br/>+ style"] --> KF
-    KF --> PNG["keyframe.png<br/>1024x1024"]
+    KF --> PNG["keyframe.png<br/>1280x720"]
     PNG --> I2V["i2v animate<br/>Wan 2.2 image-to-video<br/>(GPU)"]
     I2V --> CLIP["shot.mp4<br/>81 frames @ 16fps"]
     CLIP --> FIN["finish<br/>RIFE interp + face restore<br/>(GPU, optional)"]

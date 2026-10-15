@@ -52,9 +52,22 @@ def test_keyframe_draft_is_four_step_distilled_cfg_zero():
     assert k.scheduler is Scheduler.DDIM_TRAILING
 
 
-def test_keyframe_final_is_full_step_high_cfg_no_distill():
+def test_keyframe_final_is_full_step_film_aspect():
     k = KeyframeConfig.for_tier(QualityTier.FINAL)
-    assert not k.distill and k.steps == 30 and k.guidance_scale > 0
+    assert not k.distill and k.steps == 30 and k.guidance_scale == 5.0
+    assert k.scheduler is Scheduler.DPMPP_2M_KARRAS
+    assert (k.width, k.height) == (1280, 720)
+    assert k.identity_method is IdentityMethod.INSTANTID
+
+
+def test_keyframe_standard_matches_the_hosted_still():
+    # Standard used to be the 8-step cheap default. Hosted and self-host both keep the full still.
+    k = KeyframeConfig.for_tier(QualityTier.STANDARD)
+    final = KeyframeConfig.for_tier(QualityTier.FINAL)
+    assert k.distill is False and k.steps == final.steps
+    assert k.guidance_scale == final.guidance_scale
+    assert (k.width, k.height) == (final.width, final.height)
+    assert k.identity_method is IdentityMethod.INSTANTID
 
 
 def test_i2v_draft_is_lightning_four_step_no_cache():
@@ -91,7 +104,7 @@ def test_from_dict_layers_over_tier_baseline():
     k = KeyframeConfig.from_dict({"steps": 6}, tier=QualityTier.FINAL)
     assert k.steps == 6
     assert k.distill is False           # inherited from the FINAL baseline
-    assert k.guidance_scale == 6.5      # inherited
+    assert k.guidance_scale == 5.0      # inherited from the hosted still
 
 
 def test_resolution_string_is_parsed():
@@ -101,7 +114,7 @@ def test_resolution_string_is_parsed():
 
 def test_bad_resolution_string_falls_back():
     k = KeyframeConfig.from_dict({"resolution": "wide"})
-    assert (k.width, k.height) == (1024, 1024)
+    assert (k.width, k.height) == (1280, 720)
 
 
 # ------------------------------------------------------------------- invalid-combo guards
@@ -117,13 +130,14 @@ def test_enum_parse_is_forgiving():
     v = I2VConfig.from_dict({"loader": "nonsense"})
     assert v.loader is I2VLoader.DIFFUSERS
     k = KeyframeConfig.from_dict({"identity_method": "huh"})
-    assert k.identity_method is IdentityMethod.IP_ADAPTER
+    assert k.identity_method is IdentityMethod.INSTANTID
 
 
-def test_identity_method_is_keyframe_level_default_ip_adapter():
-    # Identity applies to single AND multi-char shots, so it lives on KeyframeConfig, not
-    # multi_char. IP-Adapter is the default everywhere; InstantID is a single-char upgrade.
-    assert KeyframeConfig().identity_method is IdentityMethod.IP_ADAPTER
+def test_identity_method_default_is_instantid():
+    # One person uses InstantID. The field still lives on KeyframeConfig. Two people ignore
+    # it and stay on masked IP-Adapter, so multi_char has no identity method of its own.
+    # An unknown string falls back to this default (see test_enum_parse_is_forgiving).
+    assert KeyframeConfig().identity_method is IdentityMethod.INSTANTID
     k = KeyframeConfig.from_dict({"identity_method": "instantid"})
     assert k.identity_method is IdentityMethod.INSTANTID
     # The regional block carries no identity method (masked IP-Adapter only, no InstantID).
