@@ -86,13 +86,12 @@ class Scheduler(str, Enum):
 
 
 class IdentityMethod(str, Enum):
-    """How a character's face is pinned onto the keyframe. `IP_ADAPTER` (the default for single
-    AND multi-character shots) pulls identity from the reference embedding; in the regional
+    """How a character's face is pinned onto the keyframe. `INSTANTID` is the default for one
+    person. `IP_ADAPTER` pulls identity from the reference embedding; in the regional
     multi-character path it is masked per region (one identity per mask), which is what holds two
-    faces apart. `INSTANTID` is a single-character upgrade for face-critical shots (it adds a
-    face-ControlNet for a stronger structural lock, but is single-face by nature, so it is NOT
-    used on the regional multi-face path). `BOTH` stacks them: an advanced, future option, never
-    a default. Mirrors the control plane's `face_lock` mode union."""
+    faces apart. InstantID adds a face-ControlNet for a stronger structural lock, and it is
+    single-face, so two people stay on masked IP-Adapter. `BOTH` stacks them: an advanced option,
+    never a default. Mirrors the control plane's `face_lock` mode union."""
     IP_ADAPTER = "ip_adapter"
     INSTANTID = "instantid"
     BOTH = "both"
