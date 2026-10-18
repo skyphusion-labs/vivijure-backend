@@ -20,16 +20,14 @@
 #                              CUDA/torch/apt/seed change -> repin RUNTIME_REF below -> tag.
 
 # ------------------------------------------------------------------ RUNTIME BASE (pinned by digest)
-# The full validated runtime + weights, pinned by TAG AND DIGEST (design law #2). Two precisions from
-# one Dockerfile via `FROM runtime-${VJ_BAKE_PRECISION}` selection; BuildKit pulls only the selected
-# stage. release.yml passes VJ_BAKE_PRECISION (bf16 = self-contained public/prod; fp8 = partial-prod).
-# Repin BOTH tag and @sha256 (matching precision) after a runtime rebuild -- that is the ONE line a
-# weight or toolchain bump changes here. Digests are placeholders until runtime-build.yml prints them.
+# The full validated runtime + weights, pinned by TAG AND DIGEST (design law #2). bf16 is the only
+# base. release.yml passes VJ_BAKE_PRECISION=bf16 and BuildKit builds that stage. There is no fp8
+# runtime base: its package does not resolve on a public GHCR pull, and the old pin was an all-zeros
+# digest. Repin BOTH tag and @sha256 after a runtime rebuild -- that is the ONE line a weight or
+# toolchain bump changes here.
 ARG RUNTIME_REF_BF16=ghcr.io/skyphusion-labs/vivijure-backend:runtime-2-bf16-t2@sha256:babdb3821d7cbac5ac47dc281e4e3bba6cf18a259e693754ddb3c9ae4af80b8a
-ARG RUNTIME_REF_FP8=ghcr.io/skyphusion-labs/vivijure-backend-runtime:1-fp8-t1@sha256:0000000000000000000000000000000000000000000000000000000000000000
 ARG VJ_BAKE_PRECISION=bf16
 FROM ${RUNTIME_REF_BF16} AS runtime-bf16
-FROM ${RUNTIME_REF_FP8} AS runtime-fp8
 FROM runtime-${VJ_BAKE_PRECISION}
 
 # Our package. src/ layout -> /opt/vivijure/vivijure_backend, on the inherited PYTHONPATH. This is the

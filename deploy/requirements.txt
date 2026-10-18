@@ -19,15 +19,13 @@ transformers==5.17.0
 # tested-with-pin doctrine). In-bounds for the stack: transformers 5.10.2 needs <2.0,>=1.5.0,
 # diffusers 0.38.0 needs >=0.34.0. Bump deliberately + re-validate on the pod, never by drift.
 huggingface_hub==1.32.0
-# transformers 5.14.1 requires tokenizers<=0.23.0; PyPI never shipped 0.23.0 stable,
-# so 0.22.2 is the newest installable pin that satisfies the constraint.
-# Do NOT Dependabot-bump tokenizers to 0.23.1 while transformers stays on a
-# <=0.23.0 constraint (ResolutionImpossible on the bake). Pair bumps deliberately.
-tokenizers==0.22.2
-# VIOLATED 2026-07-23 by the pip-minor-patch group bump (dcb25ec) and only caught at the
-# t5 bake on 2026-07-31: this file resolves ONLY at runtime-base bake time, so CI merged a
-# pin that no environment could ever install. transformers 5.14.1 STILL caps
-# tokenizers<=0.23.0 and 0.23.0 has no PyPI distribution, so 0.23.1 is ResolutionImpossible.
+# transformers 5.17.0 requires tokenizers>=0.23.1,<0.24.0. 0.22.2 was the newest
+# pin that satisfied transformers 5.14.1 (that release capped tokenizers<=0.23.0,
+# and PyPI never shipped a 0.23.0 stable). The old pair does not resolve.
+# 0.23.3 is the newest 0.23 release under the 5.17 cap. A 0.24 bump has to
+# land with a transformers release that allows it. This restores pip
+# resolution only. The runtime image has not been rebuilt on this pin.
+tokenizers==0.23.3
 accelerate==1.15.0
 peft==0.21.0
 # diffusers 0.39.0 requires the stable safetensors 0.8.0 release; its 0.8.0rc1
@@ -71,7 +69,7 @@ PyYAML>=6.0               # contract.py storyboard parse (no version sensitivity
 # last owns the native module -- and the CPU build has no CUDA execution provider compiled in.
 # deploy/ensure_onnxruntime_gpu.py removes it and repairs onnxruntime-gpu AFTER this file is
 # installed; do not drop that step (backend#346 defect A).
-insightface>=1.0.1
+insightface>=2.1
 # CAPPED UNDER THE CUDA-13 SWITCH (backend#346 defect B). onnxruntime-gpu moved its DEFAULT
 # wheel from a CUDA 12.8 build to a CUDA 13.0 build at 1.27.0, and the CUDA/cuDNN packages it
 # names are optional extras we do not install, so the wheel relies on the system CUDA matching
@@ -88,7 +86,7 @@ onnxruntime-gpu>=1.21.0,<1.27.0
 
 # --- serverless SDK + R2 object I/O : floors (import-validated, not render-exercised) ---
 runpod>=1.12.0
-boto3>=1.43.100
+boto3>=1.43.114
 
 # --- finishing stage (RIFE interpolation + face restore) ---
 # av / PyAV: the imageio pyav plugin that finish_clip uses to decode/encode video clips.
