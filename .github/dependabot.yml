@@ -41,6 +41,13 @@ updates:
         versions: [">0.22.2"]
       - dependency-name: "torchao"
         versions: [">=0.18.0"]
+      # onnxruntime-gpu 1.31 allows a CUDA 13 wheel. The base is CUDA 12.8
+      # (test_onnxruntime_pin.py, backend#346). Ignore until that base moves.
+      - dependency-name: "onnxruntime-gpu"
+      # huggingface-hub 2.x does not resolve with the pinned diffusers line.
+      # Revisit when diffusers permits 2.x.
+      - dependency-name: "huggingface-hub"
+        update-types: ["version-update:semver-major"]
     groups:
       pip-minor-patch:
         patterns: ["*"]
