@@ -284,14 +284,63 @@ def test_dockerfile_runs_the_finish_sha_gate_before_the_sentinel():
 def test_consumer_dockerfile_is_from_runtime_with_no_weight_bake():
     """#537 Shape Y: the consumer deploy/Dockerfile is FROM the pinned runtime base + COPY src only --
     it must NOT re-bake weights (no seed COPY, no assert chain, no .vj-baked stamp); those belong to
-    the runtime base so a src-only release inherits + dedups them."""
-    df = (Path(__file__).resolve().parents[1] / "deploy" / "Dockerfile").read_text()
-    assert "vivijure-backend-runtime" in df, "consumer must FROM the runtime base"
+    the runtime base so a src-only release inherits + dedups them.
+
+    #495: the fp8 runtime pin was an all-zeros digest and that package does not resolve on a public
+    pull. Both consumer Dockerfiles keep the bf16 pin only. release.yml must not offer fp8 or tell
+    an operator to set vars.VJ_BAKE_PRECISION."""
+    root = Path(__file__).resolve().parents[1]
+    df = (root / "deploy" / "Dockerfile").read_text()
+    runpod = (root / ".runpod" / "Dockerfile").read_text()
+    assert runpod == df, ".runpod/Dockerfile must stay byte-identical to deploy/Dockerfile"
+    assert "RUNTIME_REF_BF16=" in df
+    assert "ghcr.io/skyphusion-labs/vivijure-backend:runtime-" in df
+    assert "FROM ${RUNTIME_REF_BF16} AS runtime-bf16" in df
+    assert "FROM runtime-${VJ_BAKE_PRECISION}" in df
     assert "COPY src/vivijure_backend" in df
+    zeros = "sha256:" + ("0" * 64)
+    assert zeros not in df
+    assert "RUNTIME_REF_FP8" not in df
+    assert "runtime-fp8" not in df
     # no weight-bake in the consumer: the assert chain + weight COPY belong to the runtime base, so a
     # src-only release inherits + dedups them (a mention in a comment is fine; a RUN/COPY is not).
     assert "assert-weights" not in df, "the consumer must not run the weight-bake gate (the runtime does)"
     assert "seed-bins" not in df and "COPY --from=seed" not in df, "no weight bake in the consumer"
+    release = (root / ".github" / "workflows" / "release.yml").read_text()
+    assert "vars.VJ_BAKE_PRECISION" not in release
+    assert "Set vars.VJ_BAKE_PRECISION=fp8" not in release
+    assert "fp8|bf16" not in release
+    assert "options: [bf16, fp8]" not in release
+    assert 'case "${PREC}" in bf16)' in release
+    assert 'PREC="bf16"' in release
+    assert "VJ_BAKE_PRECISION=${{ steps.cfg.outputs.precision }}" in release
+
+
+def test_runtime_dockerfile_has_no_all_zero_fp8_seed_pin():
+    """The fp8 seed pin was an all-zeros digest. Tag 1-fp8 does not resolve on a public GHCR
+    pull, so deploy/runtime.Dockerfile keeps the bf16 seed only and runtime-build.yml must not
+    offer fp8 as a seed choice. The bake stays disabled."""
+    root = Path(__file__).resolve().parents[1]
+    df = (root / "deploy" / "runtime.Dockerfile").read_text()
+    assert "SEED_REF_BF16=" in df
+    assert "ghcr.io/skyphusion-labs/vivijure-backend-seed:2-bf16@" in df
+    assert "sha256:45d036fd50c83dfa0347cf837c43bcccb07e4d2c52c3fb5c02d3deee962a7e66" in df
+    assert "FROM ${SEED_REF_BF16} AS seed-bf16" in df
+    assert "FROM seed-${VJ_BAKE_PRECISION} AS seed" in df
+    zeros = "sha256:" + ("0" * 64)
+    assert zeros not in df
+    assert "SEED_REF_FP8" not in df
+    assert "seed-fp8" not in df
+    assert "VJ_BAKE_PRECISION=fp8" not in df
+    assert "Repin BOTH" not in df
+    wf = (root / ".github" / "workflows" / "runtime-build.yml").read_text()
+    assert "options: [bf16]" in wf
+    assert "options: [bf16, fp8]" not in wf
+    assert "fp8|bf16" not in wf
+    assert "bf16|fp8" not in wf
+    assert "(bf16|fp8)" not in wf
+    assert 'case "${PREC}" in bf16)' in wf
+    assert "name: Disabled -- no builder with the required disk" in wf
 
 
 def test_stage_script_asserts_the_manifest_pin_not_a_literal():
