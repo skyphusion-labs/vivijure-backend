@@ -286,6 +286,174 @@ def test_i2v_not_baked_pulls_bf16_and_quantizes():
     assert pull is True
 
 
+from vivijure_backend.models import i2v_pull_for_missing_repo
+
+
+def test_baked_image_missing_the_selected_repo_must_pull():
+    # A keyframe bake sets the baked marker and does not carry the i2v repo. The bf16-seed
+    # row says do not pull. That row is only safe when the selected repo is actually cached.
+    assert i2v_pull_for_missing_repo(baked=True, pull_from_r2=False, repo_present=False) is True
+
+
+def test_baked_image_holding_the_selected_repo_does_not_pull():
+    assert i2v_pull_for_missing_repo(baked=True, pull_from_r2=False, repo_present=True) is False
+
+
+def test_an_already_requested_i2v_pull_stays_requested():
+    assert i2v_pull_for_missing_repo(baked=True, pull_from_r2=True, repo_present=False) is True
+    assert i2v_pull_for_missing_repo(baked=False, pull_from_r2=True, repo_present=False) is True
+
+
+def test_an_unbaked_no_pull_decision_is_left_alone():
+    assert i2v_pull_for_missing_repo(baked=False, pull_from_r2=False, repo_present=False) is False
+
+
+def test_i2v_pipeline_forces_a_pull_when_the_baked_repo_is_absent(monkeypatch):
+    # The decision function is not the call. This stops at from_pretrained, after the pull
+    # choice, so a green helper cannot hide a caller that still skips the mirror.
+    import sys
+    import types
+
+    calls = {}
+
+    def fake_baked(env=None):
+        return True
+
+    def fake_cache(repo_id, env=None):
+        calls.setdefault("checked", []).append(repo_id)
+        return False
+
+    def fake_ensure(*args, force=False, **kwargs):
+        calls["force"] = force
+        return False
+
+    torch = types.ModuleType("torch")
+    torch.float8_e4m3fn = "fp8"
+    torch.bfloat16 = "bf16"
+    diffusers = types.ModuleType("diffusers")
+
+    class _Wan:
+        @staticmethod
+        def from_pretrained(repo, torch_dtype=None, local_files_only=None):
+            calls["pretrained"] = (repo, local_files_only)
+            raise RuntimeError("stop after the pull decision")
+
+    diffusers.WanImageToVideoPipeline = _Wan
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "diffusers", diffusers)
+    monkeypatch.setattr("vivijure_backend.harness.models_mirror.is_baked", fake_baked)
+    monkeypatch.setattr("vivijure_backend.harness.models_mirror.repo_in_hf_cache", fake_cache)
+    monkeypatch.setattr("vivijure_backend.harness.models_mirror.ensure_i2v_models", fake_ensure)
+    monkeypatch.setenv("VJ_I2V_DISTILL", "1")
+
+    server = ModelServer(device=H200)
+    try:
+        server.i2v_pipeline()
+    except RuntimeError as exc:
+        assert str(exc) == "stop after the pull decision"
+    else:
+        raise AssertionError("from_pretrained did not run")
+    assert calls["force"] is True
+    assert calls["pretrained"][0] == _I2V_SPEC.repo_id
+    assert calls["pretrained"][1] is True
+    assert _I2V_SPEC.repo_id in calls["checked"]
+
+
+def test_i2v_pipeline_does_not_pull_when_the_baked_repo_is_present(monkeypatch):
+    import sys
+    import types
+
+    calls = {}
+
+    def fake_baked(env=None):
+        return True
+
+    def fake_cache(repo_id, env=None):
+        return True
+
+    def fake_ensure(*args, force=False, **kwargs):
+        calls["force"] = force
+        return False
+
+    torch = types.ModuleType("torch")
+    torch.float8_e4m3fn = "fp8"
+    torch.bfloat16 = "bf16"
+    diffusers = types.ModuleType("diffusers")
+
+    class _Wan:
+        @staticmethod
+        def from_pretrained(repo, torch_dtype=None, local_files_only=None):
+            calls["pretrained"] = (repo, local_files_only)
+            raise RuntimeError("stop after the pull decision")
+
+    diffusers.WanImageToVideoPipeline = _Wan
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "diffusers", diffusers)
+    monkeypatch.setattr("vivijure_backend.harness.models_mirror.is_baked", fake_baked)
+    monkeypatch.setattr("vivijure_backend.harness.models_mirror.repo_in_hf_cache", fake_cache)
+    monkeypatch.setattr("vivijure_backend.harness.models_mirror.ensure_i2v_models", fake_ensure)
+    monkeypatch.setenv("VJ_I2V_DISTILL", "1")
+
+    server = ModelServer(device=H200)
+    try:
+        server.i2v_pipeline()
+    except RuntimeError as exc:
+        assert str(exc) == "stop after the pull decision"
+    else:
+        raise AssertionError("from_pretrained did not run")
+    assert "force" not in calls
+    assert calls["pretrained"][0] == _I2V_SPEC.fp8_repo_id
+    assert calls["pretrained"][1] is True
+
+
+def test_i2v_pipeline_keeps_a_present_bf16_repo_offline(monkeypatch):
+    # The shipping bf16 seed: fp8 is absent, the bf16 repo is cached, so the load stays offline.
+    import sys
+    import types
+
+    calls = {}
+
+    def fake_baked(env=None):
+        return True
+
+    def fake_cache(repo_id, env=None):
+        return repo_id == _I2V_SPEC.repo_id
+
+    def fake_ensure(*args, force=False, **kwargs):
+        calls["force"] = force
+        return False
+
+    torch = types.ModuleType("torch")
+    torch.float8_e4m3fn = "fp8"
+    torch.bfloat16 = "bf16"
+    diffusers = types.ModuleType("diffusers")
+
+    class _Wan:
+        @staticmethod
+        def from_pretrained(repo, torch_dtype=None, local_files_only=None):
+            calls["pretrained"] = (repo, local_files_only)
+            raise RuntimeError("stop after the pull decision")
+
+    diffusers.WanImageToVideoPipeline = _Wan
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "diffusers", diffusers)
+    monkeypatch.setattr("vivijure_backend.harness.models_mirror.is_baked", fake_baked)
+    monkeypatch.setattr("vivijure_backend.harness.models_mirror.repo_in_hf_cache", fake_cache)
+    monkeypatch.setattr("vivijure_backend.harness.models_mirror.ensure_i2v_models", fake_ensure)
+    monkeypatch.setenv("VJ_I2V_DISTILL", "1")
+
+    server = ModelServer(device=H200)
+    try:
+        server.i2v_pipeline()
+    except RuntimeError as exc:
+        assert str(exc) == "stop after the pull decision"
+    else:
+        raise AssertionError("from_pretrained did not run")
+    assert "force" not in calls
+    assert calls["pretrained"][0] == _I2V_SPEC.repo_id
+    assert calls["pretrained"][1] is True
+
+
 # ------------------------------------------------------- facexlib offline shim (finish-leg egress gap)
 
 from vivijure_backend.models import _ensure_facexlib_offline, _FACEXLIB_WEIGHTS

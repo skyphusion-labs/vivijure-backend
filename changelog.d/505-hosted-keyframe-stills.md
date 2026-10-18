@@ -5,4 +5,5 @@ The still the movie keeps is no longer an 8-step square. `KeyframeParams` and
 Draft stays the 4-step opt-in. One person takes InstantID even when scene lock is on.
 Two people stay on masked IP-Adapter. A `lora_only` still is refused before it is saved.
 The bake manifest drops Wan2.2-I2V and Wan2.2-Lightning. The image-to-video code path
-stays; this change does not rebuild the image.
+stays; this change does not rebuild the image. A baked image that does not hold the
+selected image-to-video repo pulls it from the model mirror before the offline load.
