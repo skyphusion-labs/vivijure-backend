@@ -21,6 +21,8 @@ from vivijure_backend.keyframe import (
     engine_for,
     keyframe_render_path,
     plan_keyframe_passes,
+    refuse_lora_only_still,
+    LoraOnlyKeyframe,
     region_boxes,
     scene_lock_negative,
     slot_trigger,
@@ -142,10 +144,14 @@ def test_pose_skeleton_uses_the_non_square_canvas_and_both_halves():
     assert img.crop((960, 0, 1920, 1080)).getbbox() is not None
 
 
-def test_keyframe_params_default_is_square():
-    # Regression: the default keyframe is still 1024x1024 so existing square renders are unchanged.
+def test_keyframe_params_default_is_film_aspect_full_step():
+    # The still the movie keeps: 16:9, full steps, InstantID. few_step is the opt-in.
     p = KeyframeParams()
-    assert (p.width, p.height) == (1024, 1024)
+    assert (p.width, p.height) == (1280, 720)
+    assert p.few_step is False and p.steps == 30
+    assert p.guidance_scale == 5.0
+    assert p.scheduler == "dpmpp_2m_karras"
+    assert p.identity_method == "instantid"
 
 
 def test_pose_skeleton_plants_one_figure_per_region():
@@ -437,12 +443,28 @@ def test_scene_lock_negative_only_when_scene_prompt_is_non_empty():
     assert "bad anatomy" in locked  # keep the anatomy negative
 
 
-def test_scene_lock_wins_over_instantid():
+def test_one_person_instantid_wins_over_scene_lock():
+    # One person with a reference takes InstantID even when scene_lock is on.
     cfg = KeyframeParams(scene_lock=True, identity_method="instantid")
-    assert keyframe_render_path("single", cfg, has_instantid_ref=True) == "scene_lock"
+    assert keyframe_render_path("single", cfg, has_instantid_ref=True) == "instantid"
+    # No reference: InstantID cannot run, so scene_lock still draws the still.
+    assert keyframe_render_path("single", cfg, has_instantid_ref=False) == "scene_lock"
+    # IP-Adapter single stays on scene_lock.
+    ip = KeyframeParams(scene_lock=True, identity_method="ip_adapter")
+    assert keyframe_render_path("single", ip, has_instantid_ref=True) == "scene_lock"
+    # Two people never take InstantID.
+    assert keyframe_render_path("regional", cfg, has_instantid_ref=True) == "scene_lock"
     hatch = KeyframeParams(scene_lock=False, identity_method="instantid")
-    assert keyframe_render_path("single", hatch, has_instantid_ref=True) == "instantid"
-    assert keyframe_render_path("regional", hatch, has_instantid_ref=False) == "regional"
+    assert keyframe_render_path("regional", hatch, has_instantid_ref=True) == "regional"
+
+
+def test_lora_only_still_is_refused_before_save():
+    with pytest.raises(LoraOnlyKeyframe, match="lora_only"):
+        refuse_lora_only_still("lora_only")
+    refuse_lora_only_still("instantid")
+    refuse_lora_only_still("ip_adapter")
+    refuse_lora_only_still("regional_ip_adapter")
+    refuse_lora_only_still("none")
 
 
 def test_plan_two_passes_for_character_shot():

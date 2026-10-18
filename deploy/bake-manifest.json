@@ -7,31 +7,12 @@
   "hub_subpath": "hf-cache/hub",
   "keep_repos": [
     {
-      "repo": "models--Wan-AI--Wan2.2-I2V-A14B-Diffusers",
-      "rev": "596658fd9ca6b7b71d5057529bbf319ecbc61d74",
-      "role": "I2V",
-      "recast_fp32_to_bf16": true,
-      "approx_gb_bf16": 63,
-      "note": "Wan2.2 i2v experts; stored fp32 (~117.5 GiB), recast to bf16 (the precision from_pretrained(torch_dtype=bfloat16) loads at). Largest fp32 shard 4.98 GiB -> ~2.49 GiB bf16, well under the 10 GB GHCR layer limit."
-    },
-    {
       "repo": "models--SG161222--RealVisXL_V5.0",
       "rev": "ac93e0dda1f6d448cae19bbfab8c5e720a5e48bc",
       "role": "KEYFRAME_BASE",
       "recast_fp32_to_bf16": true,
       "approx_gb_bf16": 14,
       "note": "SDXL keyframe base. Loaded via from_pretrained(torch_dtype=bfloat16) with NO variant= arg, so it reads the non-variant fp32 files (incl unet shard 00001-of-00002 at 9.99 GiB). Recast non-variant fp32 -> bf16: halves the 9.99 GiB shard (which would NOT fit a 9 GB bin) and matches the runtime load precision exactly. The .fp16 variant files are kept untouched (not loaded, harmless)."
-    },
-    {
-      "repo": "models--lightx2v--Wan2.2-Lightning",
-      "rev": "18bccf8884ec0a078eed79785eb4ef13ea16ce1e",
-      "role": "I2V_DISTILL",
-      "include_only": [
-        "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/high_noise_model.safetensors",
-        "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/low_noise_model.safetensors"
-      ],
-      "approx_gb_bf16": 2,
-      "note": "LoRA collection (NOT a diffusers from_pretrained repo), so file-level trim is safe. The spec pins the 4-step Seko-V1 i2v LoRA; keep BOTH the high_noise + low_noise pair. The repo's other ~37 GiB (T2V variants, a 28.5 GiB single file, other step counts) is never loaded -> dropped."
     },
     {
       "repo": "models--ByteDance--Hyper-SD",
@@ -70,19 +51,71 @@
     }
   ],
   "finish_dirs": [
-    {"dir": "antelopev2", "approx_gb": 0.4, "note": "InstantID insightface antelopev2 pack (read directly from VJ_MODELS_ROOT/antelopev2)."},
-    {"dir": "rife", "approx_gb": 0.05, "note": "FRAME_INTERP RIFE flownet.pkl (read from VJ_MODELS_ROOT/rife/flownet.pkl)."},
-    {"dir": "GFPGANv1.4", "approx_gb": 0.3, "note": "FACE_RESTORE GFPGANv1.4.pth (read from VJ_MODELS_ROOT/GFPGANv1.4/GFPGANv1.4.pth)."},
-    {"dir": "facexlib", "approx_gb": 0.2, "files": [
-      {"name": "detection_Resnet50_Final.pth", "release": "v0.1.0", "url": "https://github.com/xinntao/facexlib/releases/download/v0.1.0/detection_Resnet50_Final.pth", "size": 109497761, "sha256": "6d1de9c2944f2ccddca5f5e010ea5ae64a39845a86311af6fdf30841b0a5a16d"},
-      {"name": "parsing_parsenet.pth", "release": "v0.2.2", "url": "https://github.com/xinntao/facexlib/releases/download/v0.2.2/parsing_parsenet.pth", "size": 85331193, "sha256": "3d558d8d0e42c20224f13cf5a29c79eba2d59913419f945545d8cf7b72920de2"}
-    ], "note": "facexlib detection_Resnet50_Final.pth + parsing_parsenet.pth for GFPGAN/CodeFormer face restore; read offline from VJ_MODELS_ROOT/facexlib via _ensure_facexlib_offline. Closes the finish-leg github fetch the sm_120 de-risk surfaced. sha256 pins are the SINGLE SOURCE OF TRUTH (this object): the staging upload, the build-time bake gate, and the de-risk runtime probe all assert against these exact bytes. Both pins are independently corroborated -- the github release asset and the gmk123/GFPGAN HF mirror serve byte-identical content."}
+    {
+      "dir": "antelopev2",
+      "approx_gb": 0.4,
+      "note": "InstantID insightface antelopev2 pack (read directly from VJ_MODELS_ROOT/antelopev2)."
+    },
+    {
+      "dir": "rife",
+      "approx_gb": 0.05,
+      "note": "FRAME_INTERP RIFE flownet.pkl (read from VJ_MODELS_ROOT/rife/flownet.pkl)."
+    },
+    {
+      "dir": "GFPGANv1.4",
+      "approx_gb": 0.3,
+      "note": "FACE_RESTORE GFPGANv1.4.pth (read from VJ_MODELS_ROOT/GFPGANv1.4/GFPGANv1.4.pth)."
+    },
+    {
+      "dir": "facexlib",
+      "approx_gb": 0.2,
+      "files": [
+        {
+          "name": "detection_Resnet50_Final.pth",
+          "release": "v0.1.0",
+          "url": "https://github.com/xinntao/facexlib/releases/download/v0.1.0/detection_Resnet50_Final.pth",
+          "size": 109497761,
+          "sha256": "6d1de9c2944f2ccddca5f5e010ea5ae64a39845a86311af6fdf30841b0a5a16d"
+        },
+        {
+          "name": "parsing_parsenet.pth",
+          "release": "v0.2.2",
+          "url": "https://github.com/xinntao/facexlib/releases/download/v0.2.2/parsing_parsenet.pth",
+          "size": 85331193,
+          "sha256": "3d558d8d0e42c20224f13cf5a29c79eba2d59913419f945545d8cf7b72920de2"
+        }
+      ],
+      "note": "facexlib detection_Resnet50_Final.pth + parsing_parsenet.pth for GFPGAN/CodeFormer face restore; read offline from VJ_MODELS_ROOT/facexlib via _ensure_facexlib_offline. Closes the finish-leg github fetch the sm_120 de-risk surfaced. sha256 pins are the SINGLE SOURCE OF TRUTH (this object): the staging upload, the build-time bake gate, and the de-risk runtime probe all assert against these exact bytes. Both pins are independently corroborated -- the github release asset and the gmk123/GFPGAN HF mirror serve byte-identical content."
+    }
   ],
   "drop_repos": [
-    {"repo": "models--Wan-AI--Wan2.2-T2V-A14B-Diffusers", "reason": "text-to-video; never loaded (DEFAULT_SKIP_REPOS). ~117.5 GiB saved."},
-    {"repo": "models--stabilityai--stable-diffusion-xl-base-1.0", "reason": "not in the model spec; dead weight (DEFAULT_SKIP_REPOS). ~57.6 GiB saved."},
-    {"repo": "models--stabilityai--sdxl-turbo", "reason": "not in the model spec; dead weight (DEFAULT_SKIP_REPOS). ~32 GiB saved."},
-    {"repo": "spaces--InstantX--InstantID", "reason": "the HF Space, not the model repo (DEFAULT_SKIP_REPOS)."},
-    {"repo": "models--cagliostrolab--animagine-xl-4.0", "reason": "only an 'anime alt' mentioned in a KEYFRAME_BASE note; NOT loaded by the spec. Added to the runtime DEFAULT_SKIP_REPOS in this PR so runtime and bake derive the same set."}
+    {
+      "repo": "models--Wan-AI--Wan2.2-I2V-A14B-Diffusers",
+      "reason": "image-to-video weights. The keyframe endpoint draws RealVisXL stills. The i2v code path stays; this bake does not carry the weights. ~63 GiB bf16."
+    },
+    {
+      "repo": "models--lightx2v--Wan2.2-Lightning",
+      "reason": "Wan2.2 i2v distill LoRA. Not used by the keyframe still. The i2v code path stays; this bake does not carry it. ~2 GiB."
+    },
+    {
+      "repo": "models--Wan-AI--Wan2.2-T2V-A14B-Diffusers",
+      "reason": "text-to-video; never loaded (DEFAULT_SKIP_REPOS). ~117.5 GiB saved."
+    },
+    {
+      "repo": "models--stabilityai--stable-diffusion-xl-base-1.0",
+      "reason": "not in the model spec; dead weight (DEFAULT_SKIP_REPOS). ~57.6 GiB saved."
+    },
+    {
+      "repo": "models--stabilityai--sdxl-turbo",
+      "reason": "not in the model spec; dead weight (DEFAULT_SKIP_REPOS). ~32 GiB saved."
+    },
+    {
+      "repo": "spaces--InstantX--InstantID",
+      "reason": "the HF Space, not the model repo (DEFAULT_SKIP_REPOS)."
+    },
+    {
+      "repo": "models--cagliostrolab--animagine-xl-4.0",
+      "reason": "only an 'anime alt' mentioned in a KEYFRAME_BASE note; NOT loaded by the spec. Added to the runtime DEFAULT_SKIP_REPOS in this PR so runtime and bake derive the same set."
+    }
   ]
 }

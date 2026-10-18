@@ -86,13 +86,12 @@ class Scheduler(str, Enum):
 
 
 class IdentityMethod(str, Enum):
-    """How a character's face is pinned onto the keyframe. `IP_ADAPTER` (the default for single
-    AND multi-character shots) pulls identity from the reference embedding; in the regional
+    """How a character's face is pinned onto the keyframe. `INSTANTID` is the default for one
+    person. `IP_ADAPTER` pulls identity from the reference embedding; in the regional
     multi-character path it is masked per region (one identity per mask), which is what holds two
-    faces apart. `INSTANTID` is a single-character upgrade for face-critical shots (it adds a
-    face-ControlNet for a stronger structural lock, but is single-face by nature, so it is NOT
-    used on the regional multi-face path). `BOTH` stacks them: an advanced, future option, never
-    a default. Mirrors the control plane's `face_lock` mode union."""
+    faces apart. InstantID adds a face-ControlNet for a stronger structural lock, and it is
+    single-face, so two people stay on masked IP-Adapter. `BOTH` stacks them: an advanced option,
+    never a default. Mirrors the control plane's `face_lock` mode union."""
     IP_ADAPTER = "ip_adapter"
     INSTANTID = "instantid"
     BOTH = "both"
@@ -163,25 +162,26 @@ class KeyframeConfig:
     cfg=0 on a DDIM-trailing / TCD scheduler). `base_model` defaults to the keyframe SDXL in
     `models.DEFAULT_SPECS`.
 
-    Identity (applies to every shot): `identity_method` defaults to IP-Adapter; `ip_adapter_scale`
-    is the single-subject identity pull; the `instantid_*` scales apply only when InstantID is
-    selected (a single-character face-critical upgrade). The regional multi-character anti-bleed
-    knobs live in `multi_char`, read only on the regional path.
+    Identity (applies to a single person): `identity_method` defaults to InstantID.
+    Two people ignore it and stay on masked IP-Adapter. `ip_adapter_scale` is the
+    single-subject IP-Adapter pull; the `instantid_*` scales apply on the InstantID path.
+    The regional multi-character anti-bleed knobs live in `multi_char`.
 
-    Built tier-aware via `for_tier`: draft = 4-step distilled, final = full-step high-cfg.
+    Built tier-aware via `for_tier`: draft is the 4-step opt-in. Standard and final are
+    the full-step 1280x720 still.
     """
     base_model: str = field(default_factory=lambda: _model_id(ModelRole.KEYFRAME_BASE))
     steps: int = 30                  # 1..128; diffusers num_inference_steps (full path)
-    guidance_scale: float = 6.5      # 0..30; CFG. Hyper-SD few-step wants 0.0
+    guidance_scale: float = 5.0      # 0..30; CFG. Hyper-SD few-step wants 0.0
     scheduler: Scheduler = Scheduler.DPMPP_2M_KARRAS
-    width: int = 1024                # 512..2048; SDXL native is 1024
-    height: int = 1024               # 512..2048
+    width: int = 1280                # 512..2048; hosted still is 16:9
+    height: int = 720                # 512..2048
     distill: bool = False            # few-step Hyper-SD path on/off
     distill_model: str = field(default_factory=lambda: _model_id(ModelRole.KEYFRAME_FEWSTEP))
     distill_steps: int = 8           # 1..8; Hyper-SD fixed-step LoRA step count
     seed: int = 424242               # >=0; base RNG seed (control-plane default)
     # Identity stack (all shots). InstantID stays single-char; regional multi-char is masked IP-Adapter.
-    identity_method: IdentityMethod = IdentityMethod.IP_ADAPTER
+    identity_method: IdentityMethod = IdentityMethod.INSTANTID
     ip_adapter_scale: float = 0.65   # 0..1; single-subject IP-Adapter identity pull (face_lock default)
     instantid_ip_adapter_scale: float = 0.8  # 0..1.5; InstantID IP-Adapter (single-char upgrade)
     lora_scale: float = 0.30         # 0..2; single-char LoRA; regional uses multi_char.lora_scale_per_slot
@@ -191,16 +191,12 @@ class KeyframeConfig:
 
     @classmethod
     def for_tier(cls, tier: QualityTier) -> "KeyframeConfig":
-        """The keyframe config for a quality tier. Draft and standard ride the Hyper-SD few-step
-        LoRA (cfg=0, DDIM-trailing) to keep keyframes cheap; final drops distillation for a full
-        high-CFG SDXL pass. Keyframes get animated downstream, so even final stays modest."""
+        """The keyframe config for a quality tier. Draft is the explicit few-step opt-in.
+        Standard and final are the full-step film still (guidance 5.0, 1280x720, InstantID)."""
         if tier is QualityTier.DRAFT:
             return cls(distill=True, distill_steps=4, steps=4, guidance_scale=0.0,
                        scheduler=Scheduler.DDIM_TRAILING)
-        if tier is QualityTier.STANDARD:
-            return cls(distill=True, distill_steps=8, steps=8, guidance_scale=0.0,
-                       scheduler=Scheduler.DDIM_TRAILING)
-        return cls(distill=False, steps=30, guidance_scale=6.5,
+        return cls(distill=False, steps=30, guidance_scale=5.0,
                    scheduler=Scheduler.DPMPP_2M_KARRAS)
 
     @classmethod

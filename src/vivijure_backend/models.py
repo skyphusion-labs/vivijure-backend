@@ -402,8 +402,12 @@ def _select_i2v_weights(spec, *, baked: bool, final_tier: bool, fp8_present: boo
 
       baked + fp8 present + draft/standard -> (fp8_repo_id, True,  False)   # A1: pre-fp8, no quant
       baked + fp8 present + final          -> (repo_id,     False, True)    # B: bf16 lazy-pull from R2
-      baked + fp8 absent  (bf16 seed)      -> (repo_id,     False, False)   # baked bf16, runtime-quant
-      not baked                            -> (repo_id,     False, True)    # R2 bf16 + runtime-quant"""
+      baked + fp8 absent  (bf16 seed)      -> (repo_id,     False, False)   # assumes the bf16 repo is cached
+      not baked                            -> (repo_id,     False, True)    # R2 bf16 + runtime-quant
+
+    The baked bf16 row assumes the selected repo is already in the cache. i2v_pipeline measures
+    that with repo_in_hf_cache and i2v_pull_for_missing_repo sets pull_from_r2 when it is absent.
+    A keyframe bake has the baked marker and does not have this repo."""
     fp8_fast = baked and bool(spec.fp8_repo_id) and fp8_present
     if fp8_fast and not final_tier:
         return spec.fp8_repo_id, True, False
@@ -412,6 +416,19 @@ def _select_i2v_weights(spec, *, baked: bool, final_tier: bool, fp8_present: boo
     if baked:
         return spec.repo_id, False, False
     return spec.repo_id, False, True
+
+
+def i2v_pull_for_missing_repo(*, baked: bool, pull_from_r2: bool, repo_present: bool) -> bool:
+    """True when the caller must pull the selected repo before an offline load.
+
+    An already-requested pull stays requested. A baked image whose selected repo is not in
+    the cache must pull: is_baked() does not say which roles were baked, and from_pretrained
+    is local_files_only. An unbaked decision is left as _select_i2v_weights made it."""
+    if pull_from_r2:
+        return True
+    if baked and not repo_present:
+        return True
+    return False
 
 
 class ModelServer:
@@ -641,8 +658,9 @@ class ModelServer:
           - BAKED pre-fp8 + final (the B seam): lazy-pull the bf16 shards from R2 and load them at full
             bf16 for the hero clip.
           - BAKED bf16 (the shipping seed): the baked weights ARE bf16 -- load them straight from the
-            bake (no R2 pull) and runtime-quantize to fp8 on draft/standard. Every tier of a bf16-seed
-            image lands here.
+            bake when that repo is in the cache, and runtime-quantize to fp8 on draft/standard.
+            A keyframe bake drops this repo and still looks baked. The cache check below pulls it
+            from the mirror before the offline load.
           - NOT baked (legacy / pre-bake image): load bf16 from the R2 mirror and runtime-quantize.
 
         The distill LoRA (few-step) attaches on draft/standard and is dropped on final (VJ_I2V_DISTILL=0).
@@ -665,8 +683,15 @@ class ModelServer:
         fp8_present = bool(spec.fp8_repo_id) and repo_in_hf_cache(spec.fp8_repo_id) if baked else False
         repo, weights_are_fp8, pull_from_r2 = _select_i2v_weights(
             spec, baked=baked, final_tier=final_tier, fp8_present=fp8_present)
+        # The bf16-seed row assumes the selected repo is on disk. A keyframe bake drops it
+        # and still looks baked. Measure the cache and pull when the repo is absent.
+        pull_from_r2 = i2v_pull_for_missing_repo(
+            baked=baked,
+            pull_from_r2=pull_from_r2,
+            repo_present=repo_in_hf_cache(repo) if baked else True,
+        )
         if pull_from_r2:
-            # force=True: the SELECTION above already decided this tier needs shards fetched from R2,
+            # force=True: the decision above already asked for shards from R2,
             # and on a baked image ensure_i2v_models' default guard would silently swallow the pull
             # its own caller asked for, leaving from_pretrained to fail deep against a cache holding
             # the other repo (the #339 B seam). The decision owns the pull; the guard is the default

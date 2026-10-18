@@ -32,9 +32,13 @@ def test_keyframe_params_draft_is_few_step():
     assert p.scheduler == "ddim_trailing"        # Hyper-SD few-step path pins DDIM trailing
 
 
-def test_keyframe_params_default_identity_is_ip_adapter():
+def test_keyframe_params_default_identity_is_instantid():
     p = keyframe_params_from(RenderConfig.for_tier(QualityTier.FINAL))
-    assert p.identity_method == "ip_adapter"   # the default single-char identity path
+    assert p.identity_method == "instantid"
+    standard = keyframe_params_from(RenderConfig.for_tier(QualityTier.STANDARD))
+    assert standard.few_step is False and standard.steps == 30
+    assert standard.identity_method == "instantid"
+    assert (standard.width, standard.height) == (1280, 720)
 
 
 def test_keyframe_params_thread_instantid():
@@ -74,11 +78,10 @@ def test_keyframe_params_from_split_lora_ignores_per_slot_for_single():
     assert p2.lora_scale_per_slot == pytest.approx(0.35)
 
 
-def test_keyframe_params_default_size_is_square():
-    # Regression: with no override the keyframe stays 1024x1024, so existing square renders are
-    # unchanged.
+def test_keyframe_params_default_size_is_film_aspect():
     p = keyframe_params_from(RenderConfig.for_tier(QualityTier.FINAL))
-    assert (p.width, p.height) == (1024, 1024)
+    assert (p.width, p.height) == (1280, 720)
+    assert p.guidance_scale == 5.0
 
 
 def test_keyframe_params_thread_both_dims_for_non_square():

@@ -68,9 +68,9 @@ SENTINEL = ".vj-mirror-complete"
 # resolve or the R2 pull: a baked worker carries its weights, so it is datacenter-agnostic (no network
 # volume pinning it to a provisioned DC) and never pays the R2 cold-pull tax. The R2 mirror stays the
 # fallback ONLY when this marker is absent (a non-baked / legacy image), so this is purely additive.
-# B (bf16-lazy-on-final) is the one exception that still pulls: the FINAL-tier i2v path deliberately
-# fetches bf16 shards from R2 even on a baked worker (see models.ModelServer.i2v_pipeline); that pull
-# is gated on the tier, not on this marker, so the baked default stays pull-free.
+# Two i2v cases still pull on a baked worker (see models.ModelServer.i2v_pipeline): the final tier
+# of an fp8 bake fetches bf16 shards, and a bake that does not hold the selected repo fetches that
+# repo from the mirror. Both are caller decisions (force=True). The baked default stays pull-free.
 BAKED_SENTINEL = ".vj-baked"
 
 
@@ -129,9 +129,9 @@ def mirror_env(env: dict | None = None) -> dict:
 
 def is_baked(env: dict | None = None) -> bool:
     """True iff the model weights are baked into the image (the BAKED_SENTINEL marker is present at
-    VJ_MODELS_ROOT). Pure: a filesystem check, no I/O beyond stat. Callers use it to skip every
-    volume/R2 path. A baked worker is datacenter-agnostic and never pulls (except B's final-tier
-    bf16 lazy-pull, which is gated on the render tier, not on this)."""
+    VJ_MODELS_ROOT). Pure: a filesystem check, no I/O beyond stat. Callers use it to skip the
+    cold-start mirror. It does not say which roles were baked. An i2v load still pulls when the
+    selected repo is absent, and on the final tier of an fp8 bake."""
     e = env if env is not None else os.environ
     models_root = Path(e.get("VJ_MODELS_ROOT", "/opt/models"))
     return (models_root / BAKED_SENTINEL).exists()
@@ -673,12 +673,11 @@ def ensure_i2v_models(*, env: dict | None = None, log: Callable[[str], None] = p
     Idempotent via its own sentinel; returns True if a pull ran, False if skipped (warm, or no R2
     creds so weights are assumed pre-provisioned). Raises on a hard failure, same as ensure_models.
 
-    `force` overrides the BAKED early-return ONLY. It exists for the one caller that has already
-    decided a pull is required despite the image being baked: the FINAL-tier B seam in
-    `models._select_i2v_weights`, which selects the bf16 repo on an fp8-baked image and needs those
-    shards fetched. Without it the guard silently swallowed the pull its own caller had asked for and
-    the load failed deep against a cache holding the other repo (#339). It does NOT override the warm
-    sentinel or the missing-creds path: those are states, not decisions.
+    `force` overrides the BAKED early-return ONLY. It exists for a caller that has already
+    decided a pull is required despite the image being baked: the final-tier bf16 seam, or a
+    baked image whose selected repo is not in the cache. Without it the guard silently swallowed
+    the pull its own caller had asked for and the load failed offline (#339). It does NOT override
+    the warm sentinel or the missing-creds path: those are states, not decisions.
     """
     global _i2v_prefetch_thread
     e = mirror_env(env)
@@ -702,8 +701,7 @@ def ensure_i2v_models(*, env: dict | None = None, log: Callable[[str], None] = p
         log(_skip_event("baked", event="i2v_mirror_skipped"))
         return False
     if is_baked(e) and force:
-        log("models_mirror: baked image, but the caller forced an i2v R2 pull (final-tier bf16 seam); "
-            "not skipping.")
+        log("models_mirror: baked image, but the caller forced an i2v R2 pull; not skipping.")
 
     # Join the background prefetch thread (if started by start_i2v_prefetch) before checking
     # the sentinel so its result is visible. If the thread failed, fall through to pull normally.

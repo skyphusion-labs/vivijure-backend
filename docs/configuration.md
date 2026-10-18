@@ -36,7 +36,7 @@ distill path is forced off, because there is nothing to cache at 4 steps).
 
 | | draft | standard | final |
 |---|---|---|---|
-| **Keyframe** | Hyper-SD 4-step, cfg 0 | Hyper-SD 8-step, cfg 0 | full 30-step, cfg 6.5 |
+| **Keyframe** | Hyper-SD 4-step, cfg 0 | full 30-step, cfg 5.0, 1280x720 | full 30-step, cfg 5.0, 1280x720 |
 | **i2v** | Lightning 4-step, cfg ~1.0, no cache | full 20-step, cfg 3.5, EasyCache | full 40-step, cfg 3.5, MixCache |
 | **Finish** | none (preview) | interpolate 2x | interpolate 2x + GFPGAN face restore |
 | **i2v GPU tier** | RTX PRO 6000 | H200 | B200 |
@@ -53,15 +53,15 @@ The SDXL keyframe stage. Fields map to diffusers SDXL parameters.
 |---|---|---|---|---|
 | `base_model` | str | RealVisXL V5.0 (`models.DEFAULT_SPECS`) | -- | SDXL checkpoint repo. |
 | `steps` | int | 30 | 1-128 | `num_inference_steps` (full path). |
-| `guidance_scale` | float | 6.5 | 0-30 | CFG. Few-step distill wants 0.0. |
+| `guidance_scale` | float | 5.0 | 0-30 | CFG. Few-step distill wants 0.0. |
 | `scheduler` | enum | `dpmpp_2m_karras` | see [Scheduler](#scheduler) | The sampler. |
-| `width` | int | 1024 | 512-2048 | Generated width (SDXL native 1024). |
-| `height` | int | 1024 | 512-2048 | Generated height. |
+| `width` | int | 1280 | 512-2048 | Generated width. Hosted still is 16:9. |
+| `height` | int | 720 | 512-2048 | Generated height. |
 | `distill` | bool | false | -- | Hyper-SD few-step path on/off. |
 | `distill_model` | str | Hyper-SD (`DEFAULT_SPECS`) | -- | The few-step LoRA repo. |
 | `distill_steps` | int | 8 | 1-8 | Hyper-SD fixed-step count. |
 | `seed` | int | 424242 | >=0 | Base RNG seed. |
-| `identity_method` | enum | `ip_adapter` | see [IdentityMethod](#identitymethod) | How a face is pinned (all shots). InstantID is still recorded; scene-lock Pass B is canny + face-crop IP-Adapter, not InstantID. |
+| `identity_method` | enum | `instantid` | see [IdentityMethod](#identitymethod) | One person. InstantID runs even when scene_lock is on, if a reference image exists. Two people stay masked IP-Adapter. |
 | `ip_adapter_scale` | float | 0.65 | 0-1 | Single-subject IP-Adapter identity pull. |
 | `instantid_controlnet_scale` | float | 0.8 | 0-1.5 | InstantID face-ControlNet (single-char upgrade). |
 | `instantid_ip_adapter_scale` | float | 0.8 | 0-1.5 | InstantID IP-Adapter (single-char upgrade). |
@@ -74,8 +74,8 @@ The SDXL keyframe stage. Fields map to diffusers SDXL parameters.
 place of explicit `width` / `height`.
 
 Tier baselines: **draft** = `distill=true, distill_steps=4, steps=4, guidance_scale=0,
-scheduler=ddim_trailing`; **standard** = the same with `distill_steps=8, steps=8`; **final** =
-`distill=false, steps=30, guidance_scale=6.5, scheduler=dpmpp_2m_karras`.
+scheduler=ddim_trailing` (the explicit few-step opt-in); **standard** and **final** =
+`distill=false, steps=30, guidance_scale=5.0, scheduler=dpmpp_2m_karras`, 1280x720.
 
 ### MultiCharConfig
 

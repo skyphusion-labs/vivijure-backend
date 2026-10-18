@@ -38,5 +38,6 @@ def test_kf_hash_distill_flag_is_not_confused_with_a_matching_step_count():
 def test_kf_hash_is_stable_for_an_unchanged_config():
     assert kf_hash(_kc()) == kf_hash(_kc())
     kc = _kc()
-    kc.identity_method = IdentityMethod.INSTANTID
+    # FINAL defaults to InstantID, so the planted change has to be a different method.
+    kc.identity_method = IdentityMethod.IP_ADAPTER
     assert kf_hash(kc) != kf_hash(_kc())
