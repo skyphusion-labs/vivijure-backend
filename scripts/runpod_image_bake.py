@@ -323,6 +323,22 @@ def pods_named(name: str, token: str) -> list[str]:
     return pods_named_detail(name, token).ids
 
 
+# A Pod response carries 34 properties and env is one of them, alongside
+# dockerStartCmd, machineId and publicIp. The matched_no_id branch fires ONLY for a
+# row whose name equals ours, so it is our own bake pod by construction, and
+# create_body puts GHCR_TOKEN in that pod's env. So the one branch guaranteed to be
+# printing our pod was printing its environment. This file had already decided the
+# question the other way for create_pod, which scrubs; pods_named_detail cannot
+# scrub even in principle, because it holds the RunPod token and not the GHCR one.
+# So the fix is not to redact a row, it is never to render one: name the fields.
+SAFE_POD_FIELDS = ("id", "name", "desiredStatus", "costPerHr", "containerDiskInGb")
+
+
+def pod_summary(row: dict) -> str:
+    """Only the allowlisted fields, so a new response field cannot leak by default."""
+    return ", ".join("%s=%r" % (k, row.get(k)) for k in SAFE_POD_FIELDS if k in row) or "no identifying fields"
+
+
 class PodLookup(NamedTuple):
     """What a pods-by-name listing actually established.
 
@@ -348,7 +364,11 @@ def pods_named_detail(name: str, token: str) -> PodLookup:
     report success. A failed listing establishes nothing about what is running.
     """
     if not name:
-        return PodLookup([], 0, 0, 0, True)
+        # Consistency with the rubric this function now applies everywhere else: a
+        # question never asked has not been answered. Doubly unreachable, since
+        # main() refuses reap with neither handle; this is the layer underneath.
+        print("refusing to list pods with an empty name", file=sys.stderr)
+        return PodLookup([], 0, 0, 0, False)
     code, payload = _request("GET", "/pods?name=%s" % urllib.parse.quote(name, safe=""), token)
     if code != 200:
         print("could not list pods named %s: HTTP %s" % (name, code), file=sys.stderr)
@@ -359,7 +379,15 @@ def pods_named_detail(name: str, token: str) -> PodLookup:
         print("pods listing for %s was not JSON" % name, file=sys.stderr)
         return PodLookup([], 0, 0, 0, False)
     if isinstance(rows, dict):
-        rows = rows.get("pods") or []
+        # This branch exists to survive a response-shape change, and reading a
+        # missing key as an empty list is the one way it would survive one by
+        # silently reporting that nothing is running. Same inversion, one body
+        # shape over, so it gets the same treatment.
+        if not isinstance(rows.get("pods"), list):
+            print("pods listing for %s was a dict with no pods list: keys %r"
+                  % (name, sorted(rows)[:10]), file=sys.stderr)
+            return PodLookup([], 0, 0, 0, False)
+        rows = rows["pods"]
     if not isinstance(rows, list):
         # A bare null, number or boolean is ordinary enough as an empty REST reply,
         # and iterating one raises TypeError. That is loud rather than silent, but
@@ -374,6 +402,10 @@ def pods_named_detail(name: str, token: str) -> PodLookup:
         if not isinstance(row, dict):
             unusable += 1
             continue
+        if not isinstance(row.get("name"), str) and row.get("id"):
+            # Nameless but addressable: worth naming so an operator can go look.
+            print("ignoring pod %r: the listing gave it no readable name"
+                  % row.get("id"), file=sys.stderr)
         row_name = row.get("name")
         if row_name == name:
             if row.get("id"):
@@ -381,8 +413,8 @@ def pods_named_detail(name: str, token: str) -> PodLookup:
             else:
                 # The pod we asked for, with no handle to terminate it by. This is
                 # the one that must not be described as a filter problem.
-                print("pod named %r came back with no usable id: %r" % (name, row),
-                      file=sys.stderr)
+                print("pod named %r came back with no usable id: %s"
+                      % (name, pod_summary(row)), file=sys.stderr)
                 matched_no_id += 1
             continue
         if not isinstance(row_name, str):

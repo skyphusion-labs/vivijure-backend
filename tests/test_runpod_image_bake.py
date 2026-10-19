@@ -619,3 +619,91 @@ def test_a_match_is_still_reaped_alongside_every_rejection_kind(monkeypatch):
     monkeypatch.setattr(bake, "terminate", lambda pid, tok: killed.append(pid) or (True, True))
     assert bake.reap_by_name("bake-99", "t") is True
     assert killed == ["mine"]
+
+
+# ------------------- never render a pod row: it carries env (strummer) -----------
+
+CANARY = "ghs_CANARY_do_not_print_me"
+FAT_ROW = {
+    "name": "bake-99", "desiredStatus": "RUNNING", "costPerHr": 0.12,
+    "containerDiskInGb": 120,
+    "env": {"GHCR_TOKEN": CANARY, "BAKE_REPO": "o/r"},
+    "dockerStartCmd": ["sh", "-c", "auth=$(printf %s:%s $GHCR_USER " + CANARY + ")"],
+    "machineId": "mach-1", "publicIp": "203.0.113.9",
+}
+
+
+def test_pod_summary_renders_only_the_allowlisted_fields():
+    """A Pod response has 34 properties. Allowlist, so a new one cannot leak by default."""
+    line = bake.pod_summary(FAT_ROW)
+    for leaky in (CANARY, "GHCR_TOKEN", "env", "machineId", "mach-1", "203.0.113.9",
+                  "dockerStartCmd"):
+        assert leaky not in line, "%r reached the summary" % leaky
+    assert "desiredStatus='RUNNING'" in line
+    assert "costPerHr=0.12" in line
+
+
+def test_the_matched_no_id_branch_never_prints_the_row(capsys):
+    """That branch fires only for a row whose name is ours, so it is always OUR pod.
+
+    create_body puts GHCR_TOKEN in that pod's env, so the one branch guaranteed to
+    be printing our own pod was printing its environment. This repo is public.
+    pods_named_detail holds the RunPod token and not the GHCR one, so it cannot
+    scrub even in principle; the fix is to render fields, never a row.
+    """
+    import json as _json
+    rows = _json.dumps([{k: v for k, v in FAT_ROW.items() if k != "id"}])
+    original = bake._request
+    bake._request = lambda m, p, t, b=None: (200, rows)
+    try:
+        assert bake.reap_by_name("bake-99", "t") is False
+    finally:
+        bake._request = original
+    captured = capsys.readouterr()
+    whole = captured.out + captured.err
+    assert "no usable id" in whole
+    for leaky in (CANARY, "GHCR_TOKEN", "machineId", "203.0.113.9"):
+        assert leaky not in whole, "%r reached an Actions log" % leaky
+
+
+def test_a_nameless_row_with_an_id_names_the_id_only(monkeypatch, capsys):
+    rows = json.dumps([dict(FAT_ROW, id="pod-xyz", name=None)])
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
+    found = bake.pods_named_detail("bake-99", "t")
+    assert found.unusable == 1
+    whole = capsys.readouterr().err
+    assert "pod-xyz" in whole
+    assert CANARY not in whole
+
+
+# --------------- the same inversion again, one body SHAPE over (strummer) --------
+
+def test_a_dict_body_with_no_pods_list_is_not_an_answer(monkeypatch):
+    """The dict branch exists to survive a shape change.
+
+    Reading a missing key as an empty list is the one way it would survive one by
+    silently reporting that nothing is running.
+    """
+    for body in ('{"items": [{"id": "a", "name": "bake-99"}]}',
+                 '{"data": []}', '{}', '{"pods": null}', '{"pods": {"a": 1}}'):
+        monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None, _b=body: (200, _b))
+        found = bake.pods_named_detail("bake-99", "t")
+        assert found.answered is False, "%s was treated as an answer" % body
+        assert bake.reap_by_name("bake-99", "t") is False
+
+
+def test_a_dict_body_with_a_real_pods_list_still_works(monkeypatch):
+    body = json.dumps({"pods": [{"id": "mine", "name": "bake-99"}]})
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, body))
+    found = bake.pods_named_detail("bake-99", "t")
+    assert (found.ids, found.answered) == (["mine"], True)
+    body = json.dumps({"pods": []})
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, body))
+    assert bake.reap_by_name("bake-99", "t") is True
+
+
+def test_an_empty_name_is_not_an_answered_question(monkeypatch):
+    """Consistency with the rubric this function now applies everywhere else."""
+    monkeypatch.setattr(bake, "_request", _no_calls)
+    found = bake.pods_named_detail("", "t")
+    assert (found.ids, found.answered) == ([], False)

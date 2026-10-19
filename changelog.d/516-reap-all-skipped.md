@@ -16,3 +16,12 @@
   no longer raises `TypeError` out of the reap. Inside `run()`'s `finally` that
   exception replaced the one that sent us there, so a create timeout was reported
   as a complaint about iteration.
+- `bake`: the reap never renders a pod row. A Pod response carries 34 properties
+  including `env`, and the branch that printed a row fires only for a row whose
+  name is ours, so it was the one branch guaranteed to print our own bake pod and
+  its `GHCR_TOKEN`. It now prints an allowlist of identifying fields, so a new
+  response property cannot leak by default.
+- `bake`: a dict listing body with no `pods` list is no longer read as an empty
+  account. That branch exists to survive a response-shape change, and reading a
+  missing key as `[]` was the one way it would survive one by reporting that
+  nothing is running.
