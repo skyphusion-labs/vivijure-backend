@@ -27,6 +27,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -215,13 +216,26 @@ MANIFEST_ACCEPT = ", ".join((
 ))
 
 
+# Validate the whole reference, do not sanitize a piece of it. The earlier version
+# tested ref.startswith("ghcr.io/") and fell through to accepting anything else,
+# so a foreign host parsed clean and its path went into a GHCR URL unescaped.
+# CodeQL flagged it as py/incomplete-url-substring-sanitization and was right.
+# This grammar is anchored at both ends and admits no dot segment, percent, query
+# or fragment, so nothing reaching the URL needs escaping. GHCR repository names
+# are lowercase, so an uppercase one is a real error and not a case to tolerate.
+REF_RE = re.compile(
+    r"^ghcr\.io/"
+    r"([a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)+)"
+    r":([A-Za-z0-9_][A-Za-z0-9._-]{0,127})$"
+)
+
+
 def split_ref(ref: str) -> tuple[str, str]:
-    """ghcr.io/owner/name:tag -> (owner/name, tag)."""
-    without_host = ref.split("/", 1)[1] if ref.startswith("ghcr.io/") else ref
-    repo, _, tag = without_host.rpartition(":")
-    if not repo or not tag or "/" in tag:
-        raise ValueError("not a ghcr.io/<repo>:<tag> reference: %r" % ref)
-    return repo, tag
+    """ghcr.io/owner/name:tag -> (owner/name, tag). Anything else is refused."""
+    match = REF_RE.match(ref or "")
+    if not match:
+        raise ValueError("not a ghcr.io/<lowercase/repo>:<tag> reference: %r" % ref)
+    return match.group(1), match.group(2)
 
 
 def ghcr_token(repo: str, token: str) -> str:

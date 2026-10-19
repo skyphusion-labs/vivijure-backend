@@ -149,13 +149,35 @@ def test_disk_cap_rejects_the_old_fat_image_size():
 def test_split_ref_reads_a_ghcr_reference():
     assert bake.split_ref("ghcr.io/skyphusion-labs/x:runtime-t1") == (
         "skyphusion-labs/x", "runtime-t1")
-    for bad in ("ghcr.io/owner/name", "notaref", "ghcr.io/o/n:a/b"):
+    assert bake.split_ref("ghcr.io/a/b/c:1-bf16-t2-99-1") == ("a/b/c", "1-bf16-t2-99-1")
+
+
+def test_split_ref_refuses_everything_that_is_not_one():
+    """The repo half goes straight into a GHCR URL path, so the grammar is the guard."""
+    bad = (
+        "ghcr.io/owner/name",                 # no tag
+        "notaref",                            # no host
+        "ghcr.io/o/n:a/b",                    # slash in the tag
+        "evil.com/o/n:t",                     # foreign host
+        "https://ghcr.io/o/n:t",              # host not at the start
+        "ghcr.io.evil.com/o/n:t",             # host is a prefix of another host
+        "x-ghcr.io/o/n:t",                    # host preceded by something
+        "ghcr.io/o/../../n:t",                # dot segments
+        "ghcr.io/o/n%2f..:t",                 # percent encoding
+        "ghcr.io/o/n:t?x=1",                  # query
+        "ghcr.io/o/n:t#f",                    # fragment
+        "ghcr.io/O/N:t",                      # uppercase repository
+        "ghcr.io/o:t",                        # no owner/name pair
+        "ghcr.io/o/n:" + "t" * 200,           # tag beyond the length cap
+        "",
+        None,
+    )
+    for ref in bad:
         try:
-            bake.split_ref(bad)
+            bake.split_ref(ref)
         except ValueError:
-            pass
-        else:
-            raise AssertionError("accepted %r" % bad)
+            continue
+        raise AssertionError("accepted %r" % (ref,))
 
 
 def test_valid_digest_is_strict():
