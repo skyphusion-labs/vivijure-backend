@@ -475,18 +475,23 @@ def test_a_scalar_pods_body_does_not_raise(monkeypatch):
     for body in ("null", "5", "true", '"a string"'):
         monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None, _b=body: (200, _b))
         assert bake.pods_named("bake-1", "t") == []
-        assert bake.pods_named_detail("bake-1", "t") == ([], 0)
+        found = bake.pods_named_detail("bake-1", "t")
+        assert found.ids == []
+        # A body we cannot read establishes nothing, so it is not an answer.
+        assert found.answered is False
 
 
 def test_an_empty_account_and_an_all_rejected_listing_are_different(monkeypatch):
     """Same shape, different facts, and only one of them can hide a billing pod."""
     monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, "[]"))
-    assert bake.pods_named_detail("bake-1", "t") == ([], 0)
+    empty = bake.pods_named_detail("bake-1", "t")
+    assert (empty.ids, empty.mismatched, empty.answered) == ([], 0, True)
     assert bake.reap_by_name("bake-1", "t") is True
 
     rows = json.dumps([{"id": "a", "name": "bake-1-x"}, {"id": "b", "name": "other"}])
     monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
-    assert bake.pods_named_detail("bake-1", "t") == ([], 2)
+    all_rejected = bake.pods_named_detail("bake-1", "t")
+    assert (all_rejected.ids, all_rejected.mismatched, all_rejected.answered) == ([], 2, True)
     assert bake.reap_by_name("bake-1", "t") is False, (
         "rows returned and every one rejected must not report success")
 
@@ -515,7 +520,102 @@ def test_a_match_alongside_rejected_rows_still_reaps_the_match(monkeypatch):
     assert killed == ["mine"]
 
 
-def test_rejected_rows_count_the_malformed_ones_too(monkeypatch):
-    rows = json.dumps(["bare string", None, {"name": "bake-1"}, {"id": None, "name": "bake-1"}])
+def test_each_rejection_reason_is_counted_separately(monkeypatch):
+    """One counter made four facts share one sentence, and one of them was false.
+
+    A row whose name MATCHES but carries no id is not a filter problem: the pod we
+    asked for came back and we cannot address it. It gets its own field and its own
+    message, because it leads to a different action than the others.
+    """
+    rows = json.dumps([
+        "bare string",                      # unreadable row
+        None,                               # unreadable row
+        {"id": "x"},                        # an id but no name: assert no cause
+        {"id": "y", "name": 7},             # a non-string name: assert no cause
+        {"id": "z", "name": "other"},       # a real different name: filter not exact
+        {"name": "bake-1"},                 # OURS, no id
+        {"id": None, "name": "bake-1"},     # OURS, unusable id
+    ])
     monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
-    assert bake.pods_named_detail("bake-1", "t") == ([], 4)
+    found = bake.pods_named_detail("bake-1", "t")
+    assert found.ids == []
+    assert found.mismatched == 1
+    assert found.matched_no_id == 2
+    assert found.unusable == 4
+    assert found.answered is True
+
+
+# ------------- the same inversion, one branch over: an unlistable account ---------
+
+def test_a_failed_listing_is_not_a_successful_reap(monkeypatch, capsys):
+    """"No pod is running" is a conclusion a failed listing cannot produce.
+
+    This is the likelier of the two unanswerable cases: a 429 or 5xx on a list
+    endpoint is ordinary, while a non-exact server filter is the unlikely case the
+    spec argues against. Before this, a 503 returned True and printed that nothing
+    was running, and the whole suite permitted either policy.
+    """
+    for code in (401, 403, 429, 500, 502, 503):
+        monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None, _c=code: (_c, "err"))
+        found = bake.pods_named_detail("bake-99", "t")
+        assert found.answered is False, "HTTP %s was treated as an answer" % code
+        assert bake.reap_by_name("bake-99", "t") is False, (
+            "HTTP %s reported a successful reap" % code)
+    out = capsys.readouterr().out
+    assert "::warning::" in out
+    assert "no pod named" not in out, "printed a conclusion the listing cannot support"
+
+
+def test_an_unlistable_account_and_an_empty_one_are_different(monkeypatch):
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, "[]"))
+    assert bake.reap_by_name("bake-99", "t") is True
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (503, "boom"))
+    assert bake.reap_by_name("bake-99", "t") is False
+
+
+def test_a_non_json_listing_is_not_an_answer(monkeypatch):
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, "<html>nope"))
+    assert bake.pods_named_detail("bake-99", "t").answered is False
+    assert bake.reap_by_name("bake-99", "t") is False
+
+
+def test_our_pod_with_no_id_does_not_blame_the_name_filter(monkeypatch, capsys):
+    """The one case where the old single message was actively false."""
+    rows = json.dumps([{"name": "bake-99"}])
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
+    assert bake.reap_by_name("bake-99", "t") is False
+    out = capsys.readouterr().out
+    assert "no usable id" in out
+    assert "not exact" not in out, "blamed the filter for an unaddressable pod"
+
+
+def test_a_different_name_is_reported_as_the_filter_measurement(monkeypatch, capsys):
+    rows = json.dumps([{"id": "z", "name": "bake-99-decorated"}])
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
+    assert bake.reap_by_name("bake-99", "t") is False
+    out = capsys.readouterr().out
+    assert "not exact" in out
+    assert "no usable id" not in out
+
+
+def test_an_unreadable_row_asserts_no_cause(monkeypatch, capsys):
+    rows = json.dumps(["junk", {"id": "x"}])
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
+    assert bake.reap_by_name("bake-99", "t") is False
+    out = capsys.readouterr().out
+    assert "could not be read" in out
+    assert "not exact" not in out
+    assert "no usable id" not in out
+
+
+def test_a_match_is_still_reaped_alongside_every_rejection_kind(monkeypatch):
+    """Narrowing must not narrow to nothing: the right pod still gets reaped."""
+    killed = []
+    rows = json.dumps([
+        "junk", {"id": "x"}, {"id": "z", "name": "other"},
+        {"name": "bake-99"}, {"id": "mine", "name": "bake-99"},
+    ])
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
+    monkeypatch.setattr(bake, "terminate", lambda pid, tok: killed.append(pid) or (True, True))
+    assert bake.reap_by_name("bake-99", "t") is True
+    assert killed == ["mine"]

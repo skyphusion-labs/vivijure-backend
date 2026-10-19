@@ -33,6 +33,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import NamedTuple
 
 # v1 is the live REST base. https://rest.runpod.io/v2/... is not an API path: it
 # 301-redirects to the docs site, so every call failed before a pod was created.
@@ -319,27 +320,44 @@ def pods_named(name: str, token: str) -> list[str]:
     An empty name would list the account, so it returns nothing rather than
     everything. main() refuses that case too; this is the layer underneath.
     """
-    return pods_named_detail(name, token)[0]
+    return pods_named_detail(name, token).ids
 
 
-def pods_named_detail(name: str, token: str) -> tuple[list[str], int]:
-    """(matching ids, rows rejected by the name check).
+class PodLookup(NamedTuple):
+    """What a pods-by-name listing actually established.
 
-    The rejected count is not bookkeeping. "No pod is running" and "pods came back
-    and the name check rejected every one" are different facts with the same shape,
-    and only the second one can hide a billing orphan, so the caller has to be able
-    to tell them apart.
+    One rejected count made four different facts print one sentence, and in one
+    reachable case that sentence was false, so each fact that leads to a different
+    operator action gets its own field and its own message. A message must not
+    assert a cause the data cannot support.
+    """
+
+    ids: list[str]
+    mismatched: int      # a real, different string name: the server filter is not exact
+    matched_no_id: int   # OUR name came back with no usable id: we cannot address it
+    unusable: int        # unreadable row, or no name to read: assert no cause
+    answered: bool       # the listing call itself succeeded
+
+
+def pods_named_detail(name: str, token: str) -> PodLookup:
+    """Ask for pods by name and report what the answer can and cannot establish.
+
+    "Nothing is running", "pods came back and none matched" and "we could not list
+    at all" are three different facts with the same shape. Two of them mean we
+    cannot say whether an orphan is billing, and the third is the only one that may
+    report success. A failed listing establishes nothing about what is running.
     """
     if not name:
-        return [], 0
+        return PodLookup([], 0, 0, 0, True)
     code, payload = _request("GET", "/pods?name=%s" % urllib.parse.quote(name, safe=""), token)
     if code != 200:
         print("could not list pods named %s: HTTP %s" % (name, code), file=sys.stderr)
-        return [], 0
+        return PodLookup([], 0, 0, 0, False)
     try:
         rows = json.loads(payload)
     except json.JSONDecodeError:
-        return [], 0
+        print("pods listing for %s was not JSON" % name, file=sys.stderr)
+        return PodLookup([], 0, 0, 0, False)
     if isinstance(rows, dict):
         rows = rows.get("pods") or []
     if not isinstance(rows, list):
@@ -349,20 +367,32 @@ def pods_named_detail(name: str, token: str) -> tuple[list[str], int]:
         # create timeout would be reported as a complaint about iteration.
         print("pods listing for %s was not a list: %r" % (name, type(rows).__name__),
               file=sys.stderr)
-        return [], 0
-    ids = []
-    rejected = 0
+        return PodLookup([], 0, 0, 0, False)
+    ids: list[str] = []
+    mismatched = matched_no_id = unusable = 0
     for row in rows:
-        if not isinstance(row, dict) or not row.get("id"):
-            rejected += 1
+        if not isinstance(row, dict):
+            unusable += 1
             continue
-        if row.get("name") != name:
-            print("ignoring pod %s: its name is %r, not %r"
-                  % (row.get("id"), row.get("name"), name), file=sys.stderr)
-            rejected += 1
+        row_name = row.get("name")
+        if row_name == name:
+            if row.get("id"):
+                ids.append(str(row["id"]))
+            else:
+                # The pod we asked for, with no handle to terminate it by. This is
+                # the one that must not be described as a filter problem.
+                print("pod named %r came back with no usable id: %r" % (name, row),
+                      file=sys.stderr)
+                matched_no_id += 1
             continue
-        ids.append(str(row["id"]))
-    return ids, rejected
+        if not isinstance(row_name, str):
+            # No name to read, so nothing can be concluded about the server's filter.
+            unusable += 1
+            continue
+        print("ignoring pod %s: its name is %r, not %r"
+              % (row.get("id"), row_name, name), file=sys.stderr)
+        mismatched += 1
+    return PodLookup(ids, mismatched, matched_no_id, unusable, True)
 
 
 def reap_by_name(name: str, token: str) -> bool:
@@ -377,32 +407,50 @@ def reap_by_name(name: str, token: str) -> bool:
     name and therefore cleans it up. Adding the attempt would lose that. With the
     name checked client side, the set reaped is exactly "pods named bake-<run id>".
     """
-    ids, rejected = pods_named_detail(name, token)
-    if not ids and rejected:
-        # The one case where the strict name check is WORSE than the loose one it
-        # replaced: if the server's filter is not exact, or RunPod ever decorates the
-        # name it stores, the orphan comes back under a name that fails the check,
-        # every row is skipped, and reporting success would leave it billing.
-        #
-        # It is also a free measurement. Rows coming back and every one being
-        # rejected can only happen if that filter is not exact, which is the question
-        # a live read could not settle without renting a second pod. So the first real
-        # dispatch that trips this IS the experiment. Say so loudly and fail: an
-        # unconfirmed reap on a billable resource is not a success.
-        print("::warning::%d pod(s) came back for name %s and the name check rejected "
-              "every one. Either nothing is running under that exact name, or the "
-              "server's name filter is not exact. Check the account for an orphan."
-              % (rejected, name))
+    found = pods_named_detail(name, token)
+    ids = found.ids
+
+    # Each of these says what it can establish and nothing more. They are not
+    # exclusive, so every applicable one is emitted before the verdict.
+    if not found.answered:
+        # The likelier of the two unanswerable cases: a 429 or a 5xx on a list
+        # endpoint is ordinary, while a non-exact server filter is the unlikely case
+        # the spec argues against. "No pod is running" is a conclusion a failed
+        # listing cannot produce, so it is not printed here.
+        print("::warning::could not list pods named %s, so whether an orphan is "
+              "billing is unknown. Check the account." % name)
+    if found.matched_no_id:
+        print("::warning::%d pod(s) named %s came back with no usable id, so they "
+              "cannot be terminated from here. This is not a name-filter problem: "
+              "the pod we asked for arrived unaddressable. Check the account."
+              % (found.matched_no_id, name))
+    if found.mismatched:
+        # The free measurement. A row with a real, different name can only come back
+        # if the server's name filter is not exact, which is the question a live read
+        # could not settle without renting a second pod, so the first dispatch that
+        # trips this IS the experiment.
+        print("::warning::%d pod(s) came back for name %s under a DIFFERENT name, so "
+              "the server's name filter is not exact. The strict check here is what "
+              "stopped them being terminated; re-read that assumption."
+              % (found.mismatched, name))
+    if found.unusable:
+        print("::warning::%d row(s) in the listing for %s could not be read, so no "
+              "conclusion is drawn from them." % (found.unusable, name))
+
+    if ids:
+        ok = True
+        for pod_id in ids:
+            print("::warning::reaping pod %s found by name %s" % (pod_id, name))
+            accepted, gone = terminate(pod_id, token)
+            ok = ok and accepted and gone
+        return ok
+    if not found.answered or found.mismatched or found.matched_no_id or found.unusable:
+        # An unconfirmed reap of a billable resource is not a success. This is the
+        # same contract the id path already has, where reap returns 0 only when the
+        # pod reads back gone.
         return False
-    if not ids:
-        print("no pod named %s is running" % name)
-        return True
-    ok = True
-    for pod_id in ids:
-        print("::warning::reaping pod %s found by name %s" % (pod_id, name))
-        accepted, gone = terminate(pod_id, token)
-        ok = ok and accepted and gone
-    return ok
+    print("no pod named %s is running" % name)
+    return True
 
 
 def terminate(pod_id: str, token: str) -> tuple[bool, bool]:
