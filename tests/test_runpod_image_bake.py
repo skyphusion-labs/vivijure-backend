@@ -461,3 +461,61 @@ def test_reap_needs_one_of_the_two_handles():
         assert exc.code != 0
     else:
         raise AssertionError("reap ran with neither an id nor a name")
+
+
+# ------------------------------- the two-state collapse behind the reap (strummer)
+
+def test_a_scalar_pods_body_does_not_raise(monkeypatch):
+    """A bare null, number or boolean is an ordinary empty REST reply.
+
+    Iterating one raises TypeError inside run()'s finally, which REPLACES the
+    exception that sent us there, so a create timeout gets reported as a complaint
+    about iteration.
+    """
+    for body in ("null", "5", "true", '"a string"'):
+        monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None, _b=body: (200, _b))
+        assert bake.pods_named("bake-1", "t") == []
+        assert bake.pods_named_detail("bake-1", "t") == ([], 0)
+
+
+def test_an_empty_account_and_an_all_rejected_listing_are_different(monkeypatch):
+    """Same shape, different facts, and only one of them can hide a billing pod."""
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, "[]"))
+    assert bake.pods_named_detail("bake-1", "t") == ([], 0)
+    assert bake.reap_by_name("bake-1", "t") is True
+
+    rows = json.dumps([{"id": "a", "name": "bake-1-x"}, {"id": "b", "name": "other"}])
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
+    assert bake.pods_named_detail("bake-1", "t") == ([], 2)
+    assert bake.reap_by_name("bake-1", "t") is False, (
+        "rows returned and every one rejected must not report success")
+
+
+def test_all_rejected_is_annotated_as_the_measurement_it_is(monkeypatch, capsys):
+    """Rows back and all rejected can only happen if the server filter is not exact.
+
+    That is the question a live read could not settle without renting a second pod,
+    so the first dispatch that trips this is the experiment. It must not be silent.
+    """
+    rows = json.dumps([{"id": "a", "name": "bake-1-decorated"}])
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
+    bake.reap_by_name("bake-1", "t")
+    out = capsys.readouterr()
+    assert "::warning::" in out.out
+    assert "not exact" in out.out
+
+
+def test_a_match_alongside_rejected_rows_still_reaps_the_match(monkeypatch):
+    """Rejecting the wrong pods must never stop the right one being reaped."""
+    killed = []
+    rows = json.dumps([{"id": "wrong", "name": "bake-1-x"}, {"id": "mine", "name": "bake-1"}])
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
+    monkeypatch.setattr(bake, "terminate", lambda pid, tok: killed.append(pid) or (True, True))
+    assert bake.reap_by_name("bake-1", "t") is True
+    assert killed == ["mine"]
+
+
+def test_rejected_rows_count_the_malformed_ones_too(monkeypatch):
+    rows = json.dumps(["bare string", None, {"name": "bake-1"}, {"id": None, "name": "bake-1"}])
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
+    assert bake.pods_named_detail("bake-1", "t") == ([], 4)

@@ -319,28 +319,50 @@ def pods_named(name: str, token: str) -> list[str]:
     An empty name would list the account, so it returns nothing rather than
     everything. main() refuses that case too; this is the layer underneath.
     """
+    return pods_named_detail(name, token)[0]
+
+
+def pods_named_detail(name: str, token: str) -> tuple[list[str], int]:
+    """(matching ids, rows rejected by the name check).
+
+    The rejected count is not bookkeeping. "No pod is running" and "pods came back
+    and the name check rejected every one" are different facts with the same shape,
+    and only the second one can hide a billing orphan, so the caller has to be able
+    to tell them apart.
+    """
     if not name:
-        return []
+        return [], 0
     code, payload = _request("GET", "/pods?name=%s" % urllib.parse.quote(name, safe=""), token)
     if code != 200:
         print("could not list pods named %s: HTTP %s" % (name, code), file=sys.stderr)
-        return []
+        return [], 0
     try:
         rows = json.loads(payload)
     except json.JSONDecodeError:
-        return []
+        return [], 0
     if isinstance(rows, dict):
         rows = rows.get("pods") or []
+    if not isinstance(rows, list):
+        # A bare null, number or boolean is ordinary enough as an empty REST reply,
+        # and iterating one raises TypeError. That is loud rather than silent, but
+        # inside run()'s finally it REPLACES the exception that sent us there, so a
+        # create timeout would be reported as a complaint about iteration.
+        print("pods listing for %s was not a list: %r" % (name, type(rows).__name__),
+              file=sys.stderr)
+        return [], 0
     ids = []
+    rejected = 0
     for row in rows:
         if not isinstance(row, dict) or not row.get("id"):
+            rejected += 1
             continue
         if row.get("name") != name:
             print("ignoring pod %s: its name is %r, not %r"
                   % (row.get("id"), row.get("name"), name), file=sys.stderr)
+            rejected += 1
             continue
         ids.append(str(row["id"]))
-    return ids
+    return ids, rejected
 
 
 def reap_by_name(name: str, token: str) -> bool:
@@ -355,7 +377,23 @@ def reap_by_name(name: str, token: str) -> bool:
     name and therefore cleans it up. Adding the attempt would lose that. With the
     name checked client side, the set reaped is exactly "pods named bake-<run id>".
     """
-    ids = pods_named(name, token)
+    ids, rejected = pods_named_detail(name, token)
+    if not ids and rejected:
+        # The one case where the strict name check is WORSE than the loose one it
+        # replaced: if the server's filter is not exact, or RunPod ever decorates the
+        # name it stores, the orphan comes back under a name that fails the check,
+        # every row is skipped, and reporting success would leave it billing.
+        #
+        # It is also a free measurement. Rows coming back and every one being
+        # rejected can only happen if that filter is not exact, which is the question
+        # a live read could not settle without renting a second pod. So the first real
+        # dispatch that trips this IS the experiment. Say so loudly and fail: an
+        # unconfirmed reap on a billable resource is not a success.
+        print("::warning::%d pod(s) came back for name %s and the name check rejected "
+              "every one. Either nothing is running under that exact name, or the "
+              "server's name filter is not exact. Check the account for an orphan."
+              % (rejected, name))
+        return False
     if not ids:
         print("no pod named %s is running" % name)
         return True
