@@ -303,7 +303,22 @@ def ghcr_digest_final(ref: str, token: str, attempts: int = 5) -> tuple[str | No
 # ------------------------------------------------------------------------- pods
 
 def pods_named(name: str, token: str) -> list[str]:
-    """Pod ids carrying this exact name. GET /pods?name= returns a bare array."""
+    """Pod ids whose OWN name equals this one. GET /pods?name= returns a bare array.
+
+    The server's filter is asked for and then not trusted, because this feeds the
+    only destructive call in the script and a query parameter decides its blast
+    radius. The live spec calls the parameter "Filter to Pods with the provided
+    name", which reads as exact, and it is almost certainly implemented that way.
+    But a 200 with an empty array cannot tell exact matching apart from the
+    parameter being ignored when the account holds no other pod, which is the only
+    state it has been observed in. So the check that CAN be made locally is made
+    locally: every row carries its own name, and comparing it rules out prefix
+    matching, substring matching and an ignored parameter at once, now and after
+    any change to how the server behaves.
+
+    An empty name would list the account, so it returns nothing rather than
+    everything. main() refuses that case too; this is the layer underneath.
+    """
     if not name:
         return []
     code, payload = _request("GET", "/pods?name=%s" % urllib.parse.quote(name, safe=""), token)
@@ -316,7 +331,16 @@ def pods_named(name: str, token: str) -> list[str]:
         return []
     if isinstance(rows, dict):
         rows = rows.get("pods") or []
-    return [str(r.get("id")) for r in rows if isinstance(r, dict) and r.get("id")]
+    ids = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        if row.get("name") != name:
+            print("ignoring pod %s: its name is %r, not %r"
+                  % (row.get("id"), row.get("name"), name), file=sys.stderr)
+            continue
+        ids.append(str(row["id"]))
+    return ids
 
 
 def reap_by_name(name: str, token: str) -> bool:
@@ -325,6 +349,11 @@ def reap_by_name(name: str, token: str) -> bool:
     A create can leave a pod running whose id never reached us: the POST can time
     out or raise after RunPod has made the pod. The NAME is ours and is known before
     the call, so it is the only handle that cannot be outrun by the thing it backs up.
+
+    The name is bake-<run id> and carries no attempt number, so it is NOT unique per
+    attempt, and that is deliberate: a re-run after a dead runner shares the orphan's
+    name and therefore cleans it up. Adding the attempt would lose that. With the
+    name checked client side, the set reaped is exactly "pods named bake-<run id>".
     """
     ids = pods_named(name, token)
     if not ids:

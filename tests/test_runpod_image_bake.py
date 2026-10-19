@@ -395,8 +395,39 @@ def test_ghcr_digest_final_says_it_could_not_tell(monkeypatch):
 def test_pods_named_parses_a_bare_array(monkeypatch):
     """GET /pods returns a bare array, not an object with a pods key."""
     monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (
-        200, json.dumps([{"id": "a1"}, {"id": "b2"}, {"noid": 1}])))
+        200, json.dumps([{"id": "a1", "name": "bake-1"},
+                         {"id": "b2", "name": "bake-1"},
+                         {"noid": 1}])))
     assert bake.pods_named("bake-1", "t") == ["a1", "b2"]
+
+
+def test_pods_named_checks_each_row_name_itself(monkeypatch):
+    """This feeds the only destructive call, so the server's filter is not trusted.
+
+    A 200 with an empty array cannot distinguish exact matching from the parameter
+    being ignored while the account holds no other pod. Each of these is a server
+    behaviour consistent with what has actually been observed live.
+    """
+    rows = [
+        {"id": "mine", "name": "bake-99"},
+        {"id": "longer-run-id", "name": "bake-991"},        # prefix match
+        {"id": "contains", "name": "x-bake-99-y"},          # substring match
+        {"id": "someone-elses", "name": "nightly-train"},   # parameter ignored
+        {"id": "no-name-field"},
+    ]
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, json.dumps(rows)))
+    assert bake.pods_named("bake-99", "t") == ["mine"]
+
+
+def test_pods_named_refuses_an_empty_name(monkeypatch):
+    """name is required:false upstream, so an empty value would list the account.
+
+    main() rejects reap with neither handle, so this is the layer underneath it and
+    is unreachable today. The test exists so a refactor of main() cannot quietly
+    remove the floor without anything going red.
+    """
+    monkeypatch.setattr(bake, "_request", _no_calls)
+    assert bake.pods_named("", "t") == []
 
 
 def test_pods_named_is_empty_on_a_non_200(monkeypatch):
