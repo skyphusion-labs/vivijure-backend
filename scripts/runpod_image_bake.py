@@ -2,39 +2,61 @@
 """Rent one RunPod CPU pod, build one image, push it to GHCR, then terminate the pod.
 
 The pod is a public kaniko debug image. It downloads this public repo at one
-commit, builds the Dockerfile, and pushes to GHCR. There is no network volume
-and no host disk, so terminate drops the container disk and the bill stops.
+commit, builds the Dockerfile, and pushes to GHCR. No volume is attached, so
+terminate drops the container disk and the bill stops.
 
 cpu3c, 4 vCPU, secure cloud. Catalog price read 2026-10-19: $0.03 per vCPU
 per hour, so $0.12 per hour of compute. The create response cost is printed.
 Container disk is extra and ends when the pod is terminated.
 
-This file does not start a pod unless you pass run. plan prints the request
-with the registry token removed.
+HOW SUCCESS IS READ. The runner cannot read pod stdout: the REST API has no
+logs endpoint (checked against the live OpenAPI document, 2026-10-19; there is
+no /pods/{id}/logs and no logs path at all). So the bake is judged by the thing
+it is supposed to produce. Each run pushes an immutable tag carrying the run id,
+and this script polls GHCR for that tag. The digest it reports is the digest the
+registry holds, which is the value being pinned. A log line would have been a
+claim about the artifact; this is the artifact.
+
+This file does not start a pod unless you pass run or selftest. plan prints the
+request with the registry token removed.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
-API = "https://rest.runpod.io/v2"
+# v1 is the live REST base. https://rest.runpod.io/v2/... is not an API path: it
+# 301-redirects to the docs site, so every call failed before a pod was created.
+# Measured 2026-10-19: GET /v1/pods is 200, GET /v2/pods is 301 to docs.runpod.io.
+API = "https://rest.runpod.io/v1"
+GHCR = "https://ghcr.io"
+
+# urllib sends "Python-urllib/3.x" by default and the RunPod edge answers that UA
+# with a Cloudflare 1010, "browser_signature_banned". Measured 2026-10-19 with one
+# variable changed: UA Python-urllib/3.13 got 403, curl/8.7.1 and this string both
+# got 200 on the same GET with the same key. Name the client; do not drop this header.
+USER_AGENT = "vivijure-image-bake/1 (+https://github.com/skyphusion-labs/vivijure-backend)"
+
 BUILDER_IMAGE = "gcr.io/kaniko-project/executor:v1.23.2-debug"
 CPU_ID = "cpu3c"
 VCPU_COUNT = 4
 DISK_MIN = 20
 DISK_MAX = 160
 DIGEST_PREFIX = "sha256:"
+DEAD_STATES = ("EXITED", "TERMINATED", "ERROR", "DEAD")
 
 # Busybox sh inside the kaniko debug image. No bash. The registry token stays
-# in the environment and in the docker config file. It is not echoed.
+# in the environment and in the docker config file. It is not echoed. The final
+# line is for a human reading the pod console; nothing in CI depends on it.
 POD_SCRIPT = r"""set -eu
-trap 'echo BAKE_FAIL' EXIT
 mkdir -p /workspace /kaniko/.docker
 auth=$(printf '%s:%s' "$GHCR_USER" "$GHCR_TOKEN" | base64 | tr -d '\n')
 printf '%s\n' "{\"auths\":{\"ghcr.io\":{\"auth\":\"${auth}\"}}}" > /kaniko/.docker/config.json
@@ -63,9 +85,11 @@ case "$digest" in
   sha256:*) ;;
   *) echo "BAKE_FAIL bad digest file"; exit 1 ;;
 esac
-trap - EXIT
 printf 'BAKE_OK digest=%s\n' "$digest"
 """
+
+SELFTEST_SCRIPT = "set -eu\necho selftest pod is up\nsleep 60\n"
+SELFTEST_IMAGE = "busybox:1.37"
 
 
 def disk_gb(value: str) -> int:
@@ -79,6 +103,31 @@ def disk_gb(value: str) -> int:
     return n
 
 
+def _cpu_pod(name: str, image: str, disk: int, vcpus: int, script: str, env: dict) -> dict:
+    """A CPU pod body in live v1 field names.
+
+    computeType is not optional in practice. Nothing in this schema is required,
+    and computeType defaults to GPU, so an incomplete body does not fail: it
+    rents a GPU pod. Measured 2026-10-19, a body of only {"name": ...} created a
+    $2.49 per hour GPU pod. volumeInGb defaults to 20, which is a billed pod
+    volume, so it is pinned to 0 to keep the claim that terminate ends the bill.
+    """
+    return {
+        "name": name,
+        "computeType": "CPU",
+        "cloudType": "SECURE",
+        "cpuFlavorIds": [CPU_ID],
+        "vcpuCount": vcpus,
+        "imageName": image,
+        "containerDiskInGb": disk,
+        "volumeInGb": 0,
+        "dockerEntrypoint": ["/bin/sh", "-c"],
+        "dockerStartCmd": [script],
+        "env": env,
+        "ports": [],
+    }
+
+
 def create_body(args: argparse.Namespace) -> dict:
     env = {
         "BAKE_REPO": args.repo,
@@ -90,86 +139,193 @@ def create_body(args: argparse.Namespace) -> dict:
         "GHCR_USER": args.ghcr_user,
         "GHCR_TOKEN": args.ghcr_token,
     }
-    return {
-        "name": args.name,
-        "cloud": "SECURE",
-        "cpu": {"id": CPU_ID, "vcpuCount": VCPU_COUNT},
-        "image": BUILDER_IMAGE,
-        "disk": args.disk_gb,
-        "args": json.dumps({"entrypoint": ["/busybox/sh", "-c"], "cmd": [POD_SCRIPT]}),
-        "env": env,
-        "ports": [],
-    }
+    body = _cpu_pod(
+        args.name, BUILDER_IMAGE, args.disk_gb or DISK_MIN, VCPU_COUNT, POD_SCRIPT, env
+    )
+    # The kaniko debug image carries busybox sh at this path, not /bin/sh.
+    body["dockerEntrypoint"] = ["/busybox/sh", "-c"]
+    return body
+
+
+def selftest_body(name: str) -> dict:
+    return _cpu_pod(name, SELFTEST_IMAGE, DISK_MIN, 2, SELFTEST_SCRIPT, {})
 
 
 def public_view(body: dict) -> dict:
     shown = json.loads(json.dumps(body))
-    token = shown.get("env", {}).get("GHCR_TOKEN")
-    if token:
+    if shown.get("env", {}).get("GHCR_TOKEN"):
         shown["env"]["GHCR_TOKEN"] = "SET"
     return shown
 
 
-def marker(text: str) -> str | None:
-    """Return a sha256 digest, the string FAIL, or None when the bake is still going."""
-    found = None
-    for line in text.splitlines():
-        line = line.strip()
-        if line == "BAKE_FAIL" or line.startswith("BAKE_FAIL "):
-            return "FAIL"
-        prefix = "BAKE_OK digest="
-        if line.startswith(prefix):
-            digest = line[len(prefix):].strip()
-            if digest.startswith(DIGEST_PREFIX) and len(digest) == len(DIGEST_PREFIX) + 64:
-                if all(c in "0123456789abcdef" for c in digest[len(DIGEST_PREFIX):]):
-                    found = digest
-    return found
+def scrub(text: str, *secrets: str) -> str:
+    for secret in secrets:
+        if secret and len(secret) > 7:
+            text = text.replace(secret, "<REDACTED>")
+    return text
+
+
+def valid_digest(value: str) -> bool:
+    if not value.startswith(DIGEST_PREFIX):
+        return False
+    body = value[len(DIGEST_PREFIX):]
+    return len(body) == 64 and all(c in "0123456789abcdef" for c in body)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect. These APIs do not redirect, so one means a wrong path."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _http(method: str, url: str, headers: dict, body: dict | None = None):
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with _OPENER.open(req, timeout=60) as resp:
+            return resp.status, resp.read().decode("utf-8", "replace"), dict(resp.headers)
+    except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            return exc.code, "redirect to %s (wrong path: these APIs do not redirect)" % (
+                exc.headers.get("location", "?")), dict(exc.headers)
+        return exc.code, exc.read().decode("utf-8", "replace"), dict(exc.headers)
 
 
 def _request(method: str, path: str, token: str, body: dict | None = None) -> tuple[int, str]:
-    data = None if body is None else json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        API + path,
-        data=data,
-        method=method,
-        headers={
-            "Authorization": "Bearer " + token,
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            return resp.status, resp.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode("utf-8", "replace")
+    status, text, _headers = _http(method, API + path, {
+        "Authorization": "Bearer " + token,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
+    }, body)
+    return status, text
 
 
-def _logs_text(raw: str) -> str:
-    raw = raw.strip()
-    if not raw:
+# --------------------------------------------------------------------- registry
+
+MANIFEST_ACCEPT = ", ".join((
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+))
+
+
+def split_ref(ref: str) -> tuple[str, str]:
+    """ghcr.io/owner/name:tag -> (owner/name, tag)."""
+    without_host = ref.split("/", 1)[1] if ref.startswith("ghcr.io/") else ref
+    repo, _, tag = without_host.rpartition(":")
+    if not repo or not tag or "/" in tag:
+        raise ValueError("not a ghcr.io/<repo>:<tag> reference: %r" % ref)
+    return repo, tag
+
+
+def ghcr_token(repo: str, token: str) -> str:
+    """A pull token for one repository. Anonymous when no job token is supplied."""
+    url = "%s/token?%s" % (GHCR, urllib.parse.urlencode({
+        "service": "ghcr.io", "scope": "repository:%s:pull" % repo}))
+    headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
+    if token:
+        basic = base64.b64encode(("x:" + token).encode()).decode()
+        headers["Authorization"] = "Basic " + basic
+    status, text, _h = _http("GET", url, headers)
+    if status != 200:
         return ""
     try:
-        parsed = json.loads(raw)
+        return str(json.loads(text).get("token") or "")
     except json.JSONDecodeError:
-        return raw
-    if isinstance(parsed, str):
-        return parsed
-    if isinstance(parsed, dict):
-        for key in ("logs", "log", "output", "text"):
-            value = parsed.get(key)
-            if isinstance(value, str):
-                return value
-        return json.dumps(parsed)
-    if isinstance(parsed, list):
-        parts = []
-        for item in parsed:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                parts.append(str(item.get("message") or item.get("log") or item))
-        return "\n".join(parts)
-    return raw
+        return ""
+
+
+def ghcr_digest(ref: str, token: str) -> str | None:
+    """The digest GHCR holds for a tag, or None when the tag is not there yet."""
+    repo, tag = split_ref(ref)
+    bearer = ghcr_token(repo, token)
+    headers = {"Accept": MANIFEST_ACCEPT, "User-Agent": USER_AGENT}
+    if bearer:
+        headers["Authorization"] = "Bearer " + bearer
+    status, _text, resp_headers = _http(
+        "HEAD", "%s/v2/%s/manifests/%s" % (GHCR, repo, tag), headers)
+    if status != 200:
+        return None
+    digest = ""
+    for key, value in resp_headers.items():
+        if key.lower() == "docker-content-digest":
+            digest = value.strip()
+            break
+    return digest if valid_digest(digest) else None
+
+
+# ------------------------------------------------------------------------- pods
+
+def terminate(pod_id: str, token: str) -> tuple[bool, bool]:
+    """Terminate one pod. Returns (delete_accepted, gone_confirmed).
+
+    The DELETE response is not proof. Only a 404 or a TERMINATED status is.
+    Verification failing is a warning, never a reason to fail a good bake:
+    failing one would also skip the repin, which throws the paid result away.
+    """
+    code, payload = _request("DELETE", "/pods/%s" % pod_id, token)
+    print("terminate pod id=%s HTTP %s" % (pod_id, code))
+    accepted = code in (200, 202, 204, 404)
+    if not accepted:
+        print(scrub(payload, token)[:300], file=sys.stderr)
+    for _ in range(6):
+        code, payload = _request("GET", "/pods/%s" % pod_id, token)
+        if code == 404:
+            print("pod %s is gone" % pod_id)
+            return accepted, True
+        if code == 200:
+            try:
+                state = json.loads(payload).get("desiredStatus")
+            except json.JSONDecodeError:
+                state = None
+            if state == "TERMINATED":
+                print("pod %s desiredStatus=TERMINATED" % pod_id)
+                return accepted, True
+        time.sleep(5)
+    print("::warning::pod %s did not read back as gone. Check it." % pod_id)
+    return accepted, False
+
+
+def pod_state(pod_id: str, token: str) -> str | None:
+    code, payload = _request("GET", "/pods/%s" % pod_id, token)
+    if code == 404:
+        return "TERMINATED"
+    if code != 200:
+        return None
+    try:
+        return json.loads(payload).get("desiredStatus")
+    except json.JSONDecodeError:
+        return None
+
+
+def create_pod(body: dict, token: str, secrets: tuple[str, ...]) -> str | None:
+    status, raw = _request("POST", "/pods", token, body)
+    if status not in (200, 201):
+        # A validation error echoes the request, and the request carries
+        # GHCR_TOKEN. Actions logs on a public repo are public, so scrub the
+        # body rather than printing it raw or withholding it entirely.
+        print("create pod failed: HTTP %s" % status, file=sys.stderr)
+        print(scrub(raw, *secrets)[:600], file=sys.stderr)
+        return None
+    try:
+        created = json.loads(raw)
+    except json.JSONDecodeError:
+        print("create pod returned a body that is not JSON", file=sys.stderr)
+        return None
+    pod_id = str(created.get("id") or "")
+    if not pod_id:
+        print("create pod returned no id", file=sys.stderr)
+        return None
+    print("pod id=%s desiredStatus=%s cost_per_hour=%s disk=%sGB" % (
+        pod_id, created.get("desiredStatus"), created.get("costPerHr"),
+        created.get("containerDiskInGb")))
+    return pod_id
 
 
 def run(args: argparse.Namespace) -> int:
@@ -182,75 +338,130 @@ def run(args: argparse.Namespace) -> int:
     if not args.ghcr_token:
         print("GHCR token is unset. Refusing to create a pod.", file=sys.stderr)
         return 1
-    body = create_body(args)
-    status, raw = _request("POST", "/pods", token, body)
-    if status not in (200, 201):
-        print("create pod failed: HTTP %s" % status, file=sys.stderr)
-        print(_logs_text(raw)[:500], file=sys.stderr)
+    try:
+        split_ref(args.destination_immutable)
+    except ValueError as exc:
+        print("bad immutable destination: %s" % exc, file=sys.stderr)
         return 1
-    created = json.loads(raw)
-    pod_id = str(created.get("id") or "")
+    # The immutable tag carries the run id, so a digest found under it was pushed
+    # by THIS run. A mutable tag could be an older bake and would read as success.
+    if ghcr_digest(args.destination_immutable, args.ghcr_token):
+        print("%s already exists. Pick a fresh tag." % args.destination_immutable,
+              file=sys.stderr)
+        return 1
+
+    pod_id = create_pod(create_body(args), token, (args.ghcr_token, token))
     if not pod_id:
-        print("create pod returned no id", file=sys.stderr)
         return 1
-    print("pod id=%s status=%s cost_per_hour=%s" % (
-        pod_id, created.get("status"), created.get("cost")))
     if args.pod_id_out:
         with open(args.pod_id_out, "w", encoding="utf-8") as fh:
             fh.write(pod_id + "\n")
+
+    digest = None
     deadline = time.time() + args.timeout_minutes * 60
-    result = None
     try:
         while time.time() < deadline:
-            code, payload = _request("GET", "/pods/%s/logs" % pod_id, token)
-            if code == 200:
-                result = marker(_logs_text(payload))
-                if result:
-                    break
-            code, payload = _request("GET", "/pods/%s" % pod_id, token)
-            if code == 200:
-                try:
-                    state = json.loads(payload).get("status")
-                except json.JSONDecodeError:
-                    state = None
-                if state in ("EXITED", "ERROR", "TERMINATED") and result is None:
-                    code, payload = _request("GET", "/pods/%s/logs" % pod_id, token)
-                    if code == 200:
-                        result = marker(_logs_text(payload))
-                    if result is None:
-                        result = "FAIL"
-                    break
+            digest = ghcr_digest(args.destination_immutable, args.ghcr_token)
+            if digest:
+                print("registry holds %s -> %s" % (args.destination_immutable, digest))
+                break
+            state = pod_state(pod_id, token)
+            if state in DEAD_STATES:
+                # One last look: the push can land moments before the pod exits.
+                digest = ghcr_digest(args.destination_immutable, args.ghcr_token)
+                if not digest:
+                    print("pod reached %s and the tag was never pushed" % state,
+                          file=sys.stderr)
+                break
             time.sleep(args.poll_seconds)
         else:
-            print("bake timed out", file=sys.stderr)
-            result = "FAIL"
+            print("bake timed out after %d minutes" % args.timeout_minutes,
+                  file=sys.stderr)
     finally:
-        code, payload = _request("DELETE", "/pods/%s" % pod_id, token)
-        print("terminate pod id=%s HTTP %s" % (pod_id, code))
-        if code not in (200, 202, 204, 404):
-            print(payload[:300], file=sys.stderr)
+        accepted, _gone = terminate(pod_id, token)
+        if not accepted:
             print("pod %s may still be billed. Terminate it." % pod_id, file=sys.stderr)
             return 1
-    if not result or result == "FAIL":
+    if not digest:
         print("bake failed", file=sys.stderr)
         return 1
-    print("digest=%s" % result)
+    print("digest=%s" % digest)
     if args.digest_out:
         with open(args.digest_out, "w", encoding="utf-8") as fh:
-            fh.write(result + "\n")
+            fh.write(digest + "\n")
+    return 0
+
+
+def reap(args: argparse.Namespace) -> int:
+    """Terminate a pod id left on disk by an earlier step. Safe to run twice."""
+    token = os.environ.get("RUNPOD_API_KEY", "")
+    if not token:
+        print("RUNPOD_API_KEY is unset. Cannot reap.", file=sys.stderr)
+        return 1
+    accepted, gone = terminate(args.pod_id, token)
+    if not accepted:
+        print("terminate was refused for pod %s" % args.pod_id, file=sys.stderr)
+        return 1
+    return 0 if gone else 1
+
+
+def selftest(args: argparse.Namespace) -> int:
+    """Prove create, status and terminate on the cheapest CPU pod there is.
+
+    This exercises every RunPod call the bake makes, for about a cent, so a
+    schema or edge change is caught without building anything.
+    """
+    token = os.environ.get("RUNPOD_API_KEY", "")
+    if not token:
+        print("RUNPOD_API_KEY is unset. Refusing to create a pod.", file=sys.stderr)
+        return 1
+    pod_id = create_pod(selftest_body(args.name), token, (token,))
+    if not pod_id:
+        return 1
+    seen = []
+    try:
+        deadline = time.time() + args.timeout_minutes * 60
+        while time.time() < deadline:
+            state = pod_state(pod_id, token)
+            print("  desiredStatus=%s" % state)
+            seen.append(state)
+            if state == "RUNNING":
+                break
+            time.sleep(args.poll_seconds)
+    finally:
+        accepted, gone = terminate(pod_id, token)
+    if "RUNNING" not in seen:
+        print("pod never reported RUNNING: %r" % seen, file=sys.stderr)
+        return 1
+    if not (accepted and gone):
+        print("terminate did not confirm", file=sys.stderr)
+        return 1
+    print("selftest ok: created a CPU pod, read its status, terminated it, confirmed gone")
+    return 0
+
+
+def check_tag(args: argparse.Namespace) -> int:
+    """Read one tag's digest out of GHCR. The success channel, on its own."""
+    digest = ghcr_digest(args.destination, os.environ.get("GHCR_TOKEN", ""))
+    if not digest:
+        print("no digest for %s" % args.destination, file=sys.stderr)
+        return 1
+    print("%s -> %s" % (args.destination, digest))
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Bake one image on a RunPod CPU pod.")
-    parser.add_argument("command", choices=("plan", "run"))
-    parser.add_argument("--name", required=True)
-    parser.add_argument("--repo", required=True)
-    parser.add_argument("--sha", required=True)
-    parser.add_argument("--dockerfile", required=True)
-    parser.add_argument("--destination", required=True)
-    parser.add_argument("--destination-immutable", required=True)
-    parser.add_argument("--disk-gb", type=disk_gb, required=True)
+    parser.add_argument("command", choices=("plan", "run", "selftest", "reap", "check-tag"))
+    # Only plan and run need the whole build request; main() checks per command.
+    parser.add_argument("--name", default="")
+    parser.add_argument("--repo", default="")
+    parser.add_argument("--sha", default="")
+    parser.add_argument("--dockerfile", default="")
+    parser.add_argument("--destination", default="")
+    parser.add_argument("--destination-immutable", default="")
+    parser.add_argument("--disk-gb", type=disk_gb, default=0)
+    parser.add_argument("--pod-id", default="")
     parser.add_argument("--build-arg", default="")
     parser.add_argument("--ghcr-user", default="")
     parser.add_argument("--ghcr-token", default="")
@@ -261,8 +472,33 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+BUILD_REQUIRED = (
+    "name", "repo", "sha", "dockerfile", "destination", "destination_immutable",
+)
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command in ("plan", "run"):
+        missing = [f for f in BUILD_REQUIRED if not getattr(args, f)]
+        if not args.disk_gb:
+            missing.append("disk_gb")
+        if missing:
+            parser.error("%s needs --%s" % (
+                args.command, ", --".join(f.replace("_", "-") for f in missing)))
+    if args.command == "reap":
+        if not args.pod_id:
+            parser.error("reap needs --pod-id")
+        return reap(args)
+    if args.command == "selftest":
+        if not args.name:
+            parser.error("selftest needs --name")
+        return selftest(args)
+    if args.command == "check-tag":
+        if not args.destination:
+            parser.error("check-tag needs --destination")
+        return check_tag(args)
     if args.command == "plan":
         print(json.dumps(public_view(create_body(args)), indent=2, sort_keys=True))
         return 0

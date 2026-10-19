@@ -13,6 +13,11 @@ name: Bake runtime image on a RunPod pod
 # Dockerfile is the one on main.
 #
 # RUNPOD_API_KEY is already a repo secret. The job token pushes to GHCR.
+#
+# HOW SUCCESS IS READ. The REST API has no logs endpoint, so the runner cannot
+# read pod stdout. Each run pushes an immutable tag carrying the run id and
+# attempt, and the script polls GHCR for it. The digest it reports is the one
+# the registry holds, which is the value the repin pins.
 
 on:
   workflow_dispatch:
@@ -81,6 +86,24 @@ jobs:
             exit 1
           fi
 
+      - name: Refuse while the runtime Dockerfile still carries the weights
+        env:
+          DISK_GB: ${{ github.event.inputs.disk_gb }}
+        run: |
+          set -eu
+          DF=deploy/runtime.Dockerfile
+          [ -f "$DF" ] || { echo "::error::$DF is missing"; exit 1; }
+          # The seed image is ~87 GB and the runtime built on top of it measured
+          # ~101 GB. Neither fits the 160 GB disk cap, let alone the requested
+          # ${DISK_GB} GB. Until the weights leave this image, a dispatch would
+          # rent a pod, pull for half an hour, and die out of disk. Fail here
+          # instead: two seconds, no bill. Drop this step with the weights.
+          if grep -qE 'vivijure-backend-seed' "$DF"; then
+            echo "::error::$DF still pulls the seed image, so this build does not"
+            echo "::error::fit the ${DISK_GB} GB disk. Nothing was rented."
+            exit 1
+          fi
+
       - name: Resolve tag
         id: cfg
         run: |
@@ -93,7 +116,7 @@ jobs:
           case "${TVER}" in ''|*[!0-9]*) echo "::error::toolchain_version must be a positive integer"; exit 1;; esac
           echo "precision=${PREC}" >> "$GITHUB_OUTPUT"
           echo "tag=runtime-${MVER}-${PREC}-t${TVER}" >> "$GITHUB_OUTPUT"
-          echo "immutable_tag=runtime-${MVER}-${PREC}-t${TVER}-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "immutable_tag=runtime-${MVER}-${PREC}-t${TVER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push on a pod
         id: bake
@@ -162,3 +185,22 @@ jobs:
             --title "build(bake): repin ${ARGNAME} to the re-baked runtime" \
             --body "Automated RUNTIME_REF digest bump from a RunPod pod bake. New base: ${NEWREF}. Both Dockerfiles move together. Merge through the gate. Fixed branch, so a later bake updates this pull request." \
             || gh pr view "${BRANCH}" --json url >/dev/null
+
+      # The script terminates the pod in a finally block, which covers a normal
+      # exit and an exception. It does not cover a cancel or a dead runner: those
+      # kill the step without running it. always() also fires on a cancel, so
+      # this is what stands between a cancelled job and a pod that bills on.
+      # A dead runner is still uncovered; nothing inside the job can cover that.
+      - name: Terminate any pod left behind
+        if: always()
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          set -eu
+          POD_FILE="$RUNNER_TEMP/pod-id.txt"
+          if [ ! -s "$POD_FILE" ]; then
+            echo "No pod id was written. Nothing to reap."
+            exit 0
+          fi
+          POD_ID="$(tr -d ' \n\r' < "$POD_FILE")"
+          python3 scripts/runpod_image_bake.py reap --pod-id "$POD_ID"
