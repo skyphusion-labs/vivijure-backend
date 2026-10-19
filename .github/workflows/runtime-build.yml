@@ -112,7 +112,7 @@ jobs:
     steps:
       - name: Disabled -- no builder with the required disk
         run: |
-          echo "::error::vivijure-backend runtime-base bake is DISABLED (2026-09-25). It pulls the ~87 GB seed image and emits a runtime image measured at ~101 GB, so it needs a builder with hundreds of GB of scratch disk. It ran on Plane C [self-hosted, gpu-device]; that fleet was decommissioned 2026-09-24. ubuntu-latest has ~14 GB free (~70 GB after an aggressive reclaim) and cannot host this build. Failing closed rather than queueing forever on a dead label."
+          echo "::error::vivijure-backend runtime-base bake is DISABLED (2026-09-25). It pulls the ~87 GB seed image and emits a runtime image measured at ~101 GB, so it needs a builder with hundreds of GB of scratch disk. It ran on Plane C [self-hosted, gpu-device]; that fleet was decommissioned 2026-09-24. ubuntu-latest has ~14 GB free (~70 GB after an aggressive reclaim) and cannot host this build. Failing closed rather than queueing forever on a dead label. The keyframe image bake is .github/workflows/runpod-bake.yml (dispatch, RunPod CPU pod)."
           exit 1
 
       - name: Checkout repository

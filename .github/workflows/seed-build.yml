@@ -111,7 +111,7 @@ jobs:
     steps:
       - name: Disabled -- no builder with the required disk
         run: |
-          echo "::error::vivijure-backend seed bake is DISABLED (2026-09-25). It stages ~87 GB of curated model weights out of R2, reconstructs the HF-cache symlink tree, bin-packs the layers, then builds and pushes the seed image, so both the staged tree and the image layers are on disk at once. It ran on Plane C [self-hosted, bake-capable]; that fleet was decommissioned 2026-09-24. ubuntu-latest has ~14 GB free (~70 GB after an aggressive reclaim) and cannot host this build. Failing closed rather than queueing forever on a dead label."
+          echo "::error::vivijure-backend seed bake is DISABLED (2026-09-25). It stages ~87 GB of curated model weights out of R2, reconstructs the HF-cache symlink tree, bin-packs the layers, then builds and pushes the seed image, so both the staged tree and the image layers are on disk at once. It ran on Plane C [self-hosted, bake-capable]; that fleet was decommissioned 2026-09-24. ubuntu-latest has ~14 GB free (~70 GB after an aggressive reclaim) and cannot host this build. Failing closed rather than queueing forever on a dead label. The Wan seed bake stays disabled. The keyframe runtime bake is .github/workflows/runpod-bake.yml."
           exit 1
 
       - name: Checkout repository
