@@ -461,3 +461,249 @@ def test_reap_needs_one_of_the_two_handles():
         assert exc.code != 0
     else:
         raise AssertionError("reap ran with neither an id nor a name")
+
+
+# ------------------------------- the two-state collapse behind the reap (strummer)
+
+def test_a_scalar_pods_body_does_not_raise(monkeypatch):
+    """A bare null, number or boolean is an ordinary empty REST reply.
+
+    Iterating one raises TypeError inside run()'s finally, which REPLACES the
+    exception that sent us there, so a create timeout gets reported as a complaint
+    about iteration.
+    """
+    for body in ("null", "5", "true", '"a string"'):
+        monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None, _b=body: (200, _b))
+        assert bake.pods_named("bake-1", "t") == []
+        found = bake.pods_named_detail("bake-1", "t")
+        assert found.ids == []
+        # A body we cannot read establishes nothing, so it is not an answer.
+        assert found.answered is False
+
+
+def test_an_empty_account_and_an_all_rejected_listing_are_different(monkeypatch):
+    """Same shape, different facts, and only one of them can hide a billing pod."""
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, "[]"))
+    empty = bake.pods_named_detail("bake-1", "t")
+    assert (empty.ids, empty.mismatched, empty.answered) == ([], 0, True)
+    assert bake.reap_by_name("bake-1", "t") is True
+
+    rows = json.dumps([{"id": "a", "name": "bake-1-x"}, {"id": "b", "name": "other"}])
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
+    all_rejected = bake.pods_named_detail("bake-1", "t")
+    assert (all_rejected.ids, all_rejected.mismatched, all_rejected.answered) == ([], 2, True)
+    assert bake.reap_by_name("bake-1", "t") is False, (
+        "rows returned and every one rejected must not report success")
+
+
+def test_all_rejected_is_annotated_as_the_measurement_it_is(monkeypatch, capsys):
+    """Rows back and all rejected can only happen if the server filter is not exact.
+
+    That is the question a live read could not settle without renting a second pod,
+    so the first dispatch that trips this is the experiment. It must not be silent.
+    """
+    rows = json.dumps([{"id": "a", "name": "bake-1-decorated"}])
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
+    bake.reap_by_name("bake-1", "t")
+    out = capsys.readouterr()
+    assert "::warning::" in out.out
+    assert "not exact" in out.out
+
+
+def test_a_match_alongside_rejected_rows_still_reaps_the_match(monkeypatch):
+    """Rejecting the wrong pods must never stop the right one being reaped."""
+    killed = []
+    rows = json.dumps([{"id": "wrong", "name": "bake-1-x"}, {"id": "mine", "name": "bake-1"}])
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
+    monkeypatch.setattr(bake, "terminate", lambda pid, tok: killed.append(pid) or (True, True))
+    assert bake.reap_by_name("bake-1", "t") is True
+    assert killed == ["mine"]
+
+
+def test_each_rejection_reason_is_counted_separately(monkeypatch):
+    """One counter made four facts share one sentence, and one of them was false.
+
+    A row whose name MATCHES but carries no id is not a filter problem: the pod we
+    asked for came back and we cannot address it. It gets its own field and its own
+    message, because it leads to a different action than the others.
+    """
+    rows = json.dumps([
+        "bare string",                      # unreadable row
+        None,                               # unreadable row
+        {"id": "x"},                        # an id but no name: assert no cause
+        {"id": "y", "name": 7},             # a non-string name: assert no cause
+        {"id": "z", "name": "other"},       # a real different name: filter not exact
+        {"name": "bake-1"},                 # OURS, no id
+        {"id": None, "name": "bake-1"},     # OURS, unusable id
+    ])
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
+    found = bake.pods_named_detail("bake-1", "t")
+    assert found.ids == []
+    assert found.mismatched == 1
+    assert found.matched_no_id == 2
+    assert found.unusable == 4
+    assert found.answered is True
+
+
+# ------------- the same inversion, one branch over: an unlistable account ---------
+
+def test_a_failed_listing_is_not_a_successful_reap(monkeypatch, capsys):
+    """"No pod is running" is a conclusion a failed listing cannot produce.
+
+    This is the likelier of the two unanswerable cases: a 429 or 5xx on a list
+    endpoint is ordinary, while a non-exact server filter is the unlikely case the
+    spec argues against. Before this, a 503 returned True and printed that nothing
+    was running, and the whole suite permitted either policy.
+    """
+    for code in (401, 403, 429, 500, 502, 503):
+        monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None, _c=code: (_c, "err"))
+        found = bake.pods_named_detail("bake-99", "t")
+        assert found.answered is False, "HTTP %s was treated as an answer" % code
+        assert bake.reap_by_name("bake-99", "t") is False, (
+            "HTTP %s reported a successful reap" % code)
+    out = capsys.readouterr().out
+    assert "::warning::" in out
+    assert "no pod named" not in out, "printed a conclusion the listing cannot support"
+
+
+def test_an_unlistable_account_and_an_empty_one_are_different(monkeypatch):
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, "[]"))
+    assert bake.reap_by_name("bake-99", "t") is True
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (503, "boom"))
+    assert bake.reap_by_name("bake-99", "t") is False
+
+
+def test_a_non_json_listing_is_not_an_answer(monkeypatch):
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, "<html>nope"))
+    assert bake.pods_named_detail("bake-99", "t").answered is False
+    assert bake.reap_by_name("bake-99", "t") is False
+
+
+def test_our_pod_with_no_id_does_not_blame_the_name_filter(monkeypatch, capsys):
+    """The one case where the old single message was actively false."""
+    rows = json.dumps([{"name": "bake-99"}])
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
+    assert bake.reap_by_name("bake-99", "t") is False
+    out = capsys.readouterr().out
+    assert "no usable id" in out
+    assert "not exact" not in out, "blamed the filter for an unaddressable pod"
+
+
+def test_a_different_name_is_reported_as_the_filter_measurement(monkeypatch, capsys):
+    rows = json.dumps([{"id": "z", "name": "bake-99-decorated"}])
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
+    assert bake.reap_by_name("bake-99", "t") is False
+    out = capsys.readouterr().out
+    assert "not exact" in out
+    assert "no usable id" not in out
+
+
+def test_an_unreadable_row_asserts_no_cause(monkeypatch, capsys):
+    rows = json.dumps(["junk", {"id": "x"}])
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
+    assert bake.reap_by_name("bake-99", "t") is False
+    out = capsys.readouterr().out
+    assert "could not be read" in out
+    assert "not exact" not in out
+    assert "no usable id" not in out
+
+
+def test_a_match_is_still_reaped_alongside_every_rejection_kind(monkeypatch):
+    """Narrowing must not narrow to nothing: the right pod still gets reaped."""
+    killed = []
+    rows = json.dumps([
+        "junk", {"id": "x"}, {"id": "z", "name": "other"},
+        {"name": "bake-99"}, {"id": "mine", "name": "bake-99"},
+    ])
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
+    monkeypatch.setattr(bake, "terminate", lambda pid, tok: killed.append(pid) or (True, True))
+    assert bake.reap_by_name("bake-99", "t") is True
+    assert killed == ["mine"]
+
+
+# ------------------- never render a pod row: it carries env (strummer) -----------
+
+CANARY = "ghs_CANARY_do_not_print_me"
+FAT_ROW = {
+    "name": "bake-99", "desiredStatus": "RUNNING", "costPerHr": 0.12,
+    "containerDiskInGb": 120,
+    "env": {"GHCR_TOKEN": CANARY, "BAKE_REPO": "o/r"},
+    "dockerStartCmd": ["sh", "-c", "auth=$(printf %s:%s $GHCR_USER " + CANARY + ")"],
+    "machineId": "mach-1", "publicIp": "203.0.113.9",
+}
+
+
+def test_pod_summary_renders_only_the_allowlisted_fields():
+    """A Pod response has 34 properties. Allowlist, so a new one cannot leak by default."""
+    line = bake.pod_summary(FAT_ROW)
+    for leaky in (CANARY, "GHCR_TOKEN", "env", "machineId", "mach-1", "203.0.113.9",
+                  "dockerStartCmd"):
+        assert leaky not in line, "%r reached the summary" % leaky
+    assert "desiredStatus='RUNNING'" in line
+    assert "costPerHr=0.12" in line
+
+
+def test_the_matched_no_id_branch_never_prints_the_row(capsys):
+    """That branch fires only for a row whose name is ours, so it is always OUR pod.
+
+    create_body puts GHCR_TOKEN in that pod's env, so the one branch guaranteed to
+    be printing our own pod was printing its environment. This repo is public.
+    pods_named_detail holds the RunPod token and not the GHCR one, so it cannot
+    scrub even in principle; the fix is to render fields, never a row.
+    """
+    import json as _json
+    rows = _json.dumps([{k: v for k, v in FAT_ROW.items() if k != "id"}])
+    original = bake._request
+    bake._request = lambda m, p, t, b=None: (200, rows)
+    try:
+        assert bake.reap_by_name("bake-99", "t") is False
+    finally:
+        bake._request = original
+    captured = capsys.readouterr()
+    whole = captured.out + captured.err
+    assert "no usable id" in whole
+    for leaky in (CANARY, "GHCR_TOKEN", "machineId", "203.0.113.9"):
+        assert leaky not in whole, "%r reached an Actions log" % leaky
+
+
+def test_a_nameless_row_with_an_id_names_the_id_only(monkeypatch, capsys):
+    rows = json.dumps([dict(FAT_ROW, id="pod-xyz", name=None)])
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, rows))
+    found = bake.pods_named_detail("bake-99", "t")
+    assert found.unusable == 1
+    whole = capsys.readouterr().err
+    assert "pod-xyz" in whole
+    assert CANARY not in whole
+
+
+# --------------- the same inversion again, one body SHAPE over (strummer) --------
+
+def test_a_dict_body_with_no_pods_list_is_not_an_answer(monkeypatch):
+    """The dict branch exists to survive a shape change.
+
+    Reading a missing key as an empty list is the one way it would survive one by
+    silently reporting that nothing is running.
+    """
+    for body in ('{"items": [{"id": "a", "name": "bake-99"}]}',
+                 '{"data": []}', '{}', '{"pods": null}', '{"pods": {"a": 1}}'):
+        monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None, _b=body: (200, _b))
+        found = bake.pods_named_detail("bake-99", "t")
+        assert found.answered is False, "%s was treated as an answer" % body
+        assert bake.reap_by_name("bake-99", "t") is False
+
+
+def test_a_dict_body_with_a_real_pods_list_still_works(monkeypatch):
+    body = json.dumps({"pods": [{"id": "mine", "name": "bake-99"}]})
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, body))
+    found = bake.pods_named_detail("bake-99", "t")
+    assert (found.ids, found.answered) == (["mine"], True)
+    body = json.dumps({"pods": []})
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (200, body))
+    assert bake.reap_by_name("bake-99", "t") is True
+
+
+def test_an_empty_name_is_not_an_answered_question(monkeypatch):
+    """Consistency with the rubric this function now applies everywhere else."""
+    monkeypatch.setattr(bake, "_request", _no_calls)
+    found = bake.pods_named_detail("", "t")
+    assert (found.ids, found.answered) == ([], False)
