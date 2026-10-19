@@ -60,6 +60,12 @@ concurrency:
 jobs:
   bake:
     runs-on: ubuntu-latest
+    # 140 minutes of bake against a 180 minute job cap. The script's deadline is only
+    # checked at the top of each poll, each poll can spend three 60s calls, and the
+    # terminate path can spend six GETs with 5s sleeps, so the script can overrun its
+    # own deadline by several minutes. The margin has to absorb that, because if the
+    # JOB cap fires instead, an always() step is not reliably given time to run and
+    # the reap is the backstop.
     timeout-minutes: 180
     steps:
       - name: Checkout repository
@@ -98,25 +104,39 @@ jobs:
           # ${DISK_GB} GB. Until the weights leave this image, a dispatch would
           # rent a pod, pull for half an hour, and die out of disk. Fail here
           # instead: two seconds, no bill. Drop this step with the weights.
-          if grep -qE 'vivijure-backend-seed' "$DF"; then
+          # Anchored to the ARG, not the string: the unanchored form also matched the
+          # file's own header comment, so removing the weights would not have cleared
+          # this gate and the refusal would have named a build that no longer carries
+          # them. It failed safe, which is why it was not visible.
+          if grep -qE '^ARG SEED_REF' "$DF"; then
             echo "::error::$DF still pulls the seed image, so this build does not"
             echo "::error::fit the ${DISK_GB} GB disk. Nothing was rented."
             exit 1
           fi
 
+      # The inputs arrive through env, never through ${{ }} inside the script. A
+      # free-form input substituted into shell SOURCE is executed before any check
+      # on it runs: an apostrophe ends the quoting and the rest is code, and the
+      # digit validation below cannot help because substitution happens first. This
+      # step runs on the same runner, from the same checkout, immediately before the
+      # step that puts RUNPOD_API_KEY in the environment, so repo-write would become
+      # possession of a credential that rents compute. CodeQL cannot see this: its
+      # default Actions threat model does not treat workflow_dispatch inputs as
+      # untrusted, so "Analyze (actions) passed" is not evidence either way.
       - name: Resolve tag
         id: cfg
+        env:
+          PREC: ${{ github.event.inputs.precision }}
+          MVER: ${{ github.event.inputs.model_version }}
+          TVER: ${{ github.event.inputs.toolchain_version }}
         run: |
           set -eu
-          PREC='${{ github.event.inputs.precision }}'
-          MVER='${{ github.event.inputs.model_version }}'
-          TVER='${{ github.event.inputs.toolchain_version }}'
-          case "${PREC}" in bf16) ;; *) echo "::error::precision must be bf16"; exit 1;; esac
-          case "${MVER}" in ''|*[!0-9]*) echo "::error::model_version must be a positive integer"; exit 1;; esac
-          case "${TVER}" in ''|*[!0-9]*) echo "::error::toolchain_version must be a positive integer"; exit 1;; esac
-          echo "precision=${PREC}" >> "$GITHUB_OUTPUT"
-          echo "tag=runtime-${MVER}-${PREC}-t${TVER}" >> "$GITHUB_OUTPUT"
-          echo "immutable_tag=runtime-${MVER}-${PREC}-t${TVER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          case "$PREC" in bf16) ;; *) echo "::error::precision must be bf16"; exit 1;; esac
+          case "$MVER" in ''|*[!0-9]*) echo "::error::model_version must be a positive integer"; exit 1;; esac
+          case "$TVER" in ''|*[!0-9]*) echo "::error::toolchain_version must be a positive integer"; exit 1;; esac
+          echo "precision=$PREC" >> "$GITHUB_OUTPUT"
+          echo "tag=runtime-$MVER-$PREC-t$TVER" >> "$GITHUB_OUTPUT"
+          echo "immutable_tag=runtime-$MVER-$PREC-t$TVER-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
 
       - name: Build and push on a pod
         id: bake
@@ -138,7 +158,8 @@ jobs:
             --ghcr-user "${GITHUB_ACTOR}" \
             --digest-out "$RUNNER_TEMP/digest.txt" \
             --pod-id-out "$RUNNER_TEMP/pod-id.txt" \
-            --timeout-minutes 160
+            --pod-name-out "$RUNNER_TEMP/pod-name.txt" \
+            --timeout-minutes 140
           echo "digest=$(tr -d ' \n\r' < "$RUNNER_TEMP/digest.txt")" >> "$GITHUB_OUTPUT"
 
       - name: Open or update the RUNTIME_REF repin pull request
@@ -186,21 +207,30 @@ jobs:
             --body "Automated RUNTIME_REF digest bump from a RunPod pod bake. New base: ${NEWREF}. Both Dockerfiles move together. Merge through the gate. Fixed branch, so a later bake updates this pull request." \
             || gh pr view "${BRANCH}" --json url >/dev/null
 
-      # The script terminates the pod in a finally block, which covers a normal
-      # exit and an exception. It does not cover a cancel or a dead runner: those
-      # kill the step without running it. always() also fires on a cancel, so
-      # this is what stands between a cancelled job and a pod that bills on.
-      # A dead runner is still uncovered; nothing inside the job can cover that.
+      # The script terminates the pod in its own finally, which covers a normal exit,
+      # an exception, and a cancel, since SIGINT raises into it. (An earlier version
+      # of this comment said a cancel does not run the finally. That was wrong.) The
+      # genuinely uncovered case is a dead runner, where nothing inside the job runs
+      # at all, and this step is what stands between that and a pod that bills on.
+      #
+      # It reaps by NAME when no id was written, because a create can leave a pod
+      # running whose id never reached the script: the POST can time out after RunPod
+      # has made the pod. The name is written before the create for exactly that case.
       - name: Terminate any pod left behind
         if: always()
         env:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
         run: |
           set -eu
-          POD_FILE="$RUNNER_TEMP/pod-id.txt"
-          if [ ! -s "$POD_FILE" ]; then
-            echo "No pod id was written. Nothing to reap."
-            exit 0
+          POD_ID=""
+          POD_NAME=""
+          [ -s "$RUNNER_TEMP/pod-id.txt" ] && POD_ID="$(tr -d ' \n\r' < "$RUNNER_TEMP/pod-id.txt")"
+          [ -s "$RUNNER_TEMP/pod-name.txt" ] && POD_NAME="$(tr -d ' \n\r' < "$RUNNER_TEMP/pod-name.txt")"
+          if [ -n "$POD_ID" ]; then
+            python3 scripts/runpod_image_bake.py reap --pod-id "$POD_ID"
+          elif [ -n "$POD_NAME" ]; then
+            echo "::warning::no pod id was written; reaping by name $POD_NAME"
+            python3 scripts/runpod_image_bake.py reap --name "$POD_NAME"
+          else
+            echo "Neither a pod id nor a pod name was written. Nothing was rented."
           fi
-          POD_ID="$(tr -d ' \n\r' < "$POD_FILE")"
-          python3 scripts/runpod_image_bake.py reap --pod-id "$POD_ID"

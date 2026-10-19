@@ -255,8 +255,8 @@ def ghcr_token(repo: str, token: str) -> str:
         return ""
 
 
-def ghcr_digest(ref: str, token: str) -> str | None:
-    """The digest GHCR holds for a tag, or None when the tag is not there yet."""
+def _ghcr_head(ref: str, token: str) -> tuple[int, str | None]:
+    """(status, digest). Status matters: 404 means absent, anything else may mean nothing."""
     repo, tag = split_ref(ref)
     bearer = ghcr_token(repo, token)
     headers = {"Accept": MANIFEST_ACCEPT, "User-Agent": USER_AGENT}
@@ -265,16 +265,78 @@ def ghcr_digest(ref: str, token: str) -> str | None:
     status, _text, resp_headers = _http(
         "HEAD", "%s/v2/%s/manifests/%s" % (GHCR, repo, tag), headers)
     if status != 200:
-        return None
+        return status, None
     digest = ""
     for key, value in resp_headers.items():
         if key.lower() == "docker-content-digest":
             digest = value.strip()
             break
-    return digest if valid_digest(digest) else None
+    return status, digest if valid_digest(digest) else None
+
+
+def ghcr_digest(ref: str, token: str) -> str | None:
+    """The digest GHCR holds for a tag, or None. For polling, where a retry is free."""
+    return _ghcr_head(ref, token)[1]
+
+
+def ghcr_digest_final(ref: str, token: str, attempts: int = 5) -> tuple[str | None, bool]:
+    """The read that decides the verdict, so it must not confuse absent with unreachable.
+
+    Returns (digest, answered). A 404 is a real answer: the tag is not there. Anything
+    else (429, 5xx, a token-endpoint hiccup) is not, and this loop issues hundreds of
+    manifest reads per bake, so a rate-limit reply is ordinary. Reporting "never pushed"
+    off one of those turns a paid, successful build into a red run with no artifact.
+    """
+    for attempt in range(attempts):
+        status, digest = _ghcr_head(ref, token)
+        if digest:
+            return digest, True
+        if status == 404:
+            return None, True
+        print("registry read for %s was inconclusive: HTTP %s (attempt %d of %d)"
+              % (ref, status, attempt + 1, attempts), file=sys.stderr)
+        if attempt + 1 < attempts:
+            time.sleep(min(5 * (attempt + 1), 20))
+    return None, False
 
 
 # ------------------------------------------------------------------------- pods
+
+def pods_named(name: str, token: str) -> list[str]:
+    """Pod ids carrying this exact name. GET /pods?name= returns a bare array."""
+    if not name:
+        return []
+    code, payload = _request("GET", "/pods?name=%s" % urllib.parse.quote(name, safe=""), token)
+    if code != 200:
+        print("could not list pods named %s: HTTP %s" % (name, code), file=sys.stderr)
+        return []
+    try:
+        rows = json.loads(payload)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(rows, dict):
+        rows = rows.get("pods") or []
+    return [str(r.get("id")) for r in rows if isinstance(r, dict) and r.get("id")]
+
+
+def reap_by_name(name: str, token: str) -> bool:
+    """Terminate every pod carrying this name. The backstop for an unknown id.
+
+    A create can leave a pod running whose id never reached us: the POST can time
+    out or raise after RunPod has made the pod. The NAME is ours and is known before
+    the call, so it is the only handle that cannot be outrun by the thing it backs up.
+    """
+    ids = pods_named(name, token)
+    if not ids:
+        print("no pod named %s is running" % name)
+        return True
+    ok = True
+    for pod_id in ids:
+        print("::warning::reaping pod %s found by name %s" % (pod_id, name))
+        accepted, gone = terminate(pod_id, token)
+        ok = ok and accepted and gone
+    return ok
+
 
 def terminate(pod_id: str, token: str) -> tuple[bool, bool]:
     """Terminate one pod. Returns (delete_accepted, gone_confirmed).
@@ -364,16 +426,26 @@ def run(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
 
-    pod_id = create_pod(create_body(args), token, (args.ghcr_token, token))
-    if not pod_id:
-        return 1
-    if args.pod_id_out:
-        with open(args.pod_id_out, "w", encoding="utf-8") as fh:
-            fh.write(pod_id + "\n")
+    # The name goes to disk BEFORE the create. Between RunPod making the pod and this
+    # process learning its id there is a window: the POST can time out, or _http can
+    # raise a URLError, with the pod already running and its id unknown to us. The name
+    # is ours and exists before the call, so writing it first is the only ordering in
+    # which the backstop cannot be outrun by the thing it backs up.
+    if args.pod_name_out:
+        with open(args.pod_name_out, "w", encoding="utf-8") as fh:
+            fh.write(args.name + "\n")
 
+    pod_id = None
     digest = None
+    answered = True
     deadline = time.time() + args.timeout_minutes * 60
     try:
+        pod_id = create_pod(create_body(args), token, (args.ghcr_token, token))
+        if not pod_id:
+            return 1
+        if args.pod_id_out:
+            with open(args.pod_id_out, "w", encoding="utf-8") as fh:
+                fh.write(pod_id + "\n")
         while time.time() < deadline:
             digest = ghcr_digest(args.destination_immutable, args.ghcr_token)
             if digest:
@@ -381,9 +453,11 @@ def run(args: argparse.Namespace) -> int:
                 break
             state = pod_state(pod_id, token)
             if state in DEAD_STATES:
-                # One last look: the push can land moments before the pod exits.
-                digest = ghcr_digest(args.destination_immutable, args.ghcr_token)
-                if not digest:
+                # The push can land moments before the pod exits, and this read is the
+                # verdict, so it retries rather than reading one transient as absence.
+                digest, answered = ghcr_digest_final(
+                    args.destination_immutable, args.ghcr_token)
+                if not digest and answered:
                     print("pod reached %s and the tag was never pushed" % state,
                           file=sys.stderr)
                 break
@@ -392,11 +466,19 @@ def run(args: argparse.Namespace) -> int:
             print("bake timed out after %d minutes" % args.timeout_minutes,
                   file=sys.stderr)
     finally:
-        accepted, _gone = terminate(pod_id, token)
-        if not accepted:
-            print("pod %s may still be billed. Terminate it." % pod_id, file=sys.stderr)
-            return 1
+        if pod_id:
+            accepted, _gone = terminate(pod_id, token)
+            if not accepted:
+                print("pod %s may still be billed. Terminate it." % pod_id,
+                      file=sys.stderr)
+        else:
+            # No id, so a pod may exist that we cannot address. Ask by name.
+            reap_by_name(args.name, token)
     if not digest:
+        if not answered:
+            print("the registry never gave a conclusive answer for %s. The image may "
+                  "have been pushed; check the tag before re-running."
+                  % args.destination_immutable, file=sys.stderr)
         print("bake failed", file=sys.stderr)
         return 1
     print("digest=%s" % digest)
@@ -407,16 +489,18 @@ def run(args: argparse.Namespace) -> int:
 
 
 def reap(args: argparse.Namespace) -> int:
-    """Terminate a pod id left on disk by an earlier step. Safe to run twice."""
+    """Terminate by id, or by name when no id was ever written. Safe to run twice."""
     token = os.environ.get("RUNPOD_API_KEY", "")
     if not token:
         print("RUNPOD_API_KEY is unset. Cannot reap.", file=sys.stderr)
         return 1
-    accepted, gone = terminate(args.pod_id, token)
-    if not accepted:
-        print("terminate was refused for pod %s" % args.pod_id, file=sys.stderr)
-        return 1
-    return 0 if gone else 1
+    if args.pod_id:
+        accepted, gone = terminate(args.pod_id, token)
+        if not accepted:
+            print("terminate was refused for pod %s" % args.pod_id, file=sys.stderr)
+            return 1
+        return 0 if gone else 1
+    return 0 if reap_by_name(args.name, token) else 1
 
 
 def selftest(args: argparse.Namespace) -> int:
@@ -481,6 +565,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ghcr-token", default="")
     parser.add_argument("--digest-out", default="")
     parser.add_argument("--pod-id-out", default="")
+    parser.add_argument("--pod-name-out", default="")
     parser.add_argument("--timeout-minutes", type=int, default=90)
     parser.add_argument("--poll-seconds", type=int, default=20)
     return parser
@@ -502,8 +587,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("%s needs --%s" % (
                 args.command, ", --".join(f.replace("_", "-") for f in missing)))
     if args.command == "reap":
-        if not args.pod_id:
-            parser.error("reap needs --pod-id")
+        if not args.pod_id and not args.name:
+            parser.error("reap needs --pod-id or --name")
         return reap(args)
     if args.command == "selftest":
         if not args.name:

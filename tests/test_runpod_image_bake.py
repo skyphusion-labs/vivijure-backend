@@ -9,6 +9,7 @@ hour pod instead of an error.
 
 import importlib.util
 import json
+import urllib.error
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -299,3 +300,133 @@ def test_a_refused_delete_is_reported_as_not_accepted(monkeypatch):
     monkeypatch.setattr(bake.time, "sleep", lambda _s: None)
     accepted, _gone = bake.terminate("pod-1", "t")
     assert accepted is False
+
+
+# --------------------------------------------- the two pod-leak windows (strummer)
+
+def _run_args(tmp_path, **over):
+    a = _args(command="run")
+    a.pod_id_out = str(tmp_path / "pod-id.txt")
+    a.pod_name_out = str(tmp_path / "pod-name.txt")
+    a.timeout_minutes = 0
+    for k, v in over.items():
+        setattr(a, k, v)
+    return a
+
+
+def test_the_pod_name_is_on_disk_before_the_create_is_attempted(tmp_path, monkeypatch):
+    """Ordering is the whole fix: the handle must exist before the thing it backs up."""
+    seen = {}
+
+    def fake_create(body, token, secrets):
+        seen["name_file_existed"] = (tmp_path / "pod-name.txt").exists()
+        seen["contents"] = (tmp_path / "pod-name.txt").read_text().strip()
+        return None
+
+    monkeypatch.setenv("RUNPOD_API_KEY", "key")
+    monkeypatch.setattr(bake, "ghcr_digest", lambda ref, token: None)
+    monkeypatch.setattr(bake, "create_pod", fake_create)
+    monkeypatch.setattr(bake, "reap_by_name", lambda name, token: True)
+    bake.run(_run_args(tmp_path))
+    assert seen["name_file_existed"] is True
+    assert seen["contents"] == "bake-test"
+
+
+def test_a_create_that_raises_still_reaps_by_name(tmp_path, monkeypatch):
+    """Window B: _http catches only HTTPError, so a URLError leaves a pod we cannot name."""
+    reaped = []
+
+    def boom(body, token, secrets):
+        raise urllib.error.URLError("connection reset")
+
+    monkeypatch.setenv("RUNPOD_API_KEY", "key")
+    monkeypatch.setattr(bake, "ghcr_digest", lambda ref, token: None)
+    monkeypatch.setattr(bake, "create_pod", boom)
+    monkeypatch.setattr(bake, "reap_by_name", lambda name, token: reaped.append(name) or True)
+    try:
+        bake.run(_run_args(tmp_path))
+    except urllib.error.URLError:
+        pass
+    else:
+        raise AssertionError("the URLError should still propagate after the reap")
+    assert reaped == ["bake-test"], "a created pod with an unknown id was not reaped"
+
+
+def test_a_failed_pod_id_write_still_terminates(tmp_path, monkeypatch):
+    """Window A: the id write used to sit outside the try, so an OSError leaked the pod."""
+    killed = []
+    monkeypatch.setenv("RUNPOD_API_KEY", "key")
+    monkeypatch.setattr(bake, "ghcr_digest", lambda ref, token: None)
+    monkeypatch.setattr(bake, "create_pod", lambda b, t, s: "pod-xyz")
+    monkeypatch.setattr(bake, "terminate", lambda pid, tok: killed.append(pid) or (True, True))
+    args = _run_args(tmp_path, pod_id_out=str(tmp_path / "no-such-dir" / "pod-id.txt"))
+    try:
+        bake.run(args)
+    except OSError:
+        pass
+    assert killed == ["pod-xyz"], "the pod was not terminated when the id write failed"
+
+
+# ------------------------------------------- red when it WAS pushed (strummer)
+
+def test_ghcr_digest_final_treats_404_as_a_real_answer(monkeypatch):
+    calls = []
+    monkeypatch.setattr(bake, "_ghcr_head", lambda ref, t: calls.append(1) or (404, None))
+    assert bake.ghcr_digest_final("ghcr.io/o/n:t", "") == (None, True)
+    assert len(calls) == 1, "a 404 is conclusive and must not be retried"
+
+
+def test_ghcr_digest_final_retries_a_transient_then_succeeds(monkeypatch):
+    seq = [(429, None), (503, None), (200, DIGEST)]
+    monkeypatch.setattr(bake, "_ghcr_head", lambda ref, t: seq.pop(0))
+    monkeypatch.setattr(bake.time, "sleep", lambda _s: None)
+    assert bake.ghcr_digest_final("ghcr.io/o/n:t", "") == (DIGEST, True)
+
+
+def test_ghcr_digest_final_says_it_could_not_tell(monkeypatch):
+    """Not answered is not the same as absent, and only one of them may report a failure."""
+    monkeypatch.setattr(bake, "_ghcr_head", lambda ref, t: (429, None))
+    monkeypatch.setattr(bake.time, "sleep", lambda _s: None)
+    assert bake.ghcr_digest_final("ghcr.io/o/n:t", "", attempts=3) == (None, False)
+
+
+# ------------------------------------------------------- reaping by name
+
+def test_pods_named_parses_a_bare_array(monkeypatch):
+    """GET /pods returns a bare array, not an object with a pods key."""
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (
+        200, json.dumps([{"id": "a1"}, {"id": "b2"}, {"noid": 1}])))
+    assert bake.pods_named("bake-1", "t") == ["a1", "b2"]
+
+
+def test_pods_named_is_empty_on_a_non_200(monkeypatch):
+    monkeypatch.setattr(bake, "_request", lambda m, p, t, b=None: (500, "boom"))
+    assert bake.pods_named("bake-1", "t") == []
+
+
+def test_pods_named_url_encodes_the_name(monkeypatch):
+    seen = {}
+
+    def fake(method, path, token, body=None):
+        seen["path"] = path
+        return 200, "[]"
+
+    monkeypatch.setattr(bake, "_request", fake)
+    bake.pods_named("bake 1&x=2", "t")
+    assert " " not in seen["path"] and "&" not in seen["path"].split("name=")[1]
+
+
+def test_reap_takes_a_name_when_there_is_no_id(monkeypatch):
+    monkeypatch.setenv("RUNPOD_API_KEY", "key")
+    monkeypatch.setattr(bake, "reap_by_name", lambda name, token: name == "bake-7")
+    args = bake.build_parser().parse_args(["reap", "--name", "bake-7"])
+    assert bake.reap(args) == 0
+
+
+def test_reap_needs_one_of_the_two_handles():
+    try:
+        bake.main(["reap"])
+    except SystemExit as exc:
+        assert exc.code != 0
+    else:
+        raise AssertionError("reap ran with neither an id nor a name")
