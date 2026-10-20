@@ -26,9 +26,31 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: changelog-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+# NO CONCURRENCY GROUP, DELIBERATELY (backend#517). This workflow triggers on `labeled` and `unlabeled`
+# because the escape hatch is the `no-changelog` LABEL, so the check must re-evaluate when labels
+# move. Dependabot applies its labels ONE AT A TIME within two seconds of opening a PR, so a
+# dependabot PR fires `opened` plus one `labeled` per label in a burst. With
+# `cancel-in-progress: true` keyed on the PR number, each run in that burst cancelled the one
+# before it, leaving CANCELLED check runs pinned to the PR head sha permanently. They are not
+# failures, but statusCheckRollup reports them beside the real ones, so the PR reads red to a
+# human and to anything counting non-SUCCESS conclusions. Measured 2026-10-20: every open
+# dependabot PR in this repo carried exactly two cancelled `changelog` runs with the survivor
+# green, and that cost a lead triage pass plus a full backend dispatch before anyone established
+# nothing was actually broken.
+#
+# `cancel-in-progress: false` does NOT clear it: GitHub keeps only ONE pending run per group and
+# cancels the previously pending one, so a three-event burst still leaves a cancellation behind.
+# Scoping the group to the head sha does not help either, because the label events all share one
+# sha. Dropping the `labeled` / `unlabeled` triggers would clear it and is wrong, because that is
+# the escape hatch.
+#
+# So the group is gone. These jobs take seconds, this repo is PUBLIC so hosted-runner minutes are
+# free, and a superseded run on a STALE sha never appears in the head sha's rollup anyway. The
+# only thing the group bought was cancelling runs nobody was reading; what it cost was a PR that
+# misreports its own state. If these jobs ever get expensive enough to want supersession back,
+# gate it on the event rather than restoring a blanket group:
+# `cancel-in-progress: ${{ github.event.action == 'synchronize' }}` cancels only on a new push,
+# which is the one case where the cancelled run sits on a sha the PR has already left behind.
 
 jobs:
   changelog:
