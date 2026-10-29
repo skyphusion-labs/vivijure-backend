@@ -371,7 +371,13 @@ class FinishConfig:
         return cls(interpolate=True, interpolation_factor=2, face_restore=FaceRestore.GFPGAN)
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any] | None, *, tier: QualityTier | None = None) -> "FinishConfig":
+    def from_dict(
+        cls,
+        d: dict[str, Any] | None,
+        *,
+        tier: QualityTier | None = None,
+        style: object = None,
+    ) -> "FinishConfig":
         # RIFE interpolates by recursive doubling, so the only valid factors are powers of two
         # (1/2/4/8). A plain [1,8] clamp would let 3/5/6/7 through and `finish` then silently rounds
         # them DOWN at render time, so the stored config would not match what actually runs. Snap
@@ -380,12 +386,20 @@ class FinishConfig:
 
         base = cls.for_tier(tier) if tier is not None else cls()
         d = d if isinstance(d, dict) else {}
+        # finish.style wins. Callers may also pass keyframe.style via the style kwarg.
+        look = str(d.get("style", style) or "").strip().lower()
+        restore_in = "face_restore" in d
+        if look == "anime" and not restore_in:
+            # GFPGAN is a photoreal face lock. Anime + no restorer pick stays off, even on final.
+            face_restore = FaceRestore.NONE
+        else:
+            face_restore = _enum_or(FaceRestore, d.get("face_restore"), base.face_restore)
         return cls(
             interpolate=bool(d.get("interpolate", base.interpolate)),
             interpolation_factor=snap_factor(
                 _clamp_int(d.get("interpolation_factor"), 1, 8, base.interpolation_factor)),
             target_fps=_clamp_int(d.get("target_fps"), 0, 120, base.target_fps),
-            face_restore=_enum_or(FaceRestore, d.get("face_restore"), base.face_restore),
+            face_restore=face_restore,
             face_fidelity=_clamp(d.get("face_fidelity"), 0.0, 1.0, base.face_fidelity),
             only_faces=bool(d.get("only_faces", base.only_faces)),
         )
@@ -467,11 +481,14 @@ class RenderConfig:
         sets every baseline; the (forgiving) overrides layer explicit knobs over it."""
         tier = QualityTier.parse(quality_tier)
         d = overrides if isinstance(overrides, dict) else {}
+        finish_d = d.get("finish") if isinstance(d.get("finish"), dict) else {}
+        keyframe_d = d.get("keyframe") if isinstance(d.get("keyframe"), dict) else {}
+        look = finish_d.get("style") or keyframe_d.get("style")
         return cls(
             quality=tier,
             keyframe=KeyframeConfig.from_dict(d.get("keyframe"), tier=tier),
             i2v=I2VConfig.from_dict(d.get("i2v"), tier=tier),
-            finish=FinishConfig.from_dict(d.get("finish"), tier=tier),
+            finish=FinishConfig.from_dict(d.get("finish"), tier=tier, style=look),
             lora=_lora_from_dict(d.get("lora")),
         )
 
