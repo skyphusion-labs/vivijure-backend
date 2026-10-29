@@ -85,7 +85,7 @@ class ModelSpec:
 DEFAULT_SPECS: dict[ModelRole, ModelSpec] = {
     ModelRole.KEYFRAME_BASE: ModelSpec(
         ModelRole.KEYFRAME_BASE, "SG161222/RealVisXL_V5.0", ModelFamily.SDXL_UNET,
-        note="photoreal-leaning SDXL default; anime alt cagliostrolab/animagine-xl-4.0",
+        note="photoreal SDXL default. Anime jobs swap this repo to KEYFRAME_ANIME_REPO.",
     ),
     ModelRole.KEYFRAME_FEWSTEP: ModelSpec(
         ModelRole.KEYFRAME_FEWSTEP, "ByteDance/Hyper-SD", ModelFamily.AUX,
@@ -144,9 +144,27 @@ def _namespaces_from_specs(specs: dict[ModelRole, ModelSpec]) -> frozenset[str]:
     return frozenset(out)
 
 
+# Photoreal is the loaded default. Anime is a job-time KEYFRAME_BASE swap, not a second
+# warm role. Animagine stays out of the default bake (see deploy/bake-manifest.json).
+KEYFRAME_ANIME_REPO = "cagliostrolab/animagine-xl-4.0"
+EXTRA_ALLOWED_NAMESPACES: frozenset[str] = frozenset({KEYFRAME_ANIME_REPO.split("/", 1)[0]})
+
 # Namespaces a job may request at cold start. Derived from DEFAULT_SPECS so adding a default
-# model automatically widens the allowlist; arbitrary orgs stay rejected.
-ALLOWED_REPO_NAMESPACES: frozenset[str] = _namespaces_from_specs(DEFAULT_SPECS)
+# model automatically widens the allowlist; EXTRA covers the anime stills path. Arbitrary
+# orgs stay rejected.
+ALLOWED_REPO_NAMESPACES: frozenset[str] = (
+    _namespaces_from_specs(DEFAULT_SPECS) | EXTRA_ALLOWED_NAMESPACES
+)
+
+
+def missing_keyframe_weights_error(repo_id: str) -> RuntimeError:
+    """Honest failure when a local_files_only keyframe load cannot find the checkpoint."""
+    return RuntimeError(
+        f"keyframe base {repo_id} is not on this worker. "
+        "Photoreal uses SG161222/RealVisXL_V5.0 (default bake). "
+        "Anime uses cagliostrolab/animagine-xl-4.0 (not in the default bake). "
+        "Stage those weights or bake a worker that keeps that repo."
+    )
 
 
 class InvalidModelRepoId(ValueError):
@@ -158,7 +176,7 @@ def validate_repo_id(
     *,
     allowed_namespaces: frozenset[str] | None = None,
 ) -> str:
-    """Accept only HF-looking `org/name` ids whose org is in the DEFAULT_SPECS namespaces.
+    """Accept only HF-looking `org/name` ids whose org is in the allowed namespaces.
 
     Rejects absolute paths, URI schemes, path traversal, backslashes, and non-`org/name`
     shapes before any ModelServer / hub download can see them. Returns the validated id.
@@ -478,8 +496,12 @@ class ModelServer:
         # Pose first (regional Pass A plants bodies). Canny is cached separately and swapped onto
         # pipe.controlnet for scene-lock Pass B; not MultiControlNet.
         controlnet = self._controlnet(ModelRole.CONTROLNET_POSE)
-        pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
-            spec.repo_id, controlnet=controlnet, torch_dtype=torch.bfloat16, local_files_only=True)
+        try:
+            pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
+                spec.repo_id, controlnet=controlnet, torch_dtype=torch.bfloat16,
+                local_files_only=True)
+        except (OSError, ValueError) as e:
+            raise missing_keyframe_weights_error(spec.repo_id) from e
         pipe.to("cuda")
         _set_attention(pipe, self.device)
 
