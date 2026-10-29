@@ -10,7 +10,7 @@ from vivijure_backend.config import (
     RenderConfig,
     Scheduler,
 )
-from vivijure_backend.models import DEFAULT_SPECS, ModelRole
+from vivijure_backend.models import DEFAULT_SPECS, KEYFRAME_ANIME_REPO, ModelRole
 from vivijure_backend.orchestrator import MULTI_CHAR_DEFAULTS
 from vivijure_backend.routing import QualityTier
 
@@ -19,6 +19,13 @@ from vivijure_backend.routing import QualityTier
 
 def test_keyframe_base_defaults_to_the_spec_sdxl():
     assert KeyframeConfig().base_model == DEFAULT_SPECS[ModelRole.KEYFRAME_BASE].repo_id
+
+
+def test_keyframe_style_maps_to_the_matching_base():
+    anime = KeyframeConfig.from_dict({"style": "anime"})
+    assert anime.base_model == KEYFRAME_ANIME_REPO
+    photo = KeyframeConfig.from_dict({"style": "photoreal"})
+    assert photo.base_model == DEFAULT_SPECS[ModelRole.KEYFRAME_BASE].repo_id
 
 
 def test_i2v_model_defaults_to_the_spec_wan():

@@ -158,6 +158,8 @@ def test_low_vram_unloads_idle_controlnet():
 from vivijure_backend.models import (
     ALLOWED_REPO_NAMESPACES,
     DEFAULT_SPECS as _DEFAULT_SPECS_FOR_ALLOWLIST,
+    EXTRA_ALLOWED_NAMESPACES,
+    KEYFRAME_ANIME_REPO,
     InvalidModelRepoId,
     validate_repo_id,
 )
@@ -171,9 +173,11 @@ def test_allowed_namespaces_are_derived_from_default_specs():
         for spec in _DEFAULT_SPECS_FOR_ALLOWLIST.values()
         if spec.fp8_repo_id
     }
+    expected |= set(EXTRA_ALLOWED_NAMESPACES)
     assert ALLOWED_REPO_NAMESPACES == frozenset(expected)
     assert "SG161222" in ALLOWED_REPO_NAMESPACES
     assert "Wan-AI" in ALLOWED_REPO_NAMESPACES
+    assert "cagliostrolab" in ALLOWED_REPO_NAMESPACES
 
 
 def test_validate_repo_id_accepts_default_specs_and_same_namespace_swaps():
@@ -201,12 +205,15 @@ def test_validate_repo_id_accepts_default_specs_and_same_namespace_swaps():
     "just-a-name",
     "too/many/slashes",
     "evil-org/malware",  # HF-shaped but namespace not in DEFAULT_SPECS
-    "cagliostrolab/animagine-xl-4.0",  # note-mentioned alt; not an allowlisted namespace
     "h94/IP-Adapter/extra",  # more than org/name
 ])
 def test_validate_repo_id_rejects_paths_uris_and_foreign_namespaces(bad):
     with pytest.raises(InvalidModelRepoId):
         validate_repo_id(bad)
+
+
+def test_validate_repo_id_accepts_anime_keyframe_base():
+    assert validate_repo_id(KEYFRAME_ANIME_REPO) == KEYFRAME_ANIME_REPO
 
 
 def test_validate_repo_id_honors_explicit_namespace_override():

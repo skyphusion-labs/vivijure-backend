@@ -26,7 +26,7 @@ from pathlib import Path
 
 from .contract import Character
 from .device import current
-from .models import DEFAULT_SPECS, ModelRole
+from .models import DEFAULT_SPECS, ModelRole, missing_keyframe_weights_error
 
 # The UNet attention projections a character LoRA needs to bind identity. Matches the
 # diffusers LoRA guide's SDXL target set; the text encoders are deliberately left frozen.
@@ -142,8 +142,11 @@ def train_slot(
     # --- frozen backbone: VAE (fp32 for stable latents), both text encoders, the UNet ---
     # The VAE stays fp32 because SDXL's VAE produces NaNs under fp16/bf16 encode; everything
     # else lives in bf16. Only the UNet gets a trainable LoRA; the rest is inference-only.
-    vae = AutoencoderKL.from_pretrained(
-        base, subfolder="vae", torch_dtype=torch.float32, local_files_only=True).to(device)
+    try:
+        vae = AutoencoderKL.from_pretrained(
+            base, subfolder="vae", torch_dtype=torch.float32, local_files_only=True).to(device)
+    except (OSError, ValueError) as e:
+        raise missing_keyframe_weights_error(base) from e
     # CLIPTokenizer, not AutoTokenizer: Auto* probes AutoConfig for a config.json the CLIP
     # tokenizer subfolders do not have, which is a graceful 404 online but a FATAL
     # LocalEntryNotFoundError under HF_HUB_OFFLINE=1 on the deployed worker. CLIPTokenizer loads

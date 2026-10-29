@@ -155,7 +155,10 @@ class GpuPipeline:
     def _train_slot(self, char, out_dir: Path) -> Path:
         # Throttled per-step training progress (the long pole); lora_train calls the cb every N steps.
         cb = self.progress.train_step_cb(char.slot)
-        result = _lora_train.train_slot(char, out_dir, config=self.config.lora, progress_cb=cb)
+        result = _lora_train.train_slot(
+            char, out_dir, config=self.config.lora, progress_cb=cb,
+            base_repo=self.config.keyframe.base_model,
+        )
         # result.checkpoint_dirs contains any save_every intermediate adapters; they live inside
         # out_dir (which is inside the workdir), so the harness's workdir teardown cleans them up.
         return result.path

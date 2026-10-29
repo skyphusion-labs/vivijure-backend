@@ -31,7 +31,7 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Any
 
-from .models import DEFAULT_SPECS, ModelRole
+from .models import DEFAULT_SPECS, KEYFRAME_ANIME_REPO, ModelRole
 from .routing import QualityTier
 
 
@@ -213,8 +213,15 @@ class KeyframeConfig:
                 w, h = int(ws), int(hs)
             except ValueError:
                 pass
+        style = str(d.get("style") or "").strip().lower()
+        if style == "anime":
+            resolved_base = KEYFRAME_ANIME_REPO
+        elif style == "photoreal":
+            resolved_base = _model_id(ModelRole.KEYFRAME_BASE)
+        else:
+            resolved_base = str(d.get("base_model", base.base_model))
         return cls(
-            base_model=str(d.get("base_model", base.base_model)),
+            base_model=resolved_base,
             steps=_clamp_int(d.get("steps"), 1, 128, base.steps),
             guidance_scale=_clamp(d.get("guidance_scale"), 0.0, 30.0, base.guidance_scale),
             scheduler=_enum_or(Scheduler, d.get("scheduler"), base.scheduler),
