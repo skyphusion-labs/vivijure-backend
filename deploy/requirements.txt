@@ -56,7 +56,7 @@ numpy==2.4.6              # py3.11 conda line. Do not jump to numpy 2.5.x (needs
                           # VIOLATED 2026-07-23 by dcb25ec, which bumped the pin to 2.5.1 and
                           # left this very comment in place. numpy 2.5.x is Requires-Python
                           # >=3.12; the conda env is 3.11.15, so the bake could not resolve.
-Pillow==12.3.0           # 12.3.0 clears 13 Pillow CVEs through 2026-07 (was 12.2.0)
+Pillow==13.0.0           # 12.3.0 clears 13 Pillow CVEs through 2026-07 (was 12.2.0)
 PyYAML>=6.0               # contract.py storyboard parse (no version sensitivity)
 
 # --- identity stack (InstantID single-char upgrade) ---
