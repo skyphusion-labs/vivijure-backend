@@ -129,6 +129,26 @@ def test_finish_config_for_tier_baselines():
     assert FinishConfig.for_tier(QualityTier.FINAL).face_restore is FaceRestore.GFPGAN
 
 
+def test_anime_final_does_not_auto_enable_gfpgan():
+    from_keyframe = RenderConfig.from_request("final", {"keyframe": {"style": "anime"}})
+    assert from_keyframe.finish.face_restore is FaceRestore.NONE
+    from_finish = RenderConfig.from_request("final", {"finish": {"style": "anime"}})
+    assert from_finish.finish.face_restore is FaceRestore.NONE
+
+
+def test_anime_explicit_restorer_still_wins():
+    cfg = RenderConfig.from_request("final", {
+        "keyframe": {"style": "anime"},
+        "finish": {"face_restore": "gfpgan"},
+    })
+    assert cfg.finish.face_restore is FaceRestore.GFPGAN
+
+
+def test_photoreal_final_still_defaults_to_gfpgan():
+    cfg = RenderConfig.from_request("final", {"keyframe": {"style": "photoreal"}})
+    assert cfg.finish.face_restore is FaceRestore.GFPGAN
+
+
 # --------------------------------------------------------------- bug fix: only_faces is live (item 4)
 
 class _RecordingRestorer:
