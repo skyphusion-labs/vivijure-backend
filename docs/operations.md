@@ -7,11 +7,15 @@ page is the operator's view of the running system.
 
 ## The worker image
 
+The keyframe path is a thin image plus a global volume (#530).
+No bake. No cold pull.
+See [global-volume.md](global-volume.md).
+
 A GPU runtime: CUDA 12.8 + torch cu128 (Blackwell-safe), the render stack, the `vivijure_backend`
-package, AND the curated model weights **baked into the image** (~87 GB bf16 for the datacenter image;
+package, AND (legacy film image) the curated model weights **baked into the image** (~87 GB bf16;
 #537). A baked worker carries its own weights, so it is datacenter-agnostic and pays no R2 cold-pull:
 it renders from the local cache, gated by the `.vj-baked` marker. The image chain (seed -> runtime ->
-backend) and why the weights are baked are in
+backend) and why the weights were baked are in
 [weights-base-and-snapshots.md](weights-base-and-snapshots.md) and
 [cold-start-design.md](cold-start-design.md).
 
@@ -94,9 +98,9 @@ The R2 token does double duty: the cold-start model mirror (`r2:<bucket>/models`
 
 ## The cold-start model mirror
 
-> **This is the FALLBACK path (a non-baked image).** The shipped image bakes its weights (see "The
-> worker image" above), so a baked worker skips the mirror entirely via the `.vj-baked` marker. The
-> mirror below runs only for a legacy / non-baked image; it is kept for correctness.
+> **Keyframe path:** a thin image reads a staged global volume. See
+> [global-volume.md](global-volume.md). The R2 mirror below is the miss path.
+> A baked film image still skips the mirror via `.vj-baked`.
 
 On a non-baked image a cold worker has no weights; it mirrors them from R2 into the local HF cache,
 then renders offline. A warm worker reuses the on-disk cache and skips the mirror.

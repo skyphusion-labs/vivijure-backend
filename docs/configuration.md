@@ -211,6 +211,9 @@ image (see [operations.md](operations.md#environment)); the R2 credential is the
 | Var | Default | Purpose |
 |---|---|---|
 | `VJ_MODELS_ROOT` | `/opt/models` | Model cache root + mirror sentinels. |
+| `VJ_VOLUME_ROOT` | `/runpod-volume` when that path is a directory | Mounted volume the thin worker reads. See [global-volume.md](global-volume.md). |
+| `VJ_VOLUME_KIND` | `global` when the root is `/runpod-volume` | `global` or `network`. Global never self-preloads. |
+| `VJ_VOLUME_SELF_PRELOAD` | `0` | First-worker fill. Off for a global volume. |
 | `VJ_MODEL_VERSION` | `1` | Mirror sentinel version; bump to force a re-mirror on warm workers. |
 | `VJ_I2V_DISTILL` | `1` | Toggle the Wan2.2-Lightning distill LoRA. |
 | `VJ_I2V_FP8` | `1` | Toggle Wan fp8 quantization. |

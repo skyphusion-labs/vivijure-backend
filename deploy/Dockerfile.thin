@@ -1,0 +1,22 @@
+# Thin keyframe worker (#530). Toolchain plus app. No seed COPY. No .vj-baked.
+#
+# Build the toolchain first (no weight layers):
+#   docker build -f deploy/runtime.Dockerfile --target toolchain -t vivijure-backend-toolchain .
+# Then:
+#   docker build -f deploy/Dockerfile.thin --build-arg TOOLCHAIN_REF=vivijure-backend-toolchain .
+#
+# After the first published toolchain tag, pin TOOLCHAIN_REF by tag and digest.
+# The worker reads stills from a global volume at /runpod-volume. See docs/global-volume.md.
+
+ARG TOOLCHAIN_REF=vivijure-backend-toolchain
+FROM ${TOOLCHAIN_REF}
+
+WORKDIR /opt/vivijure
+COPY src/vivijure_backend /opt/vivijure/vivijure_backend
+COPY deploy/smoke_imports.py /opt/vivijure/smoke_imports.py
+
+ENV VJ_VOLUME_ROOT=/runpod-volume \
+    VJ_VOLUME_KIND=global \
+    VJ_VOLUME_SELF_PRELOAD=0
+
+CMD ["conda", "run", "--no-capture-output", "-n", "vivijure", "python", "-u", "-m", "vivijure_backend.worker"]
