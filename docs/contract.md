@@ -384,7 +384,7 @@ audio track is returned unchanged (no audio step, no failure).
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `action` | str | -- | Must be `"finish_clip"`. |
-| `output_key` | str | `renders/<project>/clips/<shot_id>_finished.mp4` | Where to write the clip, so one film cannot replace another film's clip (vivijure-core#379). Must be an `.mp4` under this project's `clips/`. A key that does not qualify is logged and the default is used, so the job does not fail. |
+| `output_key` | str | `renders/<project>/clips/<shot_id>_finished.mp4` | Where to write the clip, so one film cannot replace another film's clip (vivijure-core#379). Must be an `.mp4` under this project's `clips/`. A key that does not qualify is logged and the default is used, so the job does not fail. With an `output_hash`, a non-default key also writes `<shot_id>_finished.latest.json`, naming the clip and hash, last. |
 | `project` | str | `"untitled"` | Keys the output clip. |
 | `shot_id` | str | `"shot"` | Identifies the clip; part of the output key. |
 | `clip_key` | str | (required) | R2 key of the clip to finish. |

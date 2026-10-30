@@ -89,6 +89,12 @@ def finished_clip_key(project: str, shot_id: str) -> str:
     return f"renders/{_slug(project)}/clips/{_slug(shot_id)}_finished.mp4"
 
 
+def finished_clip_pointer_key(project: str, shot_id: str) -> str:
+    """The reuse pointer for a shot's finished clip (vivijure-core#379): one JSON object naming the
+    newest film-scoped clip and its hash, beside the shared key it replaces."""
+    return f"renders/{_slug(project)}/clips/{_slug(shot_id)}_finished.latest.json"
+
+
 def finish_output_key(requested, project: str, shot_id: str) -> tuple[str, str | None]:
     """Where a finish_clip job writes (core#379). The caller's `output_key` when it is a safe clip key
     of this project, or the shared per-project key. Returns (key, why the request was refused).

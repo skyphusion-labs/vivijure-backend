@@ -539,3 +539,15 @@ def test_finish_clip_refuses_a_bad_output_key_without_failing_the_job(tmp_path, 
     res, written = _run_finish_with_output_key(tmp_path, monkeypatch, bad)
     assert res["clip_key"] == "renders/p/clips/s1_finished.mp4"
     assert bad not in written
+
+
+def test_a_film_scoped_clip_writes_its_pointer_last(tmp_path, monkeypatch):
+    key = "renders/p/clips/film-1/s1_finished.mp4"
+    _, written = _run_finish_with_output_key(tmp_path, monkeypatch, key)
+    clips = [k for k in written if "/clips/" in k]
+    assert clips == [key, f"{key}.hash", "renders/p/clips/s1_finished.latest.json"]
+
+
+def test_the_shared_key_writes_no_pointer(tmp_path, monkeypatch):
+    _, written = _run_finish_with_output_key(tmp_path, monkeypatch, None)
+    assert "renders/p/clips/s1_finished.latest.json" not in written

@@ -17,7 +17,7 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 |---|---|---|
 | id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
 | Image | `vivijure-backend:1.1.2@sha256:69f06ab95ab75530af7e0fa135c768548d339435a3714036b6f32e95a2b0d586` | `vivijure-upscale:1.0.4` |
-| Pools | `BLACKWELL_96`, `BLACKWELL_180`, `BLACKWELL_288` | `BLACKWELL_96` |
+| Pools | `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141`, `BLACKWELL_180`, `BLACKWELL_288` | `BLACKWELL_96` |
 | `workers` min / max | 0 / 30 | 0 / 10 |
 | Idle timeout | 180 s | 10 s |
 | Scaler | `QUEUE_DELAY` 4 | `QUEUE_DELAY` 4 |
@@ -45,6 +45,20 @@ disk and idle timeout. Before that: image
 `vivijure-backend:1.1.0@sha256:b42084bb1e295976d4ad555566aee1240c5ce86f1692a33560a127ecb155e6ac`,
 disk 300 GB, idle timeout 10 s. That image starts a 114 GiB Wan pull on every keyframe job and needs
 the larger disk, so restore all three together.
+
+### Pool prices
+
+Serverless prices per hour, from `list-gpu-types` on 2026-10-30:
+
+| Pool | GPU | Price |
+|---|---|---|
+| `BLACKWELL_96` | RTX PRO 6000 | $3.49 |
+| `ADA_80_PRO` | H100 | $5.39 |
+| `HOPPER_141` | H200 | $6.99 |
+| `BLACKWELL_180` | B200 | $10.79 |
+| `BLACKWELL_288` | B300 | $11.99 |
+
+Nothing has been measured on `ADA_80_PRO` or `HOPPER_141`. The times below are not evidence for those pools, and a job that lands on one costs more per hour than `BLACKWELL_96`.
 
 ### Measured keyframe times, image 1.1.1
 
