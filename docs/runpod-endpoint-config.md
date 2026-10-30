@@ -16,7 +16,7 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 | | `vivijure-backend-hosted` | `vivijure-upscale-hosted` |
 |---|---|---|
 | id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
-| Image | `vivijure-backend:1.1.3@sha256:dc04da20fb0ec28136b942c2dffe9608b75f631d8de597e3855e3165ad670e64` | `vivijure-upscale:1.0.4` |
+| Image | `vivijure-backend:1.1.3@sha256:dc04da20fb0ec28136b942c2dffe9608b75f631d8de597e3855e3165ad670e64` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
 | Pools | `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141`, `BLACKWELL_180`, `BLACKWELL_288` | `BLACKWELL_96` |
 | `workers` min / max | 0 / 30 | 0 / 10 |
 | Idle timeout | 180 s | 10 s |
@@ -38,6 +38,13 @@ takes the R2 mirror.
 **Why 180 s idle.** Measured on the same image: a cold keyframe cost $0.13 to $0.23 of worker time and
 a warm one $0.02, at $3.49 per hour. Idle costs $0.058 per minute, so holding a worker pays when the next
 job arrives within about 2 to 3.5 minutes. A one-off job pays up to about $0.17 of extra idle.
+
+**Upscale rollback, moved 2026-10-30:** previous image
+`vivijure-upscale:1.0.4@sha256:533e1f0e366d12b6230ab08c7b9a61a51e00f143ef3610b3c8d90b880a67a413`, all other
+settings the same. 1.1.3 honours `target_height`, which 1.0.4 ignores and runs 2x. A host from vivijure-cf
+v1.42.0 sends `target_height` by default, so rolling back under one delivers 2x against a budget priced at
+the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 11.5 s, and 720x1280 to
+1080x1920 in 6.0 s. The presigned path has not run on this image yet.
 
 **Previous values, for rollback:** image
 `vivijure-backend:1.1.2@sha256:69f06ab95ab75530af7e0fa135c768548d339435a3714036b6f32e95a2b0d586`, same
