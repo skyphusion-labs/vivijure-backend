@@ -289,7 +289,8 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
     from ..orchestrator import Action, KeyframeMode, resolve_lora_family
     for sc in plan.scenes:
         if sc.shot_id not in reported_shots and sc.keyframe_mode in (KeyframeMode.REUSE, KeyframeMode.INJECT):
-            result.keyframes.append(Keyframe(shot_id=sc.shot_id, key=keys.keyframe_key(project, sc.shot_id)))
+            result.keyframes.append(Keyframe(shot_id=sc.shot_id, key=keys.keyframe_key(project, sc.shot_id),
+                                             reused=True))
 
     # Clips ordered by the storyboard (never the stage's incidental order).
     ordered = order_for_storyboard(
@@ -387,7 +388,7 @@ def _restore_prior_state(store, project: str, bundle: Bundle, *, model_family: s
       in _finish happens only after a successful train, so existence == trained.
     - Shot `sc.id` has a reusable keyframe iff its PNG exists at keyframe_key(project, sc.id);
       its param hash comes from the .hash sidecar (absent sidecar -> None, which _keyframe_mode
-      treats as "reuse conservatively", the same contract as the old no-hash-file state). Only a
+      treats as unproven and redraws, #488). Only a
       real not-found is "absent": any other failure reading the sidecar raises HarnessError, for
       the same reason as the existence checks.
 
@@ -427,13 +428,13 @@ def _restore_prior_state(store, project: str, bundle: Bundle, *, model_family: s
                     # as legacy state would reuse a keyframe drawn with other parameters.
                     raise HarnessError(
                         f"could not read keyframe hash sidecar for {sc.id!r}: {e}") from e
-                raw = None  # a real not-found: legacy no-sidecar state -> reuse conservatively
+                raw = None  # a real not-found: no proof of parameters -> the planner redraws (#488)
             if raw is not None:
                 try:
                     stored = raw.decode("utf-8", "replace").strip() or None
                     if stored:
                         local_png.with_suffix(".hash").write_text(stored)
-                except Exception:  # noqa: BLE001 -- a local staging hiccup -> reuse conservatively
+                except Exception:  # noqa: BLE001 -- a local staging hiccup -> the planner redraws (#488)
                     pass
             existing_keyframes[sc.id] = stored
         except HarnessError:
