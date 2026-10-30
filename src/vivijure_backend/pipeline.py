@@ -18,6 +18,7 @@ Clean-room: built only from our own modules (config / orchestrator / keyframe / 
 """
 from __future__ import annotations
 
+from . import load_events
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -139,6 +140,7 @@ class GpuPipeline:
         """Wire a progress emitter (the harness calls this per job). Default is a no-op emitter, so
         the pipeline runs unchanged without one."""
         self._progress = emitter
+        load_events.set_emitter(emitter)
 
     @property
     def progress(self):

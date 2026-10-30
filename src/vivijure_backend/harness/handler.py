@@ -27,6 +27,10 @@ from . import keys
 from .progress import NullEmitter, ProgressEmitter
 from .r2 import is_not_found
 from . import job_done_diag
+from .volume_hydrate import maybe_hydrate
+
+# The actions that read the SDXL base set off the volume (train, draw). An i2v-only pass reads none.
+_SDXL_ACTIONS = frozenset({"render", "preview", "regen_shot", "train_lora"})
 
 
 class HarnessError(RuntimeError):
@@ -84,6 +88,9 @@ def run_job(
     progress = ProgressEmitter(store, req.project, job_id, on_progress=on_progress)
     progress.emit("started", action=req.action, quality=req.quality_tier, project=req.project)
     progress.emit("mirror_done", pulled=bool(mirrored))
+    # Before anything imports huggingface_hub, which reads HF_HOME once. See volume_hydrate.
+    if req.action in _SDXL_ACTIONS:
+        maybe_hydrate(progress.emit)
     try:
         # --- bundle in ---
         # Validate the required input up front (like finish_clip/i2v_clip do for their keys), so a
