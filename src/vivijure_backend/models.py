@@ -115,7 +115,9 @@ DEFAULT_SPECS: dict[ModelRole, ModelSpec] = {
     ModelRole.CONTROLNET_CANNY: ModelSpec(
         ModelRole.CONTROLNET_CANNY, "xinsir/controlnet-canny-sdxl-1.0", ModelFamily.AUX,
         note="scene-lock Pass B; same vendor as CONTROLNET_POSE. Apache-2.0. Must be in the "
-             "baked runtime before src defaults scene_lock true (not a src-only backend-v*).",
+             "baked runtime before src defaults scene_lock true (not a src-only backend-v*). "
+             "A miss still pulls this repo from the model mirror, then Hub, so scene_lock "
+             "works on a pre-canny seed.",
     ),
     ModelRole.FRAME_INTERP: ModelSpec(
         ModelRole.FRAME_INTERP, "imaginairy/rife", ModelFamily.AUX,
@@ -132,6 +134,10 @@ DEFAULT_SPECS: dict[ModelRole, ModelSpec] = {
              "VERIFY the chosen model's license before seeding its weights to R2.",
     ),
 }
+
+# Hub revision pinned in deploy/bake-manifest.json for CONTROLNET_CANNY.
+CONTROLNET_CANNY_REVISION = "1271357eda52d54b857c650cacb5b51144643ccb"
+CONTROLNET_CANNY_CACHE = "models--xinsir--controlnet-canny-sdxl-1.0"
 
 
 def _namespaces_from_specs(specs: dict[ModelRole, ModelSpec]) -> frozenset[str]:
@@ -233,6 +239,33 @@ _I2V_OFFLOAD_VRAM_GB = 120
 # 12/16gb local-gpu: cache one ControlNet at a time (swap pipe.controlnet; not MultiControlNet).
 # Hosted (H200/B200) keeps both pose and canny cached.
 _CONTROLNET_UNLOAD_VRAM_GB = 24
+
+
+def download_canny_from_hub() -> None:
+    """Fetch CONTROLNET_CANNY into the local HF cache. Hosted workers already hold HF_TOKEN.
+
+    Temporarily clears the offline flags so snapshot_download can reach Hub, then
+    restores them. The worker stays offline for every other load."""
+    old = {
+        "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE"),
+        "TRANSFORMERS_OFFLINE": os.environ.get("TRANSFORMERS_OFFLINE"),
+        "HF_DATASETS_OFFLINE": os.environ.get("HF_DATASETS_OFFLINE"),
+    }
+    os.environ["HF_HUB_OFFLINE"] = "0"
+    os.environ["TRANSFORMERS_OFFLINE"] = "0"
+    os.environ["HF_DATASETS_OFFLINE"] = "0"
+    try:
+        from huggingface_hub import snapshot_download
+        snapshot_download(
+            DEFAULT_SPECS[ModelRole.CONTROLNET_CANNY].repo_id,
+            revision=CONTROLNET_CANNY_REVISION,
+        )
+    finally:
+        for key, value in old.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def controlnet_load_failure(role: ModelRole, exc: BaseException) -> BaseException:
@@ -553,9 +586,39 @@ class ModelServer:
     def _load_controlnet(self, spec: ModelSpec):
         import torch
         from diffusers import ControlNetModel
+        from .harness.models_mirror import aux_weights_revision, ensure_hub_repos
+
+        def _from_pretrained(*, revision: str | None, local: bool, src: str | None = None):
+            kw = dict(torch_dtype=torch.bfloat16, local_files_only=local)
+            load_src = src or spec.repo_id
+            if revision and src is None:
+                kw["revision"] = revision
+            return ControlNetModel.from_pretrained(load_src, **kw)
+
         try:
-            return ControlNetModel.from_pretrained(
-                spec.repo_id, torch_dtype=torch.bfloat16, local_files_only=True)
+            rev = aux_weights_revision(spec.repo_id)
+            if rev is None and spec.role is ModelRole.CONTROLNET_CANNY:
+                try:
+                    ensure_hub_repos((CONTROLNET_CANNY_CACHE,), force=True)
+                except Exception as pull_err:  # noqa: BLE001 -- Hub download is the next step
+                    print(f"controlnet R2 pull failed for {spec.role}: {pull_err}", flush=True)
+                rev = aux_weights_revision(spec.repo_id)
+            if rev is None and spec.role is ModelRole.CONTROLNET_CANNY:
+                download_canny_from_hub()
+                rev = aux_weights_revision(spec.repo_id) or CONTROLNET_CANNY_REVISION
+            if rev is None:
+                raise FileNotFoundError(
+                    f"no weight snapshot for {spec.role.value} ({spec.repo_id})")
+            snap = None
+            if spec.role is ModelRole.CONTROLNET_CANNY:
+                from .harness.models_mirror import hub_cache_dir
+                candidate = hub_cache_dir(spec.repo_id) / "snapshots" / rev
+                if (candidate / "config.json").exists():
+                    snap = str(candidate)
+            cn = _from_pretrained(revision=None if snap else rev, local=True, src=snap)
+            if torch.cuda.is_available():
+                cn = cn.to("cuda")
+            return cn
         except Exception as e:  # noqa: BLE001 -- wrap canny misses as HarnessError; re-raise others
             mapped = controlnet_load_failure(spec.role, e)
             if mapped is e:
