@@ -8,11 +8,60 @@ constraints (version-tag pinning, the account worker quota).
 See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 `docs/operations.md` (build/deploy/pin mechanics).
 
-**Current backend pin (2026-07-15):** `:1.0.2` (or later). **Never pin `:1.0.1`**
-(t2 weight-digest rewrite; RunPod `unexpected EOF`). Incident:
-[`runpod-1.0.1-weight-digest-eof.md`](runpod-1.0.1-weight-digest-eof.md). Conrad's
-local-panel backend endpoint is a **separate** ID (`uf4iwoen5r48zx`); pin both on
-every backend release (fleet map: `fleet-chezmoi` `docs/runbooks/vivijure-runpod-endpoints.md`).
+**Do not pin `:1.0.1`** (t2 weight-digest rewrite; RunPod `unexpected EOF`). Incident:
+[`runpod-1.0.1-weight-digest-eof.md`](runpod-1.0.1-weight-digest-eof.md).
+
+## Current state (read from `GET /v2/serverless` on 2026-10-30)
+
+| | `vivijure-backend-hosted` | `vivijure-upscale-hosted` |
+|---|---|---|
+| id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
+| Image | `vivijure-backend:1.1.1@sha256:0ebdc0e19b48676e310a10c863c7dfc4e6a8c642b3fbd887e73e248a6780157f` | `vivijure-upscale:1.0.4` |
+| Pools | `BLACKWELL_96`, `BLACKWELL_180`, `BLACKWELL_288` | `BLACKWELL_96` |
+| `workers` min / max | 0 / 30 | 0 / 10 |
+| Idle timeout | 180 s | 10 s |
+| Scaler | `QUEUE_DELAY` 4 | `QUEUE_DELAY` 4 |
+| FlashBoot | on | on |
+| Container disk | 80 GB | 40 GB |
+| Mounts | none | none |
+| Execution timeout | 3600 s | 900 s |
+| Min CUDA | 12.8 | 12.0 |
+
+Backend env: `HF_HOME=/opt/models/hf-cache`, `VJ_MODELS_ROOT=/opt/models`, `VJ_MODEL_VERSION=1`,
+`HF_HUB_OFFLINE=1`. `VJ_VOLUME_ROOT` and `VJ_VOLUME_KIND` are not set on the endpoint. The thin image
+still sets them, and nothing is mounted there, so the worker logs that the volume is not mounted and
+takes the R2 mirror.
+
+**Why 80 GB.** A stills job pulls 26.22 GB from R2 (`mirror_complete total_bytes`). Six jobs on two
+80 GB workers ran with no ENOSPC. Below 80 GB is untested.
+
+**Why 180 s idle.** Measured on the same image: a cold keyframe cost $0.13 to $0.23 of worker time and
+a warm one $0.02, at $3.49 per hour. Idle costs $0.058 per minute, so holding a worker pays when the next
+job arrives within about 2 to 3.5 minutes. A one-off job pays up to about $0.17 of extra idle.
+
+**Previous values, for rollback** (read from the release before this one): image
+`vivijure-backend:1.1.0@sha256:b42084bb1e295976d4ad555566aee1240c5ce86f1692a33560a127ecb155e6ac`,
+disk 300 GB, idle timeout 10 s. That image starts a 114 GiB Wan pull on every keyframe job and needs
+the larger disk, so restore all three together.
+
+### Measured keyframe times, image 1.1.1
+
+80 GB, no volume, RTX PRO 6000, one shot, `final` tier, scene lock, trained LoRA supplied.
+
+| Run | Queue | Execution | First keyframe from submit |
+|---|---|---|---|
+| Cold | 161 s | 233 s | 6 min 31 s |
+| Cold | 6 s | 130 s | 2 min 12 s |
+| Warm | 0.2 s | 21 s | 22 s |
+| Warm | 0 s | 25 s | 26 s |
+
+Mirror on the cold run: 136 s at 192.5 MB/s. Each model load after that took 1.5 to 7 s.
+
+### Two cold submits ran serially
+
+Tested twice at `QUEUE_DELAY` 4 with `workers.max` 2. The second job waited for the first worker, then
+ran on it. On the cold pair, a second worker only began initializing about 2 min 12 s after submit, as
+the first job finished. So a burst of cold jobs queues before it fans out. Tracked in #545.
 
 ## Recommendation
 
@@ -82,39 +131,9 @@ GPU for the bulk of its wall-time. If it does not, fix the handler first.
 
 ## Per-endpoint reference (live config)
 
-All endpoints: `workersMin = 0` (no always-active billing), flashboot on,
-`scalerType = QUEUE_DELAY`, scalerValue 4.
-
-| Endpoint                 | id               | Panel / role                      | GPU tier                          | workersMax | standby | Image source repo            |
-|--------------------------|------------------|-----------------------------------|-----------------------------------|------------|---------|------------------------------|
-| `vivijure-backend`       | `t9wcvlxh8rc5la` | **CF production render**          | **B200 / H200** (datacenter)      | 8          | 8       | `vivijure-backend`           |
-| `vivijure-backend-local` | `uf4iwoen5r48zx` | **Local panel render**            | **B200 / H200** (datacenter)      | 3          | 3       | `vivijure-backend`           |
-| `vivijure-wan-train`     | `zqb7tougbqfkqa` | **CF Wan LoRA train**             | **B200 / H200** (datacenter)      | 3          | 3       | `vivijure-wan-train`         |
-| `vivijure-video-upscale` | `4q8idwbk6tyqbq` | CF finish                         | **RTX PRO 6000 Blackwell** (96 GB)| 5          | 5       | `vivijure-upscale`           |
-| ~~`vivijure-audio-upscale`~~ | ~~`sj0btgpjdtswa7`~~ | RETIRED (vivijure-cf#786: its only consumer, the `speech-upscale` module, is removed) | -- | -- | -- | -- |
-| ~~`vivijure-musetalk`~~ | ~~`zw6pt4lymf69pk`~~ | RETIRED (vivijure-cf#785: post-process lip-sync is removed; the repo is archived. Lip-sync moved to an audio-driven `motion.backend` door, which this backend does not provision) | -- | -- | -- | -- |
-
-**Worker quota:** sum of `workersMax` across the **four live rows** above = **19**
-(8 + 3 + 3 + 5). Two rows are retired and contribute nothing. The previous figure here was **25**,
-measured 2026-07-23 when six rows were live; it was not re-summed when `vivijure-audio-upscale`
-was struck, so it was already 3 too high before `vivijure-musetalk` retired. Plan was raised from
-18. Fleet IaC: `fleet-chezmoi/system/runpod/vivijure-worker-quota/spec.json`. RunPod account
-hard cap remains 30 until 2026-07-30 deposit/quota-40 (do not fund without Conrad).
-
-**Render `workersMax` policy (through 2026-07-30):** both render endpoints keep **at least 3**
-workers (`workersMax` and `workersStandby` >= 3). **CF production render (`t9wcvlxh8rc5la`) normally
-runs higher than local (`uf4iwoen5r48zx`)** because CF carries more production testing; canonical
-local backend stays **3**. Do not conflate the two IDs during quota ops or promote/restore (#305).
-Fleet map: `fleet-chezmoi/docs/runbooks/vivijure-runpod-endpoints.md`.
-
-**cf#61 local idle:** RunPod idle scale-down can drop local render `workersMax` to **0** after ~7d
-without requests. IaC target remains **3**; vivijure-core pre-submit reconcile (cf#61) restores when
-`RUNPOD_WORKERS_MAX` is set on the host.
-
-Render-tier endpoints (`vivijure-backend`, `vivijure-backend-local`, `vivijure-wan-train`) list
-**B200 / H200 only** (no RTX PRO 6000 Blackwell 96 GB SKUs). Finish endpoints list all three RTX
-PRO 6000 Blackwell editions (Server / Workstation / Max-Q) so the scheduler can place on whichever
-has stock.
+The two endpoints in "Current state" are the only ones on the account (2026-10-30). The endpoints this
+page used to list (`t9wcvlxh8rc5la`, `uf4iwoen5r48zx`, `zqb7tougbqfkqa`, `4q8idwbk6tyqbq`) no longer
+exist, and their IDs are history. Read `GET /v2/serverless` rather than this page before acting.
 
 ## Deploy constraint 1: pin by `:version`, never `:sha`
 
@@ -131,35 +150,16 @@ Pinning is a deliberate, separate step from building: a build does not touch the
 live endpoint (`docs/operations.md`). You pin the template, and the endpoint pulls
 the new image on its next cold start.
 
-## Deploy constraint 2: the 25-worker quota plan (30 hard cap)
+After an image change, jobs can land on stale workers until the rollout finishes. Read the worker's `version` and image before crediting a proof.
 
-The RunPod account has a **hard cap of 30 concurrent workers** across **all**
-serverless endpoints. The **planned allocation** for the six primary CF + local
-render endpoints sums to **25** `workersMax` (2026-07-23 rebalance; was 18). Local
-finish endpoints and local Wan train are additional slots outside that sum.
+## Deploy constraint 2: the account worker quota
 
-| Endpoint | workersMax |
-| --- | ---: |
-| CF render | 8 |
-| Local render | 3 |
-| CF Wan train | 3 |
-| Video upscale | 5 |
-| MuseTalk | RETIRED (vivijure-cf#785) |
-| Audio upscale | RETIRED (vivijure-cf#786) |
-| **Sum of live rows** | **19** |
+**The quota is 50 `workers.max` across all endpoints** (measured 2026-10-30: `POST /v2/serverless` refused
+with "Max workers across all endpoints must not exceed your workers quota (50)" when the sum was 50). The
+sum now is **40** (30 + 10). The old figures on this page (30 cap, 25 plan, 19 sum) no longer hold.
 
-IaC: `fleet-chezmoi/system/runpod/vivijure-worker-quota/spec.json`. **Do not**
-raise account quota to 40 or fund the $500 deposit for 2026-07-30 without Conrad.
-
-Smoke RCA (2026-07-22, backend #305): quota pressure and promote `flush_worker_pool`
-restore can leave the job plane paused or force emergency rebalancing. **Free
-headroom by lowering the local panel render EP (`uf4iwoen5r48zx`) to 3**, not by
-collapsing CF production render (`t9wcvlxh8rc5la`) to 3. CF prod render stays at
-**8** until the planned 2026-07-30 scale event (fleet runbook).
-
-Consequence: **adding a new endpoint, or raising any `workersMax`, requires
-lowering another endpoint's `workersMax` first.** Re-balance deliberately; a
-`wrangler`/Cloudflare deploy will not catch over-allocation.
+Consequence: **adding an endpoint, or raising `workers.max`, can be refused at create or update.** Check
+the sum first. Lower another endpoint deliberately if needed, and read the result back.
 
 ## Billing note (so nobody re-flags standby)
 
