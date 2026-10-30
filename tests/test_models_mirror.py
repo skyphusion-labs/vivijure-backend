@@ -3,6 +3,9 @@ leaves `<name>.rclonelink` marker files on download; the HF cache needs real sym
 from pathlib import Path
 
 import json
+import os
+
+import pytest
 
 from vivijure_backend.harness import models_mirror
 from vivijure_backend.harness.models_mirror import (
@@ -903,14 +906,12 @@ def _drive_cold_pull(tmp_path, monkeypatch):
     import subprocess as _sp
     calls = []
 
-    def fake_run(argv, *a, **kw):
-        calls.append((argv, kw))
-        class _CP:  # minimal CompletedProcess stand-in
-            returncode = 0
-        return _CP()
+    def fake_run(argv, env):
+        calls.append((argv, {"env": env, "check": True}))
+        return 0
 
     monkeypatch.setattr(models_mirror.shutil, "which", lambda _: "/usr/bin/rclone")
-    monkeypatch.setattr(models_mirror.subprocess, "run", fake_run)
+    monkeypatch.setattr(models_mirror, "_run_rclone", fake_run)
     monkeypatch.setattr(models_mirror, "_reconstruct_symlinks", lambda *a, **k: 0)
     monkeypatch.setattr(models_mirror, "_jitter_seconds", lambda *_: 0.0)
     hf = tmp_path / "hf-cache"
@@ -967,3 +968,67 @@ def test_cold_pull_legs_are_behavior_equivalent(tmp_path, monkeypatch):
     hf_argv = calls[0][0]
     for repo in DEFAULT_SKIP_REPOS:
         assert f"hub/{repo}/**" in hf_argv
+
+
+def _fake_rclone_on_path(tmp_path, monkeypatch, script: str):
+    """A real executable, so _run_rclone's own pipe, count and exit handling run for real."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    exe = bin_dir / "rclone"
+    exe.write_text("#!/bin/sh\n" + script + "\n")
+    exe.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+
+def test_run_rclone_counts_failed_passes_and_passes_the_log_through(tmp_path, monkeypatch, capsys):
+    _fake_rclone_on_path(tmp_path, monkeypatch,
+                         'echo "ERROR : Attempt 1/3 failed with 1 errors and: reset"; echo "INFO : 1 GiB"')
+    assert models_mirror._run_rclone(["rclone", "copy"], dict(os.environ)) == 1
+    out = capsys.readouterr().out
+    assert "Attempt 1/3 failed" in out and "1 GiB" in out
+
+
+def test_run_rclone_reads_stderr_because_that_is_where_rclone_logs(tmp_path, monkeypatch):
+    _fake_rclone_on_path(tmp_path, monkeypatch, 'echo "ERROR : Attempt 1/3 failed" >&2')
+    assert models_mirror._run_rclone(["rclone", "copy"], dict(os.environ)) == 1
+
+
+def test_run_rclone_raises_on_a_failed_exit(tmp_path, monkeypatch):
+    import subprocess as _sp
+    _fake_rclone_on_path(tmp_path, monkeypatch, "exit 3")
+    with pytest.raises(_sp.CalledProcessError):
+        models_mirror._run_rclone(["rclone", "copy"], dict(os.environ))
+
+
+def test_a_cold_pull_records_legs_retries_and_bytes(tmp_path, monkeypatch):
+    def fake(argv, env):
+        return 2 if any("hf-cache" in a for a in argv) else 0
+    monkeypatch.setattr(models_mirror.shutil, "which", lambda _: "/usr/bin/rclone")
+    monkeypatch.setattr(models_mirror, "_run_rclone", fake)
+    monkeypatch.setattr(models_mirror, "_reconstruct_symlinks", lambda *a, **k: 0)
+    monkeypatch.setattr(models_mirror, "_jitter_seconds", lambda *_: 0.0)
+    env = {**_R2_CREDS, "HF_HOME": str(tmp_path / "hf-cache"), "VJ_MODELS_ROOT": str(tmp_path)}
+    assert ensure_models(env=env, log=lambda *_: None) is True
+    stats = models_mirror.last_mirror_stats()
+    assert stats["retries"] == 2
+    assert {"hf-cache", "antelopev2"} <= set(stats["legs"])
+    assert isinstance(stats["total_bytes"], int) and "wall_seconds" in stats
+    # A warm job in the same process reports no pull, never the previous job's.
+    assert ensure_models(env=env, log=lambda *_: None) is False
+    assert models_mirror.last_mirror_stats() is None
+
+
+def test_a_failed_pull_keeps_the_legs_that_finished(tmp_path, monkeypatch):
+    import subprocess as _sp
+    def fake(argv, env):
+        if any("antelopev2" in a for a in argv):
+            raise _sp.CalledProcessError(1, argv)
+        return 1
+    monkeypatch.setattr(models_mirror.shutil, "which", lambda _: "/usr/bin/rclone")
+    monkeypatch.setattr(models_mirror, "_run_rclone", fake)
+    monkeypatch.setattr(models_mirror, "_jitter_seconds", lambda *_: 0.0)
+    env = {**_R2_CREDS, "HF_HOME": str(tmp_path / "hf-cache"), "VJ_MODELS_ROOT": str(tmp_path)}
+    with pytest.raises(_sp.CalledProcessError):
+        ensure_models(env=env, log=lambda *_: None)
+    stats = models_mirror.last_mirror_stats()
+    assert list(stats["legs"]) == ["hf-cache"] and stats["retries"] == 1

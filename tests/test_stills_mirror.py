@@ -146,7 +146,7 @@ def fake_rclone(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(mm.shutil, "which", lambda n: "/x/" + n)
     monkeypatch.setattr(mm, "_jitter_seconds", lambda e: 0)
-    monkeypatch.setattr(mm.subprocess, "run", lambda cmd, **k: calls.append(cmd))
+    monkeypatch.setattr(mm, "_run_rclone", lambda cmd, env: calls.append(cmd) or 0)
     return calls
 
 

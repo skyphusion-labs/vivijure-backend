@@ -14,6 +14,7 @@ the per-shot clips plus a manifest for a separate CPU container to merge.
 from __future__ import annotations
 
 import shutil
+import time
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
@@ -71,6 +72,7 @@ def run_job(
     job_id: str = "local",
     mirrored: bool = False,
     on_progress=None,
+    mirror_stats: dict | None = None,
 ) -> dict:
     """Run one render job end to end and return the control-plane response dict.
 
@@ -88,7 +90,7 @@ def run_job(
 
     progress = ProgressEmitter(store, req.project, job_id, on_progress=on_progress)
     progress.emit("started", action=req.action, quality=req.quality_tier, project=req.project)
-    progress.emit("mirror_done", pulled=bool(mirrored))
+    progress.emit("mirror_done", pulled=bool(mirrored), **(mirror_stats or {}))
     # Before anything imports huggingface_hub, which reads HF_HOME once. See volume_hydrate.
     if req.action in _SDXL_ACTIONS:
         maybe_hydrate(progress.emit)
@@ -506,6 +508,7 @@ def run_finish_job(
     job_id: str = "local",
     on_progress=None,
     deadline: Deadline | None = None,
+    mirror_stats: dict | None = None,
 ) -> dict:
     """Standalone finish pass: download a clip from R2, run RIFE interpolation and/or face restore,
     upload the result, return the output key. No bundle, no pipeline, no Wan needed.
@@ -524,6 +527,8 @@ def run_finish_job(
 
     progress = ProgressEmitter(store, project, job_id, on_progress=on_progress)
     progress.emit("started", action="finish_clip", project=project)
+    if mirror_stats:
+        progress.emit("mirror_done", pulled=True, **mirror_stats)
 
     try:
         if not clip_key_in:
@@ -607,6 +612,7 @@ def run_i2v_clip_job(
     workdir: Path,
     job_id: str = "local",
     on_progress=None,
+    mirror_stats: dict | None = None,
 ) -> dict:
     """Standalone per-shot image-to-video pass: fetch a keyframe from R2, animate it into one clip
     with Wan2.2-I2V, upload the clip, return its key. No bundle, no render pipeline -- just the
@@ -638,6 +644,8 @@ def run_i2v_clip_job(
 
     progress = ProgressEmitter(store, project, job_id, on_progress=on_progress)
     progress.emit("started", action="i2v_clip", project=project, shot_id=shot_id)
+    if mirror_stats:
+        progress.emit("mirror_done", pulled=True, **mirror_stats)
 
     try:
         if not prompt:
@@ -776,12 +784,13 @@ def handler(job: dict) -> dict:
     record to R2 (R2 is the failure), so it degrades to stdout + the RunPod hook."""
     import tempfile
 
-    from .models_mirror import ensure_models
+    from .models_mirror import ensure_models, last_mirror_stats
     from .r2 import R2, R2Config
     from .pipeline_registry import get_pipeline  # the deploy registers its GPU pipeline here
 
     payload = job.get("input", job)
     project = str(payload.get("project") or "untitled")
+    handler_started = time.monotonic()
     job_id = str(job.get("id") or "unknown")
     on_progress = _runpod_progress_hook(job)
 
@@ -827,8 +836,11 @@ def handler(job: dict) -> dict:
             # stage can run at all (models_mirror.i2v_stage_possible, backend#453).
             mirrored = ensure_models(action=action_in)
         except Exception as e:
-            ProgressEmitter(store, project, job_id, on_progress=on_progress).error("mirror", e)
+            failed = ProgressEmitter(store, project, job_id, on_progress=on_progress)
+            failed.emit("mirror_failed", **(last_mirror_stats() or {}))
+            failed.error("mirror", e)
             raise
+        mirror_stats = last_mirror_stats()
         # The mirror is one un-interruptible call, so it is bounded only at its EDGES: it cannot be
         # cut short, but it can no longer be followed by compute that ignores how long it took. On
         # the baked production image it short-circuits in milliseconds (models_mirror.is_baked).
@@ -850,15 +862,22 @@ def handler(job: dict) -> dict:
             if action == "finish_clip":
                 return run_finish_job(payload, store=store, workdir=workdir,
                                       job_id=job_id, on_progress=on_progress,
-                                      deadline=deadline)
+                                      deadline=deadline, mirror_stats=mirror_stats)
             if action == "i2v_clip":
                 return run_i2v_clip_job(payload, store=store, workdir=workdir,
-                                        job_id=job_id, on_progress=on_progress)
+                                        job_id=job_id, on_progress=on_progress, mirror_stats=mirror_stats)
 
             # Prior-state restore happens INSIDE run_job now (#112): it needs the extracted
             # bundle's storyboard to name the per-artifact R2 keys it checks.
-            return run_job(payload, pipeline=get_pipeline(), store=store, workdir=workdir,
-                           job_id=job_id, mirrored=bool(mirrored), on_progress=on_progress)
+            # Building the pipeline is the other thing that runs before the job's first event.
+            pipeline_started = time.monotonic()
+            pipeline = get_pipeline()
+            now = time.monotonic()
+            before_job = {"pipeline_seconds": round(now - pipeline_started, 1),
+                          "before_job_seconds": round(now - handler_started, 1)}
+            return run_job(payload, pipeline=pipeline, store=store, workdir=workdir,
+                           job_id=job_id, mirrored=bool(mirrored), on_progress=on_progress,
+                           mirror_stats={**(mirror_stats or {}), **before_job})
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
     except FinishDeadlineExceeded as expiry:
