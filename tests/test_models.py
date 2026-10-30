@@ -109,6 +109,61 @@ def test_bake_manifest_drops_wan_i2v_and_keeps_the_still_stack():
         assert repo not in drop
 
 
+def test_canny_revision_pin_matches_bake_manifest():
+    import json
+    from pathlib import Path
+    from vivijure_backend.models import CONTROLNET_CANNY_CACHE, CONTROLNET_CANNY_REVISION
+    root = Path(__file__).resolve().parents[1]
+    m = json.loads((root / "deploy" / "bake-manifest.json").read_text())
+    repos = {e["repo"]: e for e in m["keep_repos"]}
+    assert repos["models--xinsir--controlnet-canny-sdxl-1.0"]["rev"] == CONTROLNET_CANNY_REVISION
+    assert CONTROLNET_CANNY_CACHE == "models--xinsir--controlnet-canny-sdxl-1.0"
+
+
+def test_load_controlnet_canny_pulls_when_cache_has_no_weights(monkeypatch):
+    from vivijure_backend.models import (
+        CONTROLNET_CANNY_CACHE, CONTROLNET_CANNY_REVISION, DEFAULT_SPECS, ModelServer,
+    )
+    pulls = []
+    downloads = []
+    loads = []
+
+    monkeypatch.setattr(
+        "vivijure_backend.harness.models_mirror.aux_weights_revision",
+        lambda repo_id, env=None: CONTROLNET_CANNY_REVISION if pulls else None)
+    monkeypatch.setattr(
+        "vivijure_backend.harness.models_mirror.ensure_hub_repos",
+        lambda repos, **kw: pulls.append(repos) or True)
+    monkeypatch.setattr(
+        "vivijure_backend.models.download_canny_from_hub",
+        lambda: downloads.append(True))
+
+    class FakeCN:
+        @staticmethod
+        def from_pretrained(repo_id, **kw):
+            loads.append((repo_id, kw))
+            return "cn"
+
+    import sys
+    import types
+    fake_diffusers = types.ModuleType("diffusers")
+    fake_diffusers.ControlNetModel = FakeCN
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+    fake_torch = types.ModuleType("torch")
+    fake_torch.bfloat16 = "bf16"
+    fake_cuda = types.SimpleNamespace(is_available=lambda: False)
+    fake_torch.cuda = fake_cuda
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    server = ModelServer(device=H200)
+    out = server._load_controlnet(DEFAULT_SPECS[ModelRole.CONTROLNET_CANNY])
+    assert out == "cn"
+    assert pulls == [(CONTROLNET_CANNY_CACHE,)]
+    assert downloads == []
+    assert loads[0][1]["revision"] == CONTROLNET_CANNY_REVISION
+    assert loads[0][1]["local_files_only"] is True
+
+
 def test_missing_canny_weights_raise_harness_error_naming_the_role():
     from vivijure_backend.harness.handler import HarnessError
     from vivijure_backend.models import controlnet_load_failure

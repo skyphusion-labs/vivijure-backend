@@ -679,6 +679,82 @@ def test_not_baked_without_creds_does_not_falsely_skip_as_baked(tmp_path):
 
 # ------------------------------------------------------- repo_in_hf_cache (offline presence gate)
 
+def test_aux_weights_revision_ignores_config_only_snapshot(tmp_path):
+    # bake_hf_configs leaves a config stub. repo_in_hf_cache is True. Weights are not.
+    env = {"HF_HOME": str(tmp_path / "hf-cache")}
+    repo = "xinsir/controlnet-canny-sdxl-1.0"
+    cache = (tmp_path / "hf-cache" / "hub" / "models--xinsir--controlnet-canny-sdxl-1.0")
+    stub = cache / "snapshots" / "configonly"
+    stub.mkdir(parents=True)
+    (stub / "config.json").write_text("{}")
+    (cache / "refs").mkdir()
+    (cache / "refs" / "main").write_text("configonly\n")
+    assert models_mirror.repo_in_hf_cache(repo, env) is True
+    assert models_mirror.aux_weights_revision(repo, env) is None
+
+
+def test_aux_weights_revision_prefers_refs_main_when_weighted(tmp_path):
+    env = {"HF_HOME": str(tmp_path / "hf-cache")}
+    repo = "xinsir/controlnet-canny-sdxl-1.0"
+    cache = (tmp_path / "hf-cache" / "hub" / "models--xinsir--controlnet-canny-sdxl-1.0")
+    main = cache / "snapshots" / "aabbcc"
+    other = cache / "snapshots" / "ddeeff"
+    main.mkdir(parents=True)
+    other.mkdir(parents=True)
+    (main / "diffusion_pytorch_model.safetensors").write_bytes(b"w")
+    (other / "diffusion_pytorch_model.safetensors").write_bytes(b"w")
+    (cache / "refs").mkdir()
+    (cache / "refs" / "main").write_text("aabbcc\n")
+    assert models_mirror.aux_weights_revision(repo, env) == "aabbcc"
+
+
+def test_aux_weights_revision_finds_weighted_snap_when_refs_main_is_stub(tmp_path):
+    env = {"HF_HOME": str(tmp_path / "hf-cache")}
+    repo = "xinsir/controlnet-canny-sdxl-1.0"
+    cache = (tmp_path / "hf-cache" / "hub" / "models--xinsir--controlnet-canny-sdxl-1.0")
+    stub = cache / "snapshots" / "configonly"
+    real = cache / "snapshots" / "1271357eda52d54b857c650cacb5b51144643ccb"
+    stub.mkdir(parents=True)
+    real.mkdir(parents=True)
+    (stub / "config.json").write_text("{}")
+    (real / "diffusion_pytorch_model.safetensors").write_bytes(b"w")
+    (cache / "refs").mkdir()
+    (cache / "refs" / "main").write_text("configonly\n")
+    assert models_mirror.aux_weights_revision(repo, env) == (
+        "1271357eda52d54b857c650cacb5b51144643ccb")
+
+
+def test_ensure_hub_repos_force_pulls_on_baked_image(tmp_path, monkeypatch):
+    env = {
+        "HF_HOME": str(tmp_path / "hf-cache"),
+        "VJ_MODELS_ROOT": str(tmp_path / "models"),
+        "R2_ACCESS_KEY_ID": "AKIAFAKE",
+        "R2_SECRET_ACCESS_KEY": "s3cr3t",
+        "R2_ENDPOINT": "https://acct.r2.cloudflarestorage.com",
+        "R2_BUCKET": "vivijure",
+    }
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / models_mirror.BAKED_SENTINEL).write_text("BAKED\n")
+    calls = []
+
+    def fake_run(argv, *a, **kw):
+        calls.append(argv)
+        class R:
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr(models_mirror.shutil, "which", lambda _n: "/usr/bin/rclone")
+    monkeypatch.setattr(models_mirror.subprocess, "run", fake_run)
+    skipped = models_mirror.ensure_hub_repos(
+        ("models--xinsir--controlnet-canny-sdxl-1.0",), env=env)
+    assert skipped is False
+    assert calls == []
+    ran = models_mirror.ensure_hub_repos(
+        ("models--xinsir--controlnet-canny-sdxl-1.0",), env=env, force=True)
+    assert ran is True
+    assert any("models--xinsir--controlnet-canny-sdxl-1.0" in " ".join(c) for c in calls)
+
+
 def test_repo_in_hf_cache_true_only_with_a_populated_snapshot(tmp_path):
     env = {"HF_HOME": str(tmp_path / "hf-cache")}
     repo = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"

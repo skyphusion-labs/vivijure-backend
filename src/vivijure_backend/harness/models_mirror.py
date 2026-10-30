@@ -137,15 +137,58 @@ def is_baked(env: dict | None = None) -> bool:
     return (models_root / BAKED_SENTINEL).exists()
 
 
+_WEIGHT_SUFFIXES = (".safetensors", ".bin")
+
+
+def _hf_home(env: dict | None = None) -> Path:
+    e = env if env is not None else os.environ
+    return Path(e.get("HF_HOME") or Path(e.get("VJ_MODELS_ROOT", "/opt/models")) / "hf-cache")
+
+
+def hub_cache_dir(repo_id: str, env: dict | None = None) -> Path:
+    """HF hub cache dir for `repo_id` (`models--<org>--<name>`). Pure path join."""
+    return _hf_home(env) / "hub" / ("models--" + repo_id.replace("/", "--"))
+
+
+def snapshot_has_weights(snap: Path) -> bool:
+    """True iff `snap` holds a real weight file, not a config-only bake_hf_configs stub."""
+    if not snap.is_dir():
+        return False
+    return any(p.is_file() and p.suffix in _WEIGHT_SUFFIXES for p in snap.rglob("*"))
+
+
+def aux_weights_revision(repo_id: str, env: dict | None = None) -> str | None:
+    """Snapshot hash that holds real weights, or None.
+
+    bake_hf_configs writes config-only snapshots and can point refs/main at them.
+    repo_in_hf_cache is then True, and from_pretrained OSErrors on the missing
+    tensors. Prefer refs/main when THAT snapshot has weights. Else any weighted
+    snapshot. Pure: stat only."""
+    repo = hub_cache_dir(repo_id, env)
+    snaps = repo / "snapshots"
+    if not snaps.is_dir():
+        return None
+    ref = repo / "refs" / "main"
+    if ref.is_file():
+        rev = ref.read_text().strip()
+        if rev and snapshot_has_weights(snaps / rev):
+            return rev
+    weighted = sorted(
+        p.name for p in snaps.iterdir() if p.is_dir() and snapshot_has_weights(p))
+    return weighted[0] if weighted else None
+
+
 def repo_in_hf_cache(repo_id: str, env: dict | None = None) -> bool:
     """True iff `repo_id` is offline-loadable from the local HF hub cache: the `models--<org>--<name>`
     dir exists AND holds a non-empty snapshot. A bare cache dir with no populated snapshot still raises
     LocalEntryNotFoundError under `local_files_only=True`, so a from_pretrained caller must gate on THIS,
     not on the dir alone. Pure: stat only, no I/O. (The sm_120 de-risk hit exactly this -- the runtime
-    asked for a repo that was never baked, and a glob-only baked_probe masked it.)"""
+    asked for a repo that was never baked, and a glob-only baked_probe masked it.)
+
+    Config-only snapshots (bake_hf_configs) also return True. Callers that need
+    tensors must use aux_weights_revision."""
     e = env if env is not None else os.environ
-    hf_home = Path(e.get("HF_HOME") or Path(e.get("VJ_MODELS_ROOT", "/opt/models")) / "hf-cache")
-    snaps = hf_home / "hub" / ("models--" + repo_id.replace("/", "--")) / "snapshots"
+    snaps = _hf_home(e) / "hub" / ("models--" + repo_id.replace("/", "--")) / "snapshots"
     if not snaps.is_dir():
         return False
     return any(p.is_dir() and any(p.iterdir()) for p in snaps.iterdir())
@@ -780,6 +823,41 @@ def start_i2v_prefetch(*, env: dict | None = None, log: Callable[[str], None] = 
     t.start()
     log("models_mirror: eager i2v prefetch started (overlaps LoRA training).")
     return t
+
+
+def ensure_hub_repos(repos: tuple[str, ...], *, env: dict | None = None,
+                     log: Callable[[str], None] = print, force: bool = False) -> bool:
+    """Mirror specific HF-cache repo dirs from R2. Does not use the i2v sentinel.
+
+    A baked image skips unless force=True. force is for a role the bake omitted
+    (canny on the live 1.0.16 seed). Returns True if a pull ran."""
+    if not repos:
+        return False
+    e = mirror_env(env)
+    if is_baked(e) and not force:
+        log("models_mirror: baked image; skipping hub-repo R2 pull "
+            f"({', '.join(repos)}).")
+        return False
+    if is_baked(e) and force:
+        log("models_mirror: baked image, forced hub-repo R2 pull; not skipping.")
+    if not e.get("R2_ACCESS_KEY_ID"):
+        log("models_mirror: no R2 creds; hub-repo pull skipped.")
+        return False
+    if shutil.which("rclone") is None:
+        raise RuntimeError("models_mirror: rclone is not installed in the image")
+    hf_home = _hf_home(e)
+    bucket = e.get("R2_BUCKET", "vivijure")
+    renv = rclone_env(e)
+    hub = hf_home / "hub"
+    hub.mkdir(parents=True, exist_ok=True)
+    for repo in repos:
+        log(f"models_mirror: hub-repo pull -> mirroring {repo} from R2...")
+        subprocess.run(
+            mirror_cmd(f"r2:{bucket}/models/hf-cache/hub/{repo}", hub / repo),
+            check=True, env=renv)
+    _reconstruct_symlinks(hf_home, log)
+    log("models_mirror: hub-repo pull complete.")
+    return True
 
 
 # Known-absent files that diffusers probes for under HF_HUB_OFFLINE=1.
