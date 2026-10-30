@@ -13,7 +13,7 @@ import yaml
 from vivijure_backend.config import RenderConfig
 from vivijure_backend.contract import Bundle, RenderRequest, Scene
 from vivijure_backend.harness.handler import HarnessError, Outputs, run_job
-from vivijure_backend.orchestrator import plan as make_plan
+from vivijure_backend.orchestrator import kf_hash, plan as make_plan
 from vivijure_backend.pipeline import GpuPipeline, i2v_params_from, keyframe_params_from
 from vivijure_backend.routing import QualityTier
 
@@ -245,7 +245,8 @@ def test_execute_honors_reuse_and_pretrained(tmp_path):
     req = RenderRequest.from_dict({"action": "render", "project": "neon", "bundle_key": "x",
                                    "quality_tier": "final", "pretrained_loras": {"A": str(pre)}})
     plan = make_plan(req, bundle.storyboard,
-                     trained_slots=set(req.pretrained_loras), existing_keyframes={"shot_01": None})
+                     trained_slots=set(req.pretrained_loras),
+                     existing_keyframes={"shot_01": kf_hash(req.config.keyframe)})
     work = tmp_path / "work"
     (work / "keyframes").mkdir(parents=True)
     (work / "keyframes" / "shot_01.png").write_bytes(b"x")   # stage the reused keyframe
@@ -267,7 +268,7 @@ def test_execute_fails_loud_when_reused_keyframe_is_missing(tmp_path):
     bundle = _extract_bundle(tmp_path)
     req = RenderRequest.from_dict({"action": "render", "project": "neon",
                                    "bundle_key": "x", "quality_tier": "final"})
-    plan = make_plan(req, bundle.storyboard, existing_keyframes={"shot_01": None})
+    plan = make_plan(req, bundle.storyboard, existing_keyframes={"shot_01": kf_hash(req.config.keyframe)})
     pipe = StubPipeline(req.config)
     with pytest.raises(HarnessError, match="shot_01"):
         pipe.execute(plan, bundle, tmp_path / "work")     # shot_01 keyframe not staged

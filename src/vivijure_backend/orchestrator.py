@@ -214,7 +214,7 @@ def plan(
     storyboard: Storyboard,
     *,
     trained_slots: set[str] = frozenset(),       # slots whose LoRA already exists (prior state)
-    existing_keyframes: dict[str, str | None] = {},  # shot_id -> stored hash (None = old state, no hash)
+    existing_keyframes: dict[str, str | None] = {},  # shot_id -> stored hash (None = unproven, redrawn; old state, no hash)
 ) -> RenderPlan:
     """Decide the whole render on the CPU. Nothing here touches a GPU."""
     action = Action.parse(request.action)
@@ -304,12 +304,11 @@ def _keyframe_mode(
     if scene.start_image:
         return KeyframeMode.INJECT  # authored / cloud-made keyframe handed in
     if want_keyframe and scene.id in existing:
-        stored = existing[scene.id]
-        if stored is None:
-            return KeyframeMode.REUSE  # old state without a hash; reuse conservatively
-        if stored == current_hash:
+        # Reuse needs PROOF the parameters match (#488). A still with no hash may be another render's:
+        # film-a9939630 asked for SDXL and returned a cloud door's stills as COMPLETED, drawing nothing.
+        if existing[scene.id] == current_hash:
             return KeyframeMode.REUSE  # params unchanged; safe to reuse
-        # hash mismatch: render params changed since the cached keyframe was drawn
+        # no hash, or a hash for other params: draw it
     return KeyframeMode.GENERATE
 
 

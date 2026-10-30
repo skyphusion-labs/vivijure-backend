@@ -349,6 +349,9 @@ class Keyframe:
     """A rendered keyframe in the result: the shot it belongs to and its object-store key."""
     shot_id: str
     key: str  # object-store key of the PNG
+    # True when this job drew nothing and reports a still already in the store. The studio stamps its
+    # config provenance only on a still drawn this run, or the record claims a match it does not have.
+    reused: bool = False
 
 
 @dataclass
@@ -385,7 +388,8 @@ class RenderResult:
             "seconds": self.seconds,
             "has_audio": self.has_audio,
             "audio_missing": self.audio_missing,
-            "keyframes": [{"shot_id": k.shot_id, "key": k.key} for k in self.keyframes],
+            "keyframes": [{"shot_id": k.shot_id, "key": k.key, **({"reused": True} if k.reused else {})}
+                          for k in self.keyframes],
             "lora": self.lora,
             "state_key": self.state_key,
         }
