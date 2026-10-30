@@ -150,6 +150,8 @@ Pinning is a deliberate, separate step from building: a build does not touch the
 live endpoint (`docs/operations.md`). You pin the template, and the endpoint pulls
 the new image on its next cold start.
 
+After an image change, jobs can land on stale workers until the rollout finishes. Read the worker's `version` and image before crediting a proof.
+
 ## Deploy constraint 2: the account worker quota
 
 **The quota is 50 `workers.max` across all endpoints** (measured 2026-10-30: `POST /v2/serverless` refused
