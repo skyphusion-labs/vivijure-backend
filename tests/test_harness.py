@@ -54,7 +54,9 @@ def test_key_slug_guards_slot():
 def test_mirror_cmd_copies_with_links_and_excludes():
     cmd = mirror_cmd("r2:vivijure/models/hf-cache", Path("/hf"),
                      skip_repos=("models--X", "spaces--Y"))
-    assert cmd[:4] == ["rclone", "copy", "--links", "--transfers"]
+    assert cmd[:3] == ["rclone", "copy", "--links"]
+    assert "--transfers" in cmd
+    assert "--local-no-set-modtime" in cmd
     assert "--config" not in cmd                       # remote resolves from env, no on-disk conf
     assert "--exclude" in cmd and "**/*.incomplete" in cmd
     assert "hub/models--X/**" in cmd and "hub/spaces--Y/**" in cmd
@@ -764,13 +766,12 @@ def test_runpod_hook_falls_back_to_sdk_progress_update_without_rp_progress(monke
 
 # --------------------------------------------------- i2v prefetch gate (cf#29 D2a)
 
-def test_wants_i2v_prefetch_skips_train_only_and_finish():
+def test_wants_i2v_prefetch_matches_i2v_stage_possible():
     from vivijure_backend.harness.handler import _wants_i2v_prefetch
-    # SKIP: these jobs never load the Wan i2v pipeline, so the ~120GB prefetch must not start.
-    assert _wants_i2v_prefetch("finish_clip") is False
-    assert _wants_i2v_prefetch("train_lora") is False
-    # KEEP (positive controls): every render-path action still eagerly prefetches i2v.
-    for action in ("render", "finalize", "preview", "regen_shot"):
+    # SKIP: these jobs never load Wan. Prefetch on preview wrote 117 GB onto the volume.
+    for action in ("finish_clip", "train_lora", "preview", "regen_shot"):
+        assert _wants_i2v_prefetch(action) is False, action
+    for action in ("render", "finalize", "i2v_clip"):
         assert _wants_i2v_prefetch(action) is True, action
-    # default/unknown action falls through to the render path -> keep the prefetch
-    assert _wants_i2v_prefetch("render") is True
+    # unknown action stays demanding, same as i2v_stage_possible
+    assert _wants_i2v_prefetch("teleport") is True

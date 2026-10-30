@@ -14,6 +14,7 @@ from vivijure_backend.harness.models_mirror import (
     VOLUME_KIND_GLOBAL,
     VOLUME_KIND_NETWORK,
     _DEFAULT_MODEL_VERSION,
+    _forbids_r2_pull,
     _PRELOAD_LOCK,
     SENTINEL,
     BAKED_SENTINEL,
@@ -557,6 +558,10 @@ def test_mirror_cmd_includes_multi_thread_flags():
     assert "8" in cmd
     assert "--multi-thread-cutoff" in cmd
     assert "100M" in cmd
+    assert "--inplace" in cmd
+    assert "--no-update-modtime" in cmd
+    assert "--no-update-dir-modtime" in cmd
+    assert "--local-no-set-modtime" in cmd
 
 
 def test_start_i2v_prefetch_skips_warm(tmp_path, monkeypatch):
@@ -570,6 +575,74 @@ def test_start_i2v_prefetch_skips_no_creds(tmp_path, monkeypatch):
     monkeypatch.setattr(models_mirror, "_i2v_prefetch_thread", None)
     env = {"VJ_MODELS_ROOT": str(tmp_path)}  # no R2 creds
     assert start_i2v_prefetch(env=env, log=lambda *_: None) is None
+
+
+# --------------------------------------------------------- global volume never pulls (#530)
+
+def test_forbids_r2_pull_explicit_global():
+    assert _forbids_r2_pull({"VJ_VOLUME_KIND": "global"}) is True
+    assert _forbids_r2_pull({"VJ_VOLUME_KIND": "network"}) is False
+    assert _forbids_r2_pull({}) is False
+
+
+def test_forbids_r2_pull_allows_offline_writer(tmp_path, monkeypatch):
+    mount = tmp_path / "runpod-volume"
+    mount.mkdir()
+    monkeypatch.setattr(models_mirror, "DEFAULT_VOLUME_ROOT", str(mount))
+    e = {"VJ_MODELS_ROOT": str(mount)}
+    assert _forbids_r2_pull(e) is False
+
+
+def test_forbids_r2_pull_implicit_global_when_worker_names_root():
+    e = {"VJ_VOLUME_ROOT": DEFAULT_VOLUME_ROOT}
+    assert _forbids_r2_pull(e) is True
+
+
+def _no_rclone(monkeypatch):
+    called = []
+    monkeypatch.setattr(models_mirror.shutil, "which", lambda _: "/usr/bin/rclone")
+    monkeypatch.setattr(models_mirror.subprocess, "run",
+                        lambda *a, **k: called.append((a, k)))
+    return called
+
+
+def test_ensure_models_global_volume_never_rclone(tmp_path, monkeypatch):
+    vol = tmp_path / "vol"
+    vol.mkdir()
+    env = {**_R2_CREDS, "VJ_VOLUME_ROOT": str(vol), "VJ_VOLUME_KIND": "global",
+           "HF_HOME": str(vol / "hf-cache"), "VJ_MODELS_ROOT": str(vol)}
+    called = _no_rclone(monkeypatch)
+    lines = []
+    assert ensure_models(env=env, log=lines.append, action="preview") is False
+    assert called == []
+    assert any("forbids R2 pull" in m for m in lines)
+
+
+def test_ensure_i2v_models_global_volume_never_rclone(tmp_path, monkeypatch):
+    env = {**_R2_CREDS, "VJ_VOLUME_KIND": "global",
+           "HF_HOME": str(tmp_path / "hf-cache"), "VJ_MODELS_ROOT": str(tmp_path)}
+    called = _no_rclone(monkeypatch)
+    lines = []
+    assert ensure_i2v_models(env=env, log=lines.append, force=True) is False
+    assert called == []
+    assert any("forbids i2v R2 pull" in m for m in lines)
+
+
+def test_ensure_hub_repos_global_volume_never_rclone(tmp_path, monkeypatch):
+    env = {**_R2_CREDS, "VJ_VOLUME_KIND": "global",
+           "HF_HOME": str(tmp_path / "hf-cache"), "VJ_MODELS_ROOT": str(tmp_path)}
+    called = _no_rclone(monkeypatch)
+    assert models_mirror.ensure_hub_repos(
+        ("models--xinsir--controlnet-canny-sdxl-1.0",), env=env, force=True) is False
+    assert called == []
+
+
+def test_start_i2v_prefetch_skips_global_volume(tmp_path, monkeypatch):
+    monkeypatch.setattr(models_mirror, "_i2v_prefetch_thread", None)
+    env = {**_R2_CREDS, "VJ_VOLUME_KIND": "global", "VJ_MODELS_ROOT": str(tmp_path)}
+    lines = []
+    assert start_i2v_prefetch(env=env, log=lines.append) is None
+    assert any("forbids i2v prefetch" in m for m in lines)
 
 
 def test_ensure_i2v_joins_prefetch_thread(tmp_path, monkeypatch):

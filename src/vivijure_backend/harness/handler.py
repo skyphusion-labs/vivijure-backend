@@ -643,14 +643,12 @@ def run_i2v_clip_job(
 
 
 def _wants_i2v_prefetch(action: str) -> bool:
-    """Whether a job will load the Wan i2v pipeline, and so benefits from eager-starting the
-    ~120GB i2v model prefetch that overlaps LoRA training. False for jobs that never reach an i2v
-    stage, so the pull is not started for nothing:
-      - finish_clip: RIFE interpolation / face-restore only, no Wan pipeline.
-      - train_lora:  a train-only job -- it fits a LoRA and stops; no keyframe/i2v stage runs, and
-                     the Wan-LoRA train image carries no i2v weights to mirror (cf#29 D2a).
-    Every other action (render / finalize / preview / regen_shot) keeps the prefetch."""
-    return str(action) not in ("finish_clip", "train_lora")
+    """True only when this job can reach the Wan i2v stage.
+
+    Preview, regen_shot, train_lora, and finish_clip never load Wan.
+    Prefetch on those jobs wrote ~117 GB onto the global volume."""
+    from .models_mirror import i2v_stage_possible
+    return i2v_stage_possible(action)
 
 
 def _finish_deadline_degrade(expiry: FinishDeadlineExceeded, *, project: str, job_id: str,

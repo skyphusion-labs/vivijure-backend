@@ -1,8 +1,8 @@
-# Global volume for stills
+# Global volume
 
 The keyframe worker skips the bake.
 It skips the cold pull.
-It reads stills from a global volume.
+It reads weights from a global volume.
 
 This page is the process.
 Issue #530.
@@ -15,7 +15,7 @@ That pull pinned us to one datacenter.
 
 A global volume mounts on GPU serverless at `/runpod-volume`.
 A worker can land in any datacenter.
-Stage the stills once.
+Stage the weights once.
 Every worker reads the same files.
 
 ## Image
@@ -38,7 +38,7 @@ Do not ship the baked runtime for this path.
 
 ## Volume
 
-Create a new global volume for stills.
+Create a new global volume for this worker.
 Do not reuse another product volume.
 
 Mount it on the GPU serverless endpoint at `/runpod-volume`.
@@ -61,35 +61,48 @@ Use a writer that is not a GPU serverless worker.
 A first-worker lock is not safe here.
 A global volume has no file lock and no hard link.
 
+Stage the full R2 models tree.
+That set is `hf-cache` plus `antelopev2`, `rife`, `GFPGANv1.4`, and `facexlib`.
+Include Wan.
+A later test must not start a pull.
+
 ```
-VJ_MODELS_ROOT=/runpod-volume python -m vivijure_backend.harness.models_mirror --preload --stills --flatten
+VJ_MODELS_ROOT=/runpod-volume python -m vivijure_backend.harness.models_mirror --preload --flatten
 ```
 
 Or run `scripts/stage_global_volume.py`.
 
 `--stills` skips Wan.
-Preview and keyframe need the base set only.
+Use it only when you want a keyframe-only volume.
 `--flatten` copies each HF-cache symlink to a real file.
 `from_pretrained` then reads real files.
 
+rclone must use `--inplace` and `--local-no-set-modtime`.
+A global volume rejects `chtimes`.
+`--no-update-modtime` is not enough.
+rclone still sets mtime on a new file.
+
 The writer writes `.vj-mirror-complete`.
-It does not write the i2v sentinel.
-The worker names that state `READY_NO_I2V`.
+A full fill also writes `.vj-i2v-mirror-complete`.
+The worker names that state `READY`.
 
 Do not set `VJ_VOLUME_ROOT` on the writer.
 That key is the worker read path.
+Do not set `VJ_VOLUME_KIND=global` on the writer.
+That flag blocks rclone.
 
 ## Worker
 
 A thin worker sees no `.vj-baked`.
 It then checks the volume.
-A ready stills volume repoints `HF_HOME` and `VJ_MODELS_ROOT`.
+A ready volume repoints `HF_HOME` and `VJ_MODELS_ROOT`.
 It skips R2.
 
-If the volume is empty, the worker does not fill it.
-It falls back to R2 on local disk.
-That fallback is the miss path.
-It is not the plan.
+`VJ_VOLUME_KIND=global` forbids rclone.
+It also forbids a Hub pull.
+Preview does not start the Wan prefetch.
+An incomplete volume fails the job.
+The worker does not fall back to R2.
 
 ## After the thin image is live
 

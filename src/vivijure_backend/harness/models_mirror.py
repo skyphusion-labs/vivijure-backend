@@ -235,6 +235,8 @@ def mirror_cmd(src: str, dst: Path, *, skip_repos: tuple[str, ...] = ()) -> list
     child env (see rclone_env); there is no rclone config file, so the R2 secret never touches disk.
     Pure: built and asserted without rclone."""
     cmd = ["rclone", "copy", "--links",
+           "--inplace", "--no-update-modtime", "--no-update-dir-modtime",
+           "--local-no-set-modtime",
            "--transfers", "16", "--checkers", "16",
            "--multi-thread-streams", "8", "--multi-thread-cutoff", "100M",
            "--stats", "60s", "--stats-one-line", "-v",
@@ -463,6 +465,24 @@ def _self_preload_allowed(e: dict, vol: str | Path) -> bool:
     return _truthy(e.get("VJ_VOLUME_SELF_PRELOAD"))
 
 
+def _forbids_r2_pull(e: dict) -> bool:
+    """True when this process must never rclone or Hub-pull.
+
+    A worker with `VJ_VOLUME_KIND=global` reads a volume staged offline.
+    A miss fails the job. It does not fall back to R2.
+    An offline writer omits `VJ_VOLUME_KIND` and `VJ_VOLUME_ROOT`.
+    That writer may still copy from R2 onto the mount."""
+    raw = (e.get("VJ_VOLUME_KIND") or "").strip().lower()
+    if raw == VOLUME_KIND_GLOBAL:
+        return True
+    if raw == VOLUME_KIND_NETWORK:
+        return False
+    explicit_root = (e.get("VJ_VOLUME_ROOT") or "").strip()
+    if not explicit_root:
+        return False
+    return _volume_kind(e, explicit_root) == VOLUME_KIND_GLOBAL
+
+
 # Single-writer preload lock + how long before a held lock is presumed abandoned. A full fill takes
 # ~6 min; 60 min means a lock older than that = a dead writer we can take over (see #55 Phase D).
 _PRELOAD_LOCK = ".vj-preload.lock"
@@ -595,14 +615,24 @@ def _resolve_volume(e: dict, model_version: str, log: Callable[[str], None],
     # set before the volume was attached), treat it as a clean miss -> R2 mirror. Without this, the
     # self-preload lock attempt would os.open() a non-existent dir and crash the worker.
     if not Path(vol).is_dir():
-        log(f"models_mirror: VJ_VOLUME_ROOT={vol} is not mounted here; falling back to R2 mirror.")
+        if kind == VOLUME_KIND_GLOBAL:
+            log(f"models_mirror: VJ_VOLUME_ROOT={vol} is not mounted; "
+                "global volume forbids R2 pull.")
+        else:
+            log(f"models_mirror: VJ_VOLUME_ROOT={vol} is not mounted here; "
+                "falling back to R2 mirror.")
         return _decline(e, VolumeState.ABSENT)
     i2v_required = i2v_stage_possible(action)
     try:
         state, base_ok, i2v_ok = _classify_volume(Path(vol), model_version,
                                                   i2v_required=i2v_required)
     except OSError as exc:  # noqa: BLE001 -- a volume probe failure must never abort the job
-        log(f"models_mirror: volume probe at {vol} failed ({exc}); falling back to R2 mirror.")
+        if kind == VOLUME_KIND_GLOBAL:
+            log(f"models_mirror: volume probe at {vol} failed ({exc}); "
+                "global volume forbids R2 pull.")
+        else:
+            log(f"models_mirror: volume probe at {vol} failed ({exc}); "
+                "falling back to R2 mirror.")
         return _decline(e, VolumeState.INCOMPLETE)
     if state.usable:
         e["VJ_MODELS_ROOT"] = str(vol)
@@ -624,9 +654,12 @@ def _resolve_volume(e: dict, model_version: str, log: Callable[[str], None],
     if _self_preload_allowed(e, vol):
         filled = _self_preload_volume(e, model_version, log, i2v_required=i2v_required)
         return filled if filled.usable else _decline(e, filled)
-    if kind == VOLUME_KIND_GLOBAL and _truthy(e.get("VJ_VOLUME_SELF_PRELOAD")):
-        log("models_mirror: global volume refuses first-worker self-preload "
-            "(no lock, no hard link); stage offline with --stills --flatten.")
+    if kind == VOLUME_KIND_GLOBAL:
+        if _truthy(e.get("VJ_VOLUME_SELF_PRELOAD")):
+            log("models_mirror: global volume refuses first-worker self-preload "
+                "(no lock, no hard link); stage offline with --flatten.")
+        log("models_mirror: global volume forbids R2 pull; stage offline.")
+        return _decline(e, state)
     log("models_mirror: falling back to R2 mirror.")
     return _decline(e, state)
 
@@ -671,6 +704,10 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
         else:
             target.pop(key, None)
     if volume.usable:
+        return False
+    if _forbids_r2_pull(e):
+        log("models_mirror: global volume forbids R2 pull; stage offline.")
+        log(_skip_event("global_offline"))
         return False
 
     hf_home = Path(e.get("HF_HOME", "/opt/models/hf-cache"))
@@ -791,6 +828,10 @@ def ensure_i2v_models(*, env: dict | None = None, log: Callable[[str], None] = p
         return False
     if is_baked(e) and force:
         log("models_mirror: baked image, but the caller forced an i2v R2 pull; not skipping.")
+    if _forbids_r2_pull(e):
+        log("models_mirror: global volume forbids i2v R2 pull; stage offline.")
+        log(_skip_event("global_offline", event="i2v_mirror_skipped"))
+        return False
 
     # Join the background prefetch thread (if started by start_i2v_prefetch) before checking
     # the sentinel so its result is visible. If the thread failed, fall through to pull normally.
@@ -854,6 +895,9 @@ def start_i2v_prefetch(*, env: dict | None = None, log: Callable[[str], None] = 
         return _i2v_prefetch_thread
 
     e = mirror_env(env)
+    if _forbids_r2_pull(e):
+        log("models_mirror: global volume forbids i2v prefetch; stage offline.")
+        return None
     models_root = Path(e.get("VJ_MODELS_ROOT", "/opt/models"))
     if (models_root / I2V_SENTINEL).exists() or not e.get("R2_ACCESS_KEY_ID"):
         return None
@@ -886,6 +930,9 @@ def ensure_hub_repos(repos: tuple[str, ...], *, env: dict | None = None,
         return False
     if is_baked(e) and force:
         log("models_mirror: baked image, forced hub-repo R2 pull; not skipping.")
+    if _forbids_r2_pull(e):
+        log("models_mirror: global volume forbids hub-repo R2 pull; stage offline.")
+        return False
     if not e.get("R2_ACCESS_KEY_ID"):
         log("models_mirror: no R2 creds; hub-repo pull skipped.")
         return False
@@ -989,9 +1036,9 @@ def flatten_symlinks(root: Path, log: Callable[[str], None] = print) -> int:
                 continue
             link.unlink()
             if target.is_dir():
-                shutil.copytree(target, link)
+                shutil.copytree(target, link, copy_function=shutil.copy)
             else:
-                shutil.copy2(target, link)
+                shutil.copy(target, link)
             n += 1
         except OSError as exc:  # noqa: PERF203
             log(f"models_mirror: flatten failed {link} ({exc})")

@@ -245,7 +245,14 @@ def download_canny_from_hub() -> None:
     """Fetch CONTROLNET_CANNY into the local HF cache. Hosted workers already hold HF_TOKEN.
 
     Temporarily clears the offline flags so snapshot_download can reach Hub, then
-    restores them. The worker stays offline for every other load."""
+    restores them. The worker stays offline for every other load.
+    A global-volume worker never reaches Hub. Stage canny onto the volume first."""
+    from .harness.models_mirror import _forbids_r2_pull
+    if _forbids_r2_pull(os.environ):
+        from .harness.handler import HarnessError
+        raise HarnessError(
+            "global volume forbids Hub pull for CONTROLNET_CANNY. "
+            "Stage that repo onto the volume offline.")
     old = {
         "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE"),
         "TRANSFORMERS_OFFLINE": os.environ.get("TRANSFORMERS_OFFLINE"),

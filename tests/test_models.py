@@ -771,6 +771,18 @@ def test_no_analyzer_at_all_is_not_healthy():
     assert onnx_provider_facts({})["all_cuda"] is False
 
 
+def test_download_canny_from_hub_refuses_global_volume(monkeypatch):
+    from vivijure_backend.harness.handler import HarnessError
+    from vivijure_backend.models import download_canny_from_hub
+    monkeypatch.setenv("VJ_VOLUME_KIND", "global")
+    try:
+        download_canny_from_hub()
+    except HarnessError as exc:
+        assert "forbids Hub pull" in str(exc)
+        return
+    raise AssertionError("expected HarnessError")
+
+
 def test_model_server_reports_none_until_the_analyzer_loads():
     # None means the identity path did not run on this worker, which must stay distinct from a
     # loaded analyzer reporting CPU. Never triggers a load.
