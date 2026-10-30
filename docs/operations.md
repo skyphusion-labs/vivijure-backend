@@ -173,7 +173,7 @@ Events (discrete stages):
 |---|---|---|
 | `started` | -- | Job begins. |
 | `mirror_done` | -- | Cold-start mirror complete. |
-| `hydrate_start` / `hydrate_progress` / `hydrate_file` / `hydrate_done` | `bytes`, `seconds`, `mb_per_s`, `complete`, `reason` | Weights copied from a global volume to container disk. See `docs/global-volume.md`. |
+| `hydrate_start` / `hydrate_probe` / `hydrate_progress` / `hydrate_file` / `hydrate_done` | `bytes`, `seconds`, `mb_per_s`, `single_mb_per_s`, `parallel_mb_per_s`, `chosen`, `complete`, `reason` | Weights copied from a global volume to container disk. See `docs/global-volume.md`. |
 | `hydrate_skipped` / `hydrate_failed` | `reason` or `error` | The job reads from the volume instead. |
 | `load_start` / `load_heartbeat` / `load_done` / `load_failed` | `name`, `elapsed_s` | One model load. A heartbeat every 30 s tells a slow load from a hang. |
 | `train_done` | `slot` | A character LoRA finished training. |

@@ -8,8 +8,10 @@ THE TREE IS ALWAYS COMPLETE. The local hub starts as symlinks into the volume, a
 replaces its symlink atomically. So a time cap, a full disk or a read error leaves a slower job,
 never a missing file. A repo with no rule is one symlink. Nothing here can fail a render.
 
-Parallel ranged reads are used because a single mmap stream is what was measured slow. Whether they
-scale on this store is not known until a live run, so every file reports its own MB/s.
+A global volume is object-backed, so random access is the enemy: a loader's mmap measured about 26 MB/s
+where a fill pod's plain sequential copy measured about 80 MB/s. Every read here is a large sequential
+one. Whether parallel streams add anything on this store is unknown, so each worker measures it once on
+the largest file and uses the winner, and `hydrate_estimate` states the time that implies.
 """
 from __future__ import annotations
 
@@ -31,6 +33,11 @@ FREE_MARGIN_BYTES = 5 * 1024 ** 3
 SMALL_FILE_BYTES = 8 * 1024 * 1024
 PROGRESS_SECONDS = 30.0
 SENTINEL = ".vj-hydrated"
+PROBE_STREAMS = 8
+PROBE_SINGLE_BYTES = 256 * 1024 * 1024
+PROBE_EACH_BYTES = 64 * 1024 * 1024
+# Parallel must clearly beat one stream to be used: more streams cost more billed read requests.
+PROBE_MIN_GAIN = 1.25
 WEIGHT_SUFFIXES = (".safetensors", ".bin")
 
 _DIFFUSERS_WEIGHT = r"diffusion_pytorch_model(-\d+-of-\d+)?\.safetensors"
@@ -124,6 +131,44 @@ def build_tree(volume_hf: Path, local_hf: Path) -> list[tuple[Path, Path, int]]:
     return plan
 
 
+def _read_range(path: Path, offset: int, length: int) -> int:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        got = 0
+        while got < length:
+            data = os.pread(fd, min(8 * 1024 * 1024, length - got), offset + got)
+            if not data:
+                break
+            got += len(data)
+        return got
+    finally:
+        os.close(fd)
+
+
+def probe_threads(src: Path, size: int, emit: Emit, *, streams: int = PROBE_STREAMS,
+                  single_bytes: int = PROBE_SINGLE_BYTES, each_bytes: int = PROBE_EACH_BYTES,
+                  clock: Callable[[], float] = time.monotonic) -> int:
+    """Measure one stream against `streams` on distinct ranges, and return the count to use.
+
+    Distinct ranges so the page cache cannot flatter the second reading. A file too small to hold
+    both ranges returns the requested count unmeasured, and says so."""
+    if size < single_bytes + streams * each_bytes:
+        emit("hydrate_probe", measured=False, streams=streams)
+        return streams
+    started = clock()
+    got = _read_range(src, 0, single_bytes)
+    one = got / 1e6 / max(clock() - started, 1e-6)
+    started = clock()
+    offsets = [single_bytes + i * each_bytes for i in range(streams)]
+    with ThreadPoolExecutor(max_workers=streams) as pool:
+        got = sum(pool.map(lambda o: _read_range(src, o, each_bytes), offsets))
+    many = got / 1e6 / max(clock() - started, 1e-6)
+    chosen = streams if many >= one * PROBE_MIN_GAIN else 1
+    emit("hydrate_probe", measured=True, single_mb_per_s=round(one, 1), streams=streams,
+         parallel_mb_per_s=round(many, 1), chosen=chosen)
+    return chosen
+
+
 class _Stop(Exception):
     """The time cap passed. Not an error: the rest stays on the volume."""
 
@@ -171,7 +216,7 @@ def _copy_file(src: Path, dest: Path, size: int, pool: ThreadPoolExecutor, deadl
 def hydrate(volume_hf: Path, local_hf: Path, emit: Emit, *, threads: int = DEFAULT_THREADS,
             max_seconds: float = DEFAULT_MAX_SECONDS, chunk_bytes: int = CHUNK_BYTES,
             free_bytes: Callable[[Path], int] | None = None,
-            progress_seconds: float = PROGRESS_SECONDS) -> bool:
+            progress_seconds: float = PROGRESS_SECONDS, probe: bool = False) -> bool:
     """Fill `local_hf` from `volume_hf`. True iff every planned file is now local."""
     sentinel = local_hf / SENTINEL
     if sentinel.is_file():
@@ -181,6 +226,9 @@ def hydrate(volume_hf: Path, local_hf: Path, emit: Emit, *, threads: int = DEFAU
     plan = build_tree(volume_hf, local_hf)
     total = sum(p[2] for p in plan)
     emit("hydrate_start", files=len(plan), bytes=total, threads=threads)
+    if plan and probe:
+        largest = max(plan, key=lambda p: p[2])
+        threads = probe_threads(largest[0], largest[2], emit)
     deadline = started + max_seconds
     free = free_bytes or (lambda p: shutil.disk_usage(p).free)
     copied_bytes = 0
@@ -250,9 +298,10 @@ def maybe_hydrate(emit: Emit, env: dict | None = None) -> str:
         emit("hydrate_skipped", reason="hub_already_imported")
         return "too_late"
     try:
-        threads = int(e.get("VJ_HYDRATE_THREADS") or DEFAULT_THREADS)
+        pinned = e.get("VJ_HYDRATE_THREADS")
+        threads = int(pinned or DEFAULT_THREADS)
         max_seconds = float(e.get("VJ_HYDRATE_MAX_SECONDS") or DEFAULT_MAX_SECONDS)
-        hydrate(volume_hf, local_hf, emit, threads=threads, max_seconds=max_seconds)
+        hydrate(volume_hf, local_hf, emit, threads=threads, max_seconds=max_seconds, probe=not pinned)
     except Exception as exc:  # noqa: BLE001 -- the volume still serves this job
         e["HF_HOME"] = str(volume_hf)
         emit("hydrate_failed", error=type(exc).__name__, message=str(exc)[:300])

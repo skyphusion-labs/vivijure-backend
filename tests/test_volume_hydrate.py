@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,12 @@ from vivijure_backend.harness import volume_hydrate as vh
 
 REV = "abc123"
 REPO = "models--SG161222--RealVisXL_V5.0"
+
+
+@pytest.fixture(autouse=True)
+def _hub_not_imported(monkeypatch):
+    """The guard reads sys.modules, so a hub imported by another test must not decide these."""
+    monkeypatch.delitem(sys.modules, "huggingface_hub.constants", raising=False)
 
 
 class Events(list):
@@ -165,7 +172,6 @@ def test_a_build_failure_keeps_the_job_on_the_volume(tmp_path, monkeypatch):
 
 
 def test_an_already_imported_hub_refuses_the_repoint(tmp_path, monkeypatch):
-    import sys
     import types
     fake = types.ModuleType("huggingface_hub.constants")
     fake.HF_HUB_CACHE = str(tmp_path / "vol" / "hf-cache" / "hub")
@@ -206,6 +212,51 @@ def test_the_real_hub_resolves_files_through_the_tree(tmp_path):
     linked = try_to_load_from_cache(repo, "RealVisXL_V5.0_fp32.safetensors", cache_dir=cache)
     assert Path(copied).read_bytes() == b"U" * 300
     assert Path(linked).read_bytes() == b"R" * 500
+
+
+def _big(tmp_path, size=4096):
+    f = tmp_path / "big.safetensors"
+    f.write_bytes(b"x" * size)
+    return f
+
+
+def test_probe_reports_both_rates_and_uses_parallel_when_it_wins(tmp_path, monkeypatch):
+    ev = Events()
+    ticks = iter([0.0, 10.0, 10.0, 11.0])  # one stream: 10 s; eight streams: 1 s
+    clock = lambda: next(ticks)  # noqa: E731
+    assert vh.probe_threads(_big(tmp_path), 4096, ev, single_bytes=1024, each_bytes=256, clock=clock) == 8
+    rec = ev.named("hydrate_probe")[0]
+    assert rec["measured"] and rec["chosen"] == 8
+    assert {"single_mb_per_s", "parallel_mb_per_s"} <= set(rec)
+
+
+def test_probe_stays_on_one_stream_when_parallel_does_not_scale(tmp_path, monkeypatch):
+    """The object store case: more streams add billed requests and no speed."""
+    ev = Events()
+    ticks = iter([0.0, 10.0, 10.0, 20.0])  # the same 2048 bytes in the same 10 s
+    clock = lambda: next(ticks)  # noqa: E731
+    assert vh.probe_threads(_big(tmp_path), 4096, ev, single_bytes=2048, each_bytes=256, clock=clock) == 1
+
+
+def test_probe_never_reads_past_a_small_file(tmp_path):
+    ev = Events()
+    assert vh.probe_threads(_big(tmp_path, 100), 100, ev) == vh.PROBE_STREAMS
+    assert ev.named("hydrate_probe")[0]["measured"] is False
+
+
+def test_pinning_threads_skips_the_probe(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(vh, "probe_threads", lambda *a, **k: calls.append(1) or 1)
+    e = _env(tmp_path, VJ_HYDRATE_THREADS="4")
+    vh.maybe_hydrate(Events(), e)
+    assert calls == []
+
+
+def test_an_unpinned_job_probes_the_largest_file(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(vh, "probe_threads", lambda src, size, emit, **k: seen.append(size) or 1)
+    vh.maybe_hydrate(Events(), _env(tmp_path))
+    assert seen == [300]
 
 
 class Rec:

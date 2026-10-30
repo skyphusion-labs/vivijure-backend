@@ -111,9 +111,27 @@ A time cap, a full disk or a read error leaves a slower job, not a missing file.
 |---|---|---|
 | `VJ_HYDRATE` | on when `VJ_VOLUME_KIND=global` | `0` turns it off. `1` turns it on for any volume. |
 | `VJ_HYDRATE_ROOT` | `/tmp/vj-hydrate` | Local root. |
-| `VJ_HYDRATE_THREADS` | `8` | Parallel 64 MiB reads per file. |
+| `VJ_HYDRATE_THREADS` | measured | Parallel 64 MiB reads per file. Setting it skips the probe. |
 | `VJ_HYDRATE_MAX_SECONDS` | `600` | After this, the rest stays on the volume. |
 
+## Budget for a keyframe job
+
+Sizes are read from the Hugging Face tree at the pinned revisions.
+Only these files are copied. Flax, onnx, openvino and fp16 duplicates stay as symlinks.
+
+| Files | GB |
+|---|---|
+| RealVisXL fp32: UNet 10.27, text encoders 3.27, VAE 0.335 | 13.88 |
+| OpenPose ControlNet | 2.50 |
+| Canny ControlNet (scene lock) | 2.50 |
+| Hyper-SD 8-step LoRA | 0.79 |
+| IP-Adapter SDXL | 0.70 |
+| IP-Adapter image encoder | 3.69 |
+| **Total** | **24.06** |
+
+InstantID adds 1.69 GB. A bf16 recast of the fp32 files on the volume (`deploy/stage_bake_seed.py`) would make the total about 15.3 GB.
+
+Read `hydrate_probe` for one stream against eight, on the first job of a worker.
 Read `hydrate_file` for the MB/s of each file.
 Read `load_done` for the seconds of each model load.
 Both appear as `@event` lines and in the progress snapshot.
