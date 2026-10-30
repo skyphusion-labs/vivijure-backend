@@ -5,13 +5,18 @@ and deploys it. This is our clean package (`src/vivijure_backend`), never the fo
 
 ## What the image is
 
+The keyframe path is a thin image plus a global volume (#530).
+Build `deploy/runtime.Dockerfile --target toolchain`, then `deploy/Dockerfile.thin`.
+See [../docs/global-volume.md](../docs/global-volume.md).
+
 A GPU runtime (CUDA 12.8 + torch cu128, Blackwell-safe) + the render stack + our package, with the
-**curated model set BAKED IN** (the "one singular baked image"). A baked worker carries its weights,
+**curated model set BAKED IN** on the legacy film image. A baked worker carries its weights,
 so it is **datacenter-agnostic** (no RunPod network volume pinning it to a provisioned DC) and pays
 **no R2 cold-pull tax**. `harness/models_mirror` sees the `.vj-baked` marker at `VJ_MODELS_ROOT` and
 short-circuits the volume-resolve + R2 mirror entirely. The R2 mirror stays only as the **fallback**
-for a non-baked / legacy image (no marker). See [../docs/cold-start-design.md](../docs/cold-start-design.md)
-for why the bake replaced the network-volume plan.
+for a non-baked / legacy image (no marker). See [../docs/global-volume.md](../docs/global-volume.md)
+for the keyframe path, and [../docs/cold-start-design.md](../docs/cold-start-design.md)
+for the old bake record.
 
 Two baked variants: the **fp8 PARTIAL** prod image (~90 GB; final tier still R2-pulls bf16, so
 prod-only) and the **self-contained bf16** public image (~87 GB). The Wan i2v experts ship **FP32**,

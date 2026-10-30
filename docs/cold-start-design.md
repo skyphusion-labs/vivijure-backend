@@ -6,7 +6,11 @@ fan-out, and which structural fix to take. This is the decision doc the 0.2.20 t
 weighs **preloaded network volumes** vs **bake-into-image** vs **pre-warm pool** vs **staged
 cold-starts** with numbers instead of vibes.
 
-> **Status: DECIDED (revised 2026-06-29) -- BAKE THE WEIGHTS INTO THE IMAGE (Option A), at
+> **Status: SUPERSEDED for keyframes (2026-10-30, #530).** The keyframe path is a thin image
+> plus a global volume. No bake. No cold pull. See [global-volume.md](global-volume.md).
+> The bake decision below is the legacy film image record.
+
+> **Prior status (revised 2026-06-29) -- BAKE THE WEIGHTS INTO THE IMAGE (Option A), at
 > half precision.** The original recommendation (preloaded per-datacenter network volumes, Option D)
 > is NOT taken. Two things moved that the first pass did not have: (1) **half-precision weights** --
 > the i2v MoE drops to half size and the curated set drops the dead-weight repos, so the baked set is

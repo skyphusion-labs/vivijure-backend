@@ -73,6 +73,12 @@ SENTINEL = ".vj-mirror-complete"
 # repo from the mirror. Both are caller decisions (force=True). The baked default stays pull-free.
 BAKED_SENTINEL = ".vj-baked"
 
+# RunPod mounts a GPU-serverless volume here. A thin image (no .vj-baked) reads stills from it.
+# Set VJ_VOLUME_ROOT to override. An unset root still uses this path when the mount exists.
+DEFAULT_VOLUME_ROOT = "/runpod-volume"
+VOLUME_KIND_GLOBAL = "global"
+VOLUME_KIND_NETWORK = "network"
+
 
 # --------------------------------------------------------------------------- mirror credential
 #
@@ -423,6 +429,40 @@ def _truthy(v) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _volume_root(e: dict) -> str | None:
+    """Volume mount path. Explicit `VJ_VOLUME_ROOT` wins. Else `/runpod-volume` when that dir exists."""
+    explicit = (e.get("VJ_VOLUME_ROOT") or "").strip()
+    if explicit:
+        return explicit
+    if Path(DEFAULT_VOLUME_ROOT).is_dir():
+        return DEFAULT_VOLUME_ROOT
+    return None
+
+
+def _volume_kind(e: dict, vol: str | Path) -> str:
+    """`global` or `network`. Explicit `VJ_VOLUME_KIND` wins. A `/runpod-volume` mount defaults to global."""
+    raw = (e.get("VJ_VOLUME_KIND") or "").strip().lower()
+    if raw in (VOLUME_KIND_GLOBAL, VOLUME_KIND_NETWORK):
+        return raw
+    root = Path(vol)
+    default = Path(DEFAULT_VOLUME_ROOT)
+    try:
+        if root.resolve() == default.resolve():
+            return VOLUME_KIND_GLOBAL
+    except OSError:
+        pass
+    if str(root).rstrip("/") == DEFAULT_VOLUME_ROOT:
+        return VOLUME_KIND_GLOBAL
+    return VOLUME_KIND_NETWORK
+
+
+def _self_preload_allowed(e: dict, vol: str | Path) -> bool:
+    """First-worker fill is POSIX-lock only. A global volume never self-preloads."""
+    if _volume_kind(e, vol) == VOLUME_KIND_GLOBAL:
+        return False
+    return _truthy(e.get("VJ_VOLUME_SELF_PRELOAD"))
+
+
 # Single-writer preload lock + how long before a held lock is presumed abandoned. A full fill takes
 # ~6 min; 60 min means a lock older than that = a dead writer we can take over (see #55 Phase D).
 _PRELOAD_LOCK = ".vj-preload.lock"
@@ -542,9 +582,12 @@ def _resolve_volume(e: dict, model_version: str, log: Callable[[str], None],
     single-writer lock and fills it for the rest, so scale-out is just "attach an empty volume."
     Mutating `e` (os.environ in production) is how the repoint reaches the deferred torch/diffusers
     loads, which read `HF_HOME` at call time."""
-    vol = e.get("VJ_VOLUME_ROOT")
+    vol = _volume_root(e)
     if not vol:
         return VolumeState.ABSENT
+    e["VJ_VOLUME_ROOT"] = vol
+    kind = _volume_kind(e, vol)
+    label = "global volume" if kind == VOLUME_KIND_GLOBAL else "network volume"
     # Before anything can repoint, record the roots the endpoint configured (see _decline).
     _remember_pristine_roots(e)
     # The volume must actually be mounted. If VJ_VOLUME_ROOT is set but the path isn't there (the
@@ -565,12 +608,12 @@ def _resolve_volume(e: dict, model_version: str, log: Callable[[str], None],
         e["VJ_MODELS_ROOT"] = str(vol)
         e["HF_HOME"] = str(Path(vol) / "hf-cache")
         if state is VolumeState.READY:
-            log(f"models_mirror: fully preloaded network volume at {vol} (v{model_version}); "
+            log(f"models_mirror: fully preloaded {label} at {vol} (v{model_version}); "
                 "reading weights from it, skipping the R2 mirror.")
             log(_skip_event("volume"))
         else:
             # NOT a partial preload. Said in full so nobody re-runs a preload that cannot help.
-            log(f"models_mirror: network volume at {vol} carries the corpus this job needs "
+            log(f"models_mirror: {label} at {vol} carries the corpus this job needs "
                 f"(v{model_version}, base sentinel current). The i2v corpus is absent and "
                 f"action={action!r} runs no i2v stage, so this is a DELIBERATELY i2v-free volume, "
                 "not an unfinished preload. Reading weights from it, skipping the R2 mirror.")
@@ -578,9 +621,12 @@ def _resolve_volume(e: dict, model_version: str, log: Callable[[str], None],
         return state
     log(f"models_mirror: volume at {vol} is missing a sentinel THIS JOB NEEDS for v{model_version} "
         f"(base={base_ok}, i2v={i2v_ok}, i2v_required={i2v_required}); degrading wholesale.")
-    if _truthy(e.get("VJ_VOLUME_SELF_PRELOAD")):
+    if _self_preload_allowed(e, vol):
         filled = _self_preload_volume(e, model_version, log, i2v_required=i2v_required)
         return filled if filled.usable else _decline(e, filled)
+    if kind == VOLUME_KIND_GLOBAL and _truthy(e.get("VJ_VOLUME_SELF_PRELOAD")):
+        log("models_mirror: global volume refuses first-worker self-preload "
+            "(no lock, no hard link); stage offline with --stills --flatten.")
     log("models_mirror: falling back to R2 mirror.")
     return _decline(e, state)
 
@@ -609,7 +655,7 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
         log(_skip_event("baked"))
         return False
 
-    # Preloaded per-datacenter network volume (issue #55 Phase C): if one is mounted and current,
+    # Preloaded volume (#530 global, or #55 Phase C network): if one is mounted and current,
     # read weights straight off it and skip the R2 copy entirely. Falls through to the mirror below
     # on any miss, so the R2 path stays the universal fallback. Repoints HF_HOME/VJ_MODELS_ROOT.
     volume = _resolve_volume(e, model_version, log, action=action)
@@ -924,27 +970,70 @@ def _reconstruct_symlinks(root: Path, log: Callable[[str], None]) -> int:
     return n
 
 
-def _preload_main() -> None:
-    """Preload a RunPod network volume from R2 (issue #55 Phase C). Run this INSIDE a one-shot pod
-    that has the volume mounted and the R2_* creds set, with VJ_MODELS_ROOT pointed at the mount:
+def flatten_symlinks(root: Path, log: Callable[[str], None] = print) -> int:
+    """Replace every symlink under `root` with a real copy of its target.
 
-        VJ_MODELS_ROOT=/runpod-volume python -m vivijure_backend.harness.models_mirror --preload
+    A global volume does not keep hard links. HF cache snapshots are symlink-heavy.
+    Flatten so `from_pretrained` reads real files. Idempotent.
+    Call this after `_reconstruct_symlinks` on an offline stage."""
+    if not root.is_dir():
+        return 0
+    links = [p for p in root.rglob("*") if p.is_symlink()]
+    n = 0
+    for link in links:
+        try:
+            stored = os.readlink(link)
+            target = Path(os.path.normpath(link.parent / stored))
+            if not target.exists():
+                log(f"models_mirror: flatten skip dangling {link} -> {stored}")
+                continue
+            link.unlink()
+            if target.is_dir():
+                shutil.copytree(target, link)
+            else:
+                shutil.copy2(target, link)
+            n += 1
+        except OSError as exc:  # noqa: PERF203
+            log(f"models_mirror: flatten failed {link} ({exc})")
+    if n:
+        log(f"models_mirror: flattened {n} HF-cache symlinks into real files")
+    return n
 
-    It runs the SAME ensure_models + ensure_i2v_models the worker uses, so the on-volume layout
-    (hf-cache/, antelopev2/, rife/, GFPGANv1.4/, both sentinels) is byte-for-byte what a worker
-    reads via VJ_VOLUME_ROOT -- no separate copy logic to drift. VJ_VOLUME_ROOT must NOT be set
-    here (that is the read-only worker path); the preloader is the volume's sole writer. The full
-    set is pulled (base + the lazy i2v repos) by calling ensure_i2v_models explicitly, since one
-    full volume per datacenter is the design (no base/i2v split)."""
+
+def _preload_main(argv: list[str] | None = None) -> int:
+    """Stage weights onto a mounted volume from R2.
+
+    Run this in a one-shot writer (CPU pod or laptop) that has the volume mounted
+    and the R2_* creds set. Point `VJ_MODELS_ROOT` at the mount.
+    Do not set `VJ_VOLUME_ROOT` here. That path is the worker read path.
+
+        VJ_MODELS_ROOT=/runpod-volume python -m vivijure_backend.harness.models_mirror \\
+            --preload --stills --flatten
+
+    `--stills` skips Wan. Preview and keyframe use that set.
+    `--flatten` replaces HF-cache symlinks with real files. Required for a global volume.
+    A network-volume fill can still pull i2v when `--stills` is off."""
     import sys
-    print("models_mirror: preloading volume (base + i2v) from R2...", flush=True)
-    ensure_models()                       # base set -> writes .vj-mirror-complete
-    ensure_i2v_models()                   # Wan I2V + Lightning -> writes .vj-i2v-mirror-complete
+    args = list(sys.argv[1:] if argv is None else argv)
+    stills = "--stills" in args
+    do_flatten = "--flatten" in args
+    kind = "stills" if stills else "base + i2v"
+    print(f"models_mirror: preloading volume ({kind}) from R2...", flush=True)
+    ensure_models()
+    if not stills:
+        ensure_i2v_models()
     root = Path(os.environ.get("VJ_MODELS_ROOT", "/opt/models"))
-    ok = (root / SENTINEL).exists() and (root / I2V_SENTINEL).exists()
+    if do_flatten:
+        flatten_symlinks(root / "hf-cache")
+    base_ok = (root / SENTINEL).exists()
+    i2v_ok = (root / I2V_SENTINEL).exists()
+    ok = base_ok and (stills or i2v_ok)
     print(f"models_mirror: preload {'complete' if ok else 'INCOMPLETE'} at {root} "
-          f"(base={ (root / SENTINEL).exists() }, i2v={ (root / I2V_SENTINEL).exists() })", flush=True)
-    sys.exit(0 if ok else 1)
+          f"(base={base_ok}, i2v={i2v_ok}, stills={stills}, flatten={do_flatten})", flush=True)
+    code = 0 if ok else 1
+    if argv is None:
+        sys.exit(code)
+    return code
 
 
 if __name__ == "__main__":
@@ -952,4 +1041,5 @@ if __name__ == "__main__":
     if "--preload" in sys.argv:
         _preload_main()
     else:
-        print("usage: python -m vivijure_backend.harness.models_mirror --preload", flush=True)
+        print("usage: python -m vivijure_backend.harness.models_mirror "
+              "--preload [--stills] [--flatten]", flush=True)

@@ -21,8 +21,11 @@
 # Build context is the REPO ROOT (so the small committed COPYs -- requirements.txt, rife/, the bake
 # scripts -- resolve):
 #   docker build -f deploy/runtime.Dockerfile --build-arg VJ_BAKE_PRECISION=bf16 -t <runtime>:<ver> .
+# Thin keyframe base (no weights, #530):
+#   docker build -f deploy/runtime.Dockerfile --target toolchain -t vivijure-backend-toolchain .
 # Needs the pinned SEED image to be pullable (seed-build.yml published it); a bad pin fails at the
 # seed FROM by design. Built by .github/workflows/runtime-build.yml (dispatch-gated).
+# `--target toolchain` does not pull the seed.
 
 # ------------------------------------------------------------------ SEED (weights source of truth)
 # The curated model seed lives in the immutable SEED image, pinned by TAG AND DIGEST
@@ -35,7 +38,7 @@ ARG VJ_BAKE_PRECISION=bf16
 FROM ${SEED_REF_BF16} AS seed-bf16
 FROM seed-${VJ_BAKE_PRECISION} AS seed
 
-FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04 AS toolchain
 
 # Python + the torch line are pinned here so a rebuild is reproducible. The torch spec is a
 # build ARG (cu128) so the exact patch can be bumped without editing the file body.
@@ -144,7 +147,12 @@ COPY deploy/bake_hf_configs.py /tmp/bake_hf_configs.py
 RUN HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 HF_DATASETS_OFFLINE=0 \
     python /tmp/bake_hf_configs.py
 
+# Toolchain ends here. CUDA, torch, deps, and HF configs. No seed COPY. No .vj-baked.
+# `docker build -f deploy/runtime.Dockerfile --target toolchain` is the thin-image base (#530).
+# The default last stage below still bakes weights for the legacy baked image.
+
 # ------------------------------------------------------------------ BAKED MODEL WEIGHTS (the bake)
+FROM toolchain AS runtime
 # The curated, precision-selected model seed, COPY --from'd out of the immutable SEED image as 24
 # <10GB bin layers (the seed build bin-packed them; deploy/bake_layers.py asserted < the 10GB GHCR
 # ceiling pre-push). Each bin mirrors paths relative to VJ_MODELS_ROOT, so all bins COPY to /opt/models

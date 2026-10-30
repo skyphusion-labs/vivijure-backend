@@ -7,24 +7,32 @@ import json
 from vivijure_backend.harness import models_mirror
 from vivijure_backend.harness.models_mirror import (
     DEFAULT_SKIP_REPOS,
+    DEFAULT_VOLUME_ROOT,
     HF_OFFLINE_STUBS,
     I2V_LAZY_REPOS,
     I2V_SENTINEL,
+    VOLUME_KIND_GLOBAL,
+    VOLUME_KIND_NETWORK,
     _DEFAULT_MODEL_VERSION,
     _PRELOAD_LOCK,
     SENTINEL,
     BAKED_SENTINEL,
     is_baked,
     ensure_models,
+    flatten_symlinks,
     _acquire_volume_lock,
     _dir_bytes,
     _jitter_seconds,
     _mirror_event,
+    _preload_main,
     _reconstruct_symlinks,
     _resolve_volume,
+    _self_preload_allowed,
     _self_preload_volume,
     _skip_event,
     _truthy,
+    _volume_kind,
+    _volume_root,
     VolumeState,
     ensure_i2v_models,
     i2v_stage_possible,
@@ -344,6 +352,109 @@ def test_self_preload_winner_fills_repoints_and_releases_lock(tmp_path, monkeypa
     assert e["HF_HOME"] == str(vol / "hf-cache")
     assert (vol / SENTINEL).exists() and (vol / I2V_SENTINEL).exists()
     assert not (vol / _PRELOAD_LOCK).exists()      # lock released after fill
+
+
+# --------------------------------------------------- global volume stills (#530)
+
+def test_volume_root_defaults_to_runpod_volume_when_mounted(tmp_path, monkeypatch):
+    mount = tmp_path / "runpod-volume"
+    mount.mkdir()
+    monkeypatch.setattr(models_mirror, "DEFAULT_VOLUME_ROOT", str(mount))
+    assert _volume_root({}) == str(mount)
+    assert _volume_root({"VJ_VOLUME_ROOT": ""}) == str(mount)
+
+
+def test_volume_root_explicit_wins(tmp_path, monkeypatch):
+    mount = tmp_path / "runpod-volume"
+    mount.mkdir()
+    monkeypatch.setattr(models_mirror, "DEFAULT_VOLUME_ROOT", str(mount))
+    other = tmp_path / "other"
+    assert _volume_root({"VJ_VOLUME_ROOT": str(other)}) == str(other)
+
+
+def test_volume_kind_defaults_global_on_runpod_volume():
+    assert _volume_kind({}, DEFAULT_VOLUME_ROOT) == VOLUME_KIND_GLOBAL
+    assert _volume_kind({"VJ_VOLUME_KIND": "network"}, DEFAULT_VOLUME_ROOT) == VOLUME_KIND_NETWORK
+    assert _volume_kind({"VJ_VOLUME_KIND": "global"}, "/tmp/vol") == VOLUME_KIND_GLOBAL
+    assert _volume_kind({}, "/tmp/vol") == VOLUME_KIND_NETWORK
+
+
+def test_global_volume_never_self_preloads(tmp_path, monkeypatch):
+    called = []
+    monkeypatch.setattr(models_mirror, "_self_preload_volume",
+                        lambda *a, **k: called.append(1) or VolumeState.READY)
+    vol = _seed_volume(tmp_path / "vol", _DEFAULT_MODEL_VERSION, base=False, i2v=False)
+    e = {"VJ_VOLUME_ROOT": str(vol), "VJ_VOLUME_SELF_PRELOAD": "1",
+         "VJ_VOLUME_KIND": VOLUME_KIND_GLOBAL}
+    msgs = []
+    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=msgs.append) is VolumeState.INCOMPLETE
+    assert not called
+    assert not _self_preload_allowed(e, vol)
+    assert any("refuses first-worker" in m for m in msgs)
+
+
+def test_resolve_volume_defaults_to_mounted_runpod_volume(tmp_path, monkeypatch):
+    vol = _seed_volume(tmp_path / "runpod-volume", _DEFAULT_MODEL_VERSION, i2v=False)
+    monkeypatch.setattr(models_mirror, "DEFAULT_VOLUME_ROOT", str(vol))
+    e = {}
+    assert _resolve_volume(e, _DEFAULT_MODEL_VERSION, log=lambda *_: None,
+                           action="preview") is VolumeState.READY_NO_I2V
+    assert e["VJ_MODELS_ROOT"] == str(vol)
+    assert e["HF_HOME"] == str(vol / "hf-cache")
+
+
+def test_flatten_symlinks_replaces_hf_snapshot_links(tmp_path):
+    hub = tmp_path / "hf-cache" / "hub" / "models--x"
+    blobs = hub / "blobs"
+    snap = hub / "snapshots" / "rev"
+    blobs.mkdir(parents=True)
+    snap.mkdir(parents=True)
+    (blobs / "abc").write_text("WEIGHTS")
+    link = snap / "config.json"
+    link.symlink_to("../../blobs/abc")
+    msgs = []
+    assert flatten_symlinks(tmp_path / "hf-cache", log=msgs.append) == 1
+    assert link.is_file()
+    assert not link.is_symlink()
+    assert link.read_text() == "WEIGHTS"
+    assert flatten_symlinks(tmp_path / "hf-cache", log=msgs.append) == 0
+
+
+def test_flatten_symlinks_skips_dangling(tmp_path):
+    root = tmp_path / "hf-cache"
+    root.mkdir()
+    link = root / "missing.json"
+    link.symlink_to("no-such-blob")
+    msgs = []
+    assert flatten_symlinks(root, log=msgs.append) == 0
+    assert link.is_symlink()
+    assert any("dangling" in m for m in msgs)
+
+
+def test_preload_stills_skips_i2v_and_flattens(tmp_path, monkeypatch):
+    root = tmp_path / "vol"
+    hub = root / "hf-cache" / "hub" / "models--x"
+    blobs = hub / "blobs"
+    snap = hub / "snapshots" / "rev"
+    blobs.mkdir(parents=True)
+    snap.mkdir(parents=True)
+    (blobs / "abc").write_text("WEIGHTS")
+    (snap / "config.json").symlink_to("../../blobs/abc")
+    monkeypatch.setenv("VJ_MODELS_ROOT", str(root))
+
+    def fake_base(env=None, log=None, **k):
+        (root / SENTINEL).write_text(_DEFAULT_MODEL_VERSION + "\n")
+        return True
+
+    i2v_called = []
+    monkeypatch.setattr(models_mirror, "ensure_models", fake_base)
+    monkeypatch.setattr(models_mirror, "ensure_i2v_models",
+                        lambda **k: i2v_called.append(1))
+    assert _preload_main(["--preload", "--stills", "--flatten"]) == 0
+    assert not i2v_called
+    cfg = snap / "config.json"
+    assert cfg.is_file() and not cfg.is_symlink()
+    assert cfg.read_text() == "WEIGHTS"
 
 
 # --------------------------------------------------- R2-egress jitter knob (#55 Phase C)
