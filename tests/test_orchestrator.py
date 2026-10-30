@@ -83,7 +83,7 @@ def test_injected_start_image_skips_keyframe_gen():
 
 
 def test_existing_keyframe_is_reused():
-    p = plan(_req(), _sb(TWO_SCENES), existing_keyframes={"shot_01": None})
+    p = plan(_req(), _sb(TWO_SCENES), existing_keyframes={"shot_01": kf_hash(_req().config.keyframe)})
     modes = {s.shot_id: s.keyframe_mode for s in p.scenes}
     assert modes["shot_01"] is KeyframeMode.REUSE
     assert modes["shot_02"] is KeyframeMode.GENERATE
@@ -159,10 +159,10 @@ def test_kf_hash_covers_split_lora_and_two_pass_marker():
     assert kf_hash(kc) != old
 
 
-def test_none_hash_allows_reuse_for_backward_compat():
-    """A shot in existing_keyframes with None (old state, no hash stored) is reused conservatively."""
+def test_a_still_with_no_hash_is_redrawn():
+    """#488. The film-a9939630 shape: another render's still at the flat key, no sidecar."""
     p = plan(_req(), _sb(TWO_SCENES), existing_keyframes={"shot_01": None})
-    assert p.scenes[0].keyframe_mode is KeyframeMode.REUSE
+    assert p.scenes[0].keyframe_mode is KeyframeMode.GENERATE
 
 
 def test_finalize_is_i2v_only_over_reused_keyframes():
