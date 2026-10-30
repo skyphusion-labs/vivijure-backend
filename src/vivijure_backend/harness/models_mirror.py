@@ -24,6 +24,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
+from . import stills_manifest
+
 # Module-level handle for the eager i2v prefetch thread (see start_i2v_prefetch).
 # ensure_i2v_models joins it before checking the sentinel so warm behaviour applies whether
 # the pull finished in the background or still in progress when i2v_pipeline is called.
@@ -60,6 +62,12 @@ _INCOMPLETE_GLOB = "**/*.incomplete"
 
 # Written under the models root only after the pull fully succeeds (see module docstring).
 SENTINEL = ".vj-mirror-complete"
+# Written only when the stills set has been pulled and verified. It says nothing about the full set, so a
+# later job that needs more still pulls it.
+STILLS_SENTINEL = ".vj-stills-complete"
+# Actions that load only the SDXL stills set, including LoRA training's VAE, encoders and UNet. Every
+# other action, and an unnamed one, keeps the full base mirror.
+STILLS_ACTIONS = frozenset({"preview", "regen_shot", "train_lora"})
 
 # Baked-image marker: present at VJ_MODELS_ROOT/.vj-baked when the model weights are BAKED INTO THE
 # IMAGE. The marker says BAKED and nothing about which precision was baked; that lives in the stamp's
@@ -230,7 +238,15 @@ def rclone_env(env: dict) -> dict:
     return child
 
 
-def mirror_cmd(src: str, dst: Path, *, skip_repos: tuple[str, ...] = ()) -> list[str]:
+def wants_stills_only(action: str | None, env: dict) -> bool:
+    """True iff this job can pull the exact stills set. `VJ_STILLS_MIRROR=0` restores the full pull."""
+    if str(env.get("VJ_STILLS_MIRROR", "1")).strip().lower() in ("0", "false", "no", "off"):
+        return False
+    return action is not None and str(action).strip() in STILLS_ACTIONS
+
+
+def mirror_cmd(src: str, dst: Path, *, skip_repos: tuple[str, ...] = (),
+               filters: list[str] | None = None) -> list[str]:
     """argv for one `rclone copy --links` mirror leg. The r2: remote resolves from the RCLONE_CONFIG_*
     child env (see rclone_env); there is no rclone config file, so the R2 secret never touches disk.
     Pure: built and asserted without rclone."""
@@ -241,6 +257,8 @@ def mirror_cmd(src: str, dst: Path, *, skip_repos: tuple[str, ...] = ()) -> list
            "--exclude", _INCOMPLETE_GLOB]
     for repo in skip_repos:
         cmd += ["--exclude", f"hub/{repo}/**"]
+    for rule in filters or ():
+        cmd += ["--filter", rule]
     cmd += [src, str(dst)]
     return cmd
 
@@ -684,6 +702,12 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
             log(_skip_event("warm"))
             return False
         log(f"models_mirror: sentinel version mismatch (want {model_version!r}); re-mirroring.")
+    stills_only = wants_stills_only(action, e)
+    stills_sentinel = models_root / STILLS_SENTINEL
+    if stills_only and stills_sentinel.exists() and stills_sentinel.read_text().strip() == model_version:
+        log("models_mirror: warm worker (stills set present); skipping R2 pull.")
+        log(_skip_event("warm_stills"))
+        return False
     if not e.get("R2_ACCESS_KEY_ID"):
         hub = hf_home / "hub"
         if not hub.is_dir() or not any(hub.iterdir()):
@@ -699,8 +723,14 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
 
     renv = rclone_env(e)
     hf_home.mkdir(parents=True, exist_ok=True)
-    log(f"models_mirror: cold worker -> mirroring r2:{bucket}/models to {hf_home} "
-        f"(skipping {len(skip_repos)} lazy repos)...")
+    filters = None
+    if stills_only:
+        filters = stills_manifest.rclone_filters()
+        log(f"models_mirror: cold worker -> mirroring the stills set for action={action!r} "
+            f"({stills_manifest.total_bytes()} weight bytes) to {hf_home}...")
+    else:
+        log(f"models_mirror: cold worker -> mirroring r2:{bucket}/models to {hf_home} "
+            f"(skipping {len(skip_repos)} lazy repos)...")
     jitter = _jitter_seconds(e)
     if jitter:
         log(f"models_mirror: jitter {jitter:.1f}s before R2 pull (de-stagger concurrent egress).")
@@ -708,7 +738,8 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     legs: list[tuple[str, float]] = []
     legs.append(("hf-cache", _timed(
         subprocess.run,
-        mirror_cmd(f"r2:{bucket}/models/hf-cache", hf_home, skip_repos=skip_repos),
+        mirror_cmd(f"r2:{bucket}/models/hf-cache", hf_home, skip_repos=() if stills_only else skip_repos,
+                   filters=filters),
         check=True, env=renv)))
 
     antelope = models_root / "antelopev2"
@@ -720,7 +751,8 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     # ModelServer.frame_interpolator loads $VJ_MODELS_ROOT/rife/flownet.pkl and
     # ModelServer.face_restorer loads $VJ_MODELS_ROOT/GFPGANv1.4/GFPGANv1.4.pth directly,
     # so they need their own R2 mirror legs separate from the HF-cache pull above.
-    for subdir in ("rife", "GFPGANv1.4", "facexlib"):
+    # A stills job runs no finish stage, so it needs none of them.
+    for subdir in (() if stills_only else ("rife", "GFPGANv1.4", "facexlib")):
         dst = models_root / subdir
         dst.mkdir(parents=True, exist_ok=True)
         legs.append((subdir, _timed(
@@ -732,13 +764,16 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     # `config.json -> ../../blobs/<hash>`, and an HF_HUB_OFFLINE load can't find the file. Rebuild
     # the symlinks from the markers ourselves so the cache is valid regardless of rclone's version.
     _reconstruct_symlinks(hf_home, log)
+    if stills_only:
+        stills_manifest.prune_dangling_links(hf_home / "hub", log)
+        stills_manifest.verify(hf_home)  # before any sentinel: a missing file fails here, by name
     # Write .no_exist stubs at the R2 revision (read from refs/main after the mirror). Build-time
     # stubs (bake_hf_configs.py) use the HF revision at build time which may differ; this call
     # ensures stubs are always at the revision R2 seeded, which is what offline probes check.
     write_no_exist_stubs(hf_home / "hub", HF_OFFLINE_STUBS, log)
 
     models_root.mkdir(parents=True, exist_ok=True)
-    sentinel.write_text(model_version + "\n")
+    (stills_sentinel if stills_only else sentinel).write_text(model_version + "\n")
     # Telemetry is best-effort: a traversal error in _dir_bytes (e.g. rglob hitting a
     # PermissionError mid-walk, which the per-entry guard does not catch) must never fail an
     # otherwise-successful cold mirror -- the exact path we are trying to stabilize.
