@@ -14,6 +14,10 @@ ufw --force default deny incoming >/dev/null
 ufw --force default allow outgoing >/dev/null
 ufw --force enable >/dev/null
 passwd -l root >/dev/null
+# tmpfs pages can move to swap, and swap is disk. Keep RAM-only data in RAM.
+swapoff -a
+sed -i '/[[:space:]]swap[[:space:]]/d' /etc/fstab
+rm -f /swapfile
 # cloud-init keeps the user-data in these files. Run this after the tunnel
 # rotation has made that token dead; this removes the dead copies as well.
 rm -f /var/lib/cloud/instance/user-data.txt /var/lib/cloud/instance/user-data.txt.i \

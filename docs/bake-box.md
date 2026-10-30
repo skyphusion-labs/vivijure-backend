@@ -19,6 +19,21 @@ Conrad set this lane on 2026-10-30. The change request is
 Read the instance id and IP address from the Vultr API. This repo is public, so
 they are not written here.
 
+## Custody rule
+
+Conrad keeps his data in his physical custody. **This box holds build inputs only:
+public source and model weights.** Build outputs are public images, pushed to GHCR.
+
+Never put these on the box:
+
+- the memory store, or any crew or lead notes
+- a clone of a private repo, or a crew working clone
+- customer or tenant data
+- a long-lived credential, or a forwarded SSH agent (`ssh -A`)
+
+Clone over anonymous HTTPS only. If a build seems to need a private input, stop and
+ask the lead. Do not copy the input over.
+
 ## Cost
 
 Read from the Vultr plan API on 2026-10-30: **$0.263 per hour, capped at $192 per
@@ -28,8 +43,7 @@ stopping the box does not stop the bill. **Only destroy stops the bill.**
 The account also has a monthly-fee limit that Vultr set. A create that goes over
 it fails. That is a spend decision for Conrad. Do not work around it.
 
-A 3 hour bake on a box that exists for that bake costs about $0.80. Destroy the
-box when the bake is done, unless another bake is next.
+A 3 hour bake on a box that exists for that bake costs about $0.80.
 
 ## Access rule
 
@@ -87,13 +101,16 @@ Vultr API key allows only listed client addresses.
 
 6. Remove the boot token. The token that `up` passed in user-data can be read from
    the Vultr API and from the metadata address, and a Docker build can reach that
-   address. Rotate first, then clear:
+   address. Clear the record, then rotate:
 
    ```
    scripts/bakebox.sh clear-user-data
-   scripts/bakebox.sh rotate-tunnel | <ssh to the box> \
-     'sudo tee /etc/cloudflared/tunnel-token >/dev/null; (sudo nohup sh -c "sleep 3; systemctl restart cloudflared-bake" >/dev/null 2>&1 &)'
+   <ssh to the box> 'cat > /tmp/install-token.sh' < deploy/bake-box/install-token.sh
+   scripts/bakebox.sh rotate-tunnel | <ssh to the box> 'sudo bash /tmp/install-token.sh'
    ```
+
+   `install-token.sh` keeps the new token in `/run`, which is RAM, and removes the disk
+   copy. **After a reboot the tunnel stays down. Destroy the box and create it again.**
 
 7. Run the second layer through the tunnel:
 
@@ -101,7 +118,8 @@ Vultr API key allows only listed client addresses.
    <ssh to the box> 'sudo bash -s' < deploy/bake-box/harden.sh
    ```
 
-   Run it after step 6. It removes the cloud-init copies of the boot token.
+   Run it after step 6. It removes the cloud-init copies of the boot token, turns
+   off swap, and leaves sshd on loopback.
 
 8. Probe again from outside, and connect through the tunnel again.
 
@@ -129,49 +147,61 @@ and append the public key to `/home/bake/.ssh/authorized_keys`.
 ## Bake
 
 The box has Docker with buildx, rclone, git and cloudflared. **It holds no GHCR or
-R2 credential until a bake needs one.**
+R2 credential between runs.** Each credential lives on the laptop, reaches the box
+over SSH stdin for one run, and stays in RAM. Swap is off, so RAM stays RAM.
 
-| Credential | Needed for | Source | Where it goes on the box |
+| Credential | Needed for | Source and life | On the box |
 | --- | --- | --- | --- |
-| GHCR push token, classic PAT with `write:packages` only and a short expiry | Any push to `ghcr.io/skyphusion-labs/vivijure-backend` | A dedicated PAT. Conrad mints it, because a PAT needs the GitHub web UI. Do not use a crew PAT: those carry admin and delete scopes. | `DOCKER_CONFIG=/run/bake-creds/docker`, by `docker login --password-stdin` over the SSH stdin |
-| R2 key: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ENDPOINT` | **Only** a seed stage (`deploy/stage_bake_seed.py`). `deploy/runtime.Dockerfile` pulls the seed image, so a runtime or thin build needs no R2 key. | A per-function R2 key for this lane. Read-only is enough to read the mirror; `stage_bake_seed.py` also writes the seed, so it needs write on the `vivijure` bucket. | rclone environment for that one command: `RCLONE_CONFIG_R2_TYPE=s3` and the matching keys. No `rclone.conf`. |
-| Tunnel token | Always | Written by `up`, replaced in step 6 | `/etc/cloudflared/tunnel-token`, mode 600. This one is on disk because cloudflared must read it at each start. |
+| GHCR push token | Any push to `ghcr.io/skyphusion-labs/vivijure-backend` | A classic PAT with `write:packages` only, at the shortest expiry GitHub offers. Conrad mints it, because a PAT needs the GitHub web UI. **Revoke it when the bake ends.** Never use a crew PAT: those carry admin and delete scopes. | `DOCKER_CONFIG=/run/bake-creds/docker`, removed at the end of the run |
+| R2 temporary credential | **Only** a seed stage (`deploy/stage_bake_seed.py`). `deploy/runtime.Dockerfile` pulls the public seed image, so a runtime or thin build needs no R2 access. | Minted on the laptop with `POST /accounts/{id}/r2/temp-access-credentials`, scoped to the `vivijure` bucket and the prefixes the stage uses, with a TTL that fits the run. The parent R2 key stays on the laptop. | `RCLONE_CONFIG_R2_*` in the environment of that one command, with `SESSION_TOKEN`. No `rclone.conf`. |
+| Tunnel token | Always | Only runs this tunnel's connector. Rotate it with `rotate-tunnel` and `install-token.sh` if the box is kept between bakes. | `/run/bake-tunnel/token`, RAM, mode 600 |
 
-`/run/bake-creds` is a RAM directory, owned by `bake`, mode 700. A reboot empties it.
-`docker login` writes a base64 password to `config.json`, so point `DOCKER_CONFIG` at
-that directory and never log in with the default path:
+No RunPod key is needed to build. Do not pass a credential as a `--build-arg`, because
+it stays in the image history.
+
+Run a bake like this. The token arrives on the SSH stdin and is not typed on the box:
 
 ```
 export DOCKER_CONFIG=/run/bake-creds/docker
 mkdir -p "$DOCKER_CONFIG"
-docker login ghcr.io -u <user> --password-stdin   # the token arrives on stdin over SSH
-# build and push
+docker login ghcr.io -u <user> --password-stdin
+git clone https://github.com/skyphusion-labs/vivijure-backend ~/build && cd ~/build
+git checkout <sha on main>
+docker buildx build -f deploy/runtime.Dockerfile --target toolchain --provenance=false \
+  -t ghcr.io/skyphusion-labs/vivijure-backend:<tag> --push .
 rm -rf "$DOCKER_CONFIG"
 ```
 
 The buildx plugin is in `/usr/libexec/docker/cli-plugins`, so a new `DOCKER_CONFIG`
-still finds it. No RunPod key is needed to build. Do not pass a credential as a
-`--build-arg`, because it stays in the image history.
+still finds it. Read the digest from the registry after the push, and pin that digest.
+See [operations.md](operations.md) and `.github/workflows/runpod-bake.yml` for the tag
+names and the repin. The image contents are not set by this document.
 
-Build from a clean clone at a commit on `main`:
-
-```
-git clone https://github.com/skyphusion-labs/vivijure-backend && cd vivijure-backend
-git checkout <sha>
-docker buildx build -f deploy/runtime.Dockerfile --target toolchain --provenance=false \
-  -t ghcr.io/skyphusion-labs/vivijure-backend:<tag> --push .
-```
-
-Read the digest from the registry after the push, and pin that digest. See
-[operations.md](operations.md) and `.github/workflows/runpod-bake.yml` for the tag names
-and the repin. The image contents are not set by this document.
+Check the end state before you leave the box: `ls -A /run/bake-creds` must be empty and
+`find / -xdev -name config.json -path '*.docker*'` must print nothing.
 
 The seed image is public and can be pulled with no login. Measured from the box on
 2026-10-30: 76 MB/s from GHCR, for the first 2 GB of the largest seed layer. Upload
 to GHCR and transfer to or from R2 were not measured. `df` read 447 GB free on `/`.
-The older seed image is about 87 GB and the runtime built on it was about 101 GB,
-so disk is not the limit for one build. Run `docker builder prune` between bakes
-if you keep the box.
+The seed image is about 87 GB and the runtime built on it was about 101 GB, so disk is
+not the limit for one build.
+
+## After a bake
+
+**Destroy is the default.** See the next section. Destroy is the only step that stops
+the bill, and it removes the disk from our account.
+
+If another bake with the same inputs is next, and you keep the box, wipe it:
+
+```
+<ssh to the box> 'bash -s' < deploy/bake-box/wipe.sh
+```
+
+`wipe.sh` removes the build tree, the credentials in RAM, and all Docker images and
+cache. It is housekeeping, not erasure: blocks stay on the disk until overwritten. That
+is acceptable because the disk holds only public inputs under the custody rule. If
+anything else ever reached the disk, destroy the box and tell the lead. Revoke the GHCR
+PAT in both cases.
 
 ## Destroy
 
@@ -183,7 +213,7 @@ BAKEBOX_DESTROY=vivijure-bake scripts/bakebox.sh down
 `down` finds each object by its exact label, name or hostname. It deletes the
 instance, DNS record, Access app, service tokens and tunnel, then the firewall
 group. It ends by running `plan`, and every line must be empty. Delete the local
-`~/.cf-ssh-bake.env` files too, and revoke the GHCR PAT if no bake is next.
+`~/.cf-ssh-bake.env` files too, and revoke the GHCR PAT.
 
 Then remove the declarations from `fleet-chezmoi`. See the section below.
 
