@@ -127,6 +127,7 @@ reason about. See [CONTRIBUTING](CONTRIBUTING.md) for the house style and PR pro
 - [docs/contract.md](docs/contract.md) -- the job bundle in, the artifacts out; a worked example.
 - [docs/configuration.md](docs/configuration.md) -- every generation knob, its default and range.
 - [docs/operations.md](docs/operations.md) -- build, deploy, the model mirror, the R2 key map, failure modes.
+- [docs/bake-box.md](docs/bake-box.md) -- the Vultr build host for image bakes: create, use, destroy, cost.
 - [docs/runpod-endpoint-config.md](docs/runpod-endpoint-config.md) -- GPU sizing and the account worker cap.
 - [docs/development.md](docs/development.md) -- the CPU/GPU split, the test suite, running stages locally.
 - [CONTRIBUTING](CONTRIBUTING.md) -- house style and PR process.
