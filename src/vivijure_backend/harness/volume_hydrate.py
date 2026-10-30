@@ -24,6 +24,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
+from . import stills_manifest
+
 CHUNK_BYTES = 64 * 1024 * 1024
 DEFAULT_THREADS = 8
 DEFAULT_MAX_SECONDS = 600.0
@@ -33,26 +35,10 @@ PROGRESS_SECONDS = 30.0
 SENTINEL = ".vj-hydrated"
 WEIGHT_SUFFIXES = (".safetensors", ".bin")
 
-_DIFFUSERS_WEIGHT = r"diffusion_pytorch_model(-\d+-of-\d+)?\.safetensors"
-_TRANSFORMERS_WEIGHT = r"model(-\d+-of-\d+)?\.safetensors"
-
-# Hydrated first to last, so a time cap keeps the files every SDXL job reads. Each pattern names
-# exactly what the loaders open: no `variant=` is passed, so the fp16 files are never read, and a
-# repo's root single-file checkpoint is never read. Anything unmatched stays a symlink and still works.
-HYDRATE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("models--SG161222--RealVisXL_V5.0", (
-        rf"unet/{_DIFFUSERS_WEIGHT}", rf"vae/{_DIFFUSERS_WEIGHT}",
-        rf"text_encoder/{_TRANSFORMERS_WEIGHT}", rf"text_encoder_2/{_TRANSFORMERS_WEIGHT}",
-    )),
-    ("models--xinsir--controlnet-openpose-sdxl-1.0", (_DIFFUSERS_WEIGHT,)),
-    ("models--ByteDance--Hyper-SD", (r"Hyper-SDXL-8steps-lora\.safetensors",)),
-    ("models--h94--IP-Adapter", (
-        r"sdxl_models/ip-adapter_sdxl\.safetensors",
-        rf"sdxl_models/image_encoder/{_TRANSFORMERS_WEIGHT}",
-    )),
-    ("models--xinsir--controlnet-canny-sdxl-1.0", (_DIFFUSERS_WEIGHT,)),
-    ("models--InstantX--InstantID", (r"ip-adapter\.bin",)),
-)
+# Hydrated first to last, so a time cap keeps the files every SDXL job reads. One list with the R2 mirror:
+# see stills_manifest. Anything unlisted stays a symlink and still works.
+HYDRATE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = tuple(
+    (r["dir"], tuple(re.escape(f["path"]) for f in r["files"])) for r in stills_manifest.load_manifest())
 
 Emit = Callable[..., None]
 

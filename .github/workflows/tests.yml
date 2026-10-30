@@ -39,6 +39,8 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      - name: Install rclone (test_stills_mirror reads the real filter)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq rclone
       - name: Run Pytest with Coverage
         run: pytest --cov=. --cov-report=xml:coverage.xml --cov-report=term
 

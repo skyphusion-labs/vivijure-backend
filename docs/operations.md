@@ -98,6 +98,11 @@ The R2 token does double duty: the cold-start model mirror (`r2:<bucket>/models`
 
 ## The cold-start model mirror
 
+> **Stills set.** `preview`, `regen_shot` and `train_lora` pull only the files in
+> `harness/stills_manifest.json`, by exact blob, plus each listed repo's small files and `antelopev2`.
+> That is 25.75 GB of weights where the full base is far larger. A missing file fails the job at the mirror with
+> `StillsIncomplete`, naming it. Other actions keep the full mirror. `VJ_STILLS_MIRROR=0` restores it for all.
+
 > **Keyframe path:** a thin image reads a staged global volume. See
 > [global-volume.md](global-volume.md). The R2 mirror below is the miss path.
 > A baked film image still skips the mirror via `.vj-baked`.
