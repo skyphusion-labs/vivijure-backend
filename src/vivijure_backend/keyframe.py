@@ -766,8 +766,10 @@ def _ensure_ip_adapter(pipe, n: int = 1):
     if n:
         from .models import DEFAULT_SPECS, ModelRole
         repo = DEFAULT_SPECS[ModelRole.IP_ADAPTER].repo_id
-        pipe.load_ip_adapter(repo, subfolder="sdxl_models",
-                             weight_name=["ip-adapter_sdxl.safetensors"] * n if n > 1 else "ip-adapter_sdxl.safetensors")
+        from .load_events import timed_load
+        with timed_load("keyframe.ip_adapter"):
+            pipe.load_ip_adapter(repo, subfolder="sdxl_models",
+                                 weight_name=["ip-adapter_sdxl.safetensors"] * n if n > 1 else "ip-adapter_sdxl.safetensors")
         pipe._vj_ip_loaded = n
 
 
