@@ -22,7 +22,7 @@ from typing import Protocol, runtime_checkable
 
 from ..assemble import ClipInput, assemble, build_manifest, order_for_storyboard, write_manifest
 from ..contract import Bundle, RenderRequest, RenderResult, Keyframe, Clip
-from ..finish import Deadline, FinishDeadlineExceeded
+from ..finish import Deadline, FinishDeadlineExceeded, job_mirror_legs, max_mirror_seconds
 from ..orchestrator import (Action, KeyframeMode, RenderPlan, plan as make_plan,
                             resolve_lora_family, validate)
 from . import keys
@@ -517,7 +517,7 @@ def run_finish_job(
       { action, project, shot_id, clip_key, config: { interpolate, interpolation_factor,
         face_restore, face_fidelity, only_faces } }
     """
-    from ..finish import FinishParams, finish_clip
+    from ..finish import finish_clip, finish_params_from_job
     from ..worker import standalone_server
 
     project = str(job.get("project") or "untitled")
@@ -536,17 +536,7 @@ def run_finish_job(
         _job_scoped_key(clip_key_in, project=project, prefixes=("renders/",),
                         what="finish_clip: clip_key")
 
-        params = FinishParams(
-            interpolate=bool(cfg.get("interpolate", True)),
-            factor=int(cfg.get("interpolation_factor", 2)),
-            target_fps=int(cfg.get("target_fps", 0)),
-            face_restore=bool(cfg.get("face_restore") not in (None, False, "none", "")),
-            # `true` means "on, default backend"; only a string names a backend (str(True) is "True",
-            # which FaceRestore rejects).
-            face_restore_backend=str(cfg["face_restore"]) if isinstance(cfg.get("face_restore"), str) and cfg["face_restore"] not in ("none", "") else "gfpgan",
-            face_fidelity=float(cfg.get("face_fidelity", 0.7)),
-            only_faces=bool(cfg.get("only_faces", True)),
-        )
+        params = finish_params_from_job(cfg)
 
         local_in = workdir / "input.mp4"
         local_out = workdir / "output.mp4"
@@ -802,17 +792,18 @@ def handler(job: dict) -> dict:
     job_id = str(job.get("id") or "unknown")
     on_progress = _runpod_progress_hook(job)
 
-    # ONE wall-clock budget for the WHOLE finish_clip invocation (#422), opened HERE at the first
-    # line of the invocation so the R2 client build and the cold-start model mirror are INSIDE it
-    # and the number is a real invocation ceiling rather than a stage total. ONE shared deadline,
-    # not a timeout per step: per-step timeouts multiply, and the invocation bound is then a sum
-    # nobody computes.
+    # TWO budgets bound a finish_clip invocation, and they run one after the other (#553). The first
+    # opens HERE, at the first line, and covers the R2 client build and the cold-start model mirror.
+    # The second opens when the mirror returns and covers all of the work, so a mirror that finished
+    # never costs a ready worker its job. Each budget is shared across its stages rather than being a
+    # timeout per step, and the invocation ceiling is their sum (finish.py tests it).
     #
     # SCOPED TO finish_clip ALONE (#422 D). Every other action gets None, and every check here and
     # in finish.py is guarded on deadline-is-not-None, so render / i2v_clip / train_lora / health
     # cannot raise FinishDeadlineExceeded at all. Unchanged by CONSTRUCTION, not by a promise.
     action_in = str(payload.get("action", "render"))
-    deadline = Deadline.start() if action_in == "finish_clip" else None
+    is_finish = action_in == "finish_clip"
+    mirror_deadline = Deadline.start(max_mirror_seconds()) if is_finish else None
     store = None  # bound below; named here so the expiry handler can pass it to the emitter
 
     # Everything below runs inside the quiesce guard (#90): on EVERY exit -- return or raise --
@@ -836,24 +827,31 @@ def handler(job: dict) -> dict:
         # no run context (#90). Best-effort; a config failure above never reaches here (R2 is the
         # failure, so its own rejection can only degrade to stdout).
         job_done_diag.register(store, project, job_id)
-        if deadline is not None:
-            deadline.check("r2_client")
+        if mirror_deadline is not None:
+            mirror_deadline.check("r2_client")
         try:
             # The job's action is handed to the mirror because the network-volume readiness gate
             # needs it: whether the volume must carry the Wan i2v corpus depends on whether an i2v
             # stage can run at all (models_mirror.i2v_stage_possible, backend#453).
-            mirrored = ensure_models(action=action_in)
+            # A finish job pulls only the legs its step loads, and its budget ends the pull if it hangs.
+            mirrored = ensure_models(action=action_in,
+                                     finish_legs=job_mirror_legs(payload) if is_finish else None,
+                                     deadline=mirror_deadline)
+        except FinishDeadlineExceeded:
+            # Not an Exception (see its docstring), so it needs its own clause to keep this record.
+            # The handler's one catch site below turns the expiry into the soft degrade.
+            ProgressEmitter(store, project, job_id, on_progress=on_progress).emit(
+                "mirror_failed", **(last_mirror_stats() or {}))
+            raise
         except Exception as e:
             failed = ProgressEmitter(store, project, job_id, on_progress=on_progress)
             failed.emit("mirror_failed", **(last_mirror_stats() or {}))
             failed.error("mirror", e)
             raise
         mirror_stats = last_mirror_stats()
-        # The mirror is one un-interruptible call, so it is bounded only at its EDGES: it cannot be
-        # cut short, but it can no longer be followed by compute that ignores how long it took. On
-        # the baked production image it short-circuits in milliseconds (models_mirror.is_baked).
-        if deadline is not None:
-            deadline.check("model_mirror")
+        # No check here. A mirror that returned succeeded, so the worker is ready and the job runs.
+        # The work budget starts now, because 420s is sized for the work (finish.py).
+        deadline = Deadline.start() if is_finish else None
 
         # Eager-start the Wan I2V pull in the background so it overlaps LoRA training: training is
         # GPU-bound with the network idle, while the pull (~120GB from R2) is network-bound. The two

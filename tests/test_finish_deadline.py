@@ -75,7 +75,8 @@ def test_the_default_can_actually_fire_against_the_platform_ceiling():
     # than a degrade. What timeout: 0 means on this endpoint is NOT settled (docs/finish-deadline
     # .md); strictly under 600 fires under BOTH readings, which is what makes the open question
     # harmless instead of load-bearing.
-    assert DEFAULT_MAX_SECONDS < RUNPOD_DOCUMENTED_EXECUTION_TIMEOUT_SECONDS
+    # The mirror has its own budget and runs first (#553), so the bound is on the SUM.
+    assert finish.DEFAULT_MIRROR_MAX_SECONDS + DEFAULT_MAX_SECONDS < RUNPOD_DOCUMENTED_EXECUTION_TIMEOUT_SECONDS
 
 
 def test_the_default_leaves_the_core_phase_floor_where_it_is():
@@ -83,7 +84,8 @@ def test_the_default_leaves_the_core_phase_floor_where_it_is():
     # marker, so the guard costs up to 3*G of wall clock with no marker movement. Core RAISES the
     # phase deadline to 3*G when that exceeds its 5400s floor, so a bigger default here silently
     # extends every film phase containing this door. Staying under keeps the floor binding.
-    assert CORE_FINISH_STEP_MAX_ATTEMPTS * DEFAULT_MAX_SECONDS < CORE_PHASE_HARD_DEADLINE_SECONDS
+    whole_invocation = finish.DEFAULT_MIRROR_MAX_SECONDS + DEFAULT_MAX_SECONDS
+    assert CORE_FINISH_STEP_MAX_ATTEMPTS * whole_invocation < CORE_PHASE_HARD_DEADLINE_SECONDS
 
 
 @pytest.mark.parametrize("raw", [None, "", "   ", "junk", "0", "-1", "-0.5"])
@@ -414,7 +416,9 @@ def test_an_expiry_returns_a_structured_soft_degrade_and_never_raises(monkeypatc
     #   no top-level error, which RunPod would lift into a FAILED envelope
     _stub_handler_deps(monkeypatch)
     monkeypatch.setenv("VJ_FINISH_MAX_SECONDS", "0.000001")
-    out = handler_mod.handler({"id": "j1", "input": {"action": "finish_clip", "project": "p"}})
+    # The work budget opens after the mirror (#553), so the first check it meets is fetch_clip.
+    out = handler_mod.handler({"id": "j1", "input": {"action": "finish_clip", "project": "p",
+                                                     "clip_key": "renders/p/clips/s.mp4"}})
     assert set(out) == {"ok", "detail"}
     assert out["ok"] is False
     assert "error" not in out
@@ -466,8 +470,8 @@ def test_run_finish_job_forwards_the_budget_into_finish_clip(tmp_path, monkeypat
 
 
 def test_handler_passes_the_deadline_it_builds_into_run_finish_job(monkeypatch):
-    # The seam ABOVE run_finish_job. handler() builds the Deadline and checks it at r2_client and
-    # model_mirror, but the finish_clip dispatch must also hand it down; otherwise every in-engine
+    # The seam ABOVE run_finish_job. handler() opens the work Deadline when the mirror returns, but
+    # the finish_clip dispatch must also hand it down; otherwise every in-engine
     # check in finish_clip and the fetch/upload checks see None and are skipped, while the tests
     # that call run_finish_job(deadline=...) directly still pass.
     _stub_handler_deps(monkeypatch)
