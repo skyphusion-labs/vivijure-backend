@@ -481,3 +481,61 @@ def test_handler_passes_the_deadline_it_builds_into_run_finish_job(monkeypatch):
     out = handler_mod.handler({"id": "j3", "input": {"action": "finish_clip", "project": "p"}})
     assert out == {"ok": True}
     assert isinstance(seen.get("deadline"), Deadline)
+
+
+def _run_finish_with_output_key(tmp_path, monkeypatch, output_key):
+    from types import SimpleNamespace
+    from vivijure_backend import finish as finish_mod, worker as worker_mod
+
+    written = []
+
+    class _Store:
+        def get_file(self, key, dest):
+            Path(dest).write_bytes(b"MP4")
+
+        def put_file(self, path, key, **kw):
+            written.append(key)
+            return key
+
+        def put_bytes(self, data, key, **kw):
+            written.append(key)
+            return key
+
+    monkeypatch.setattr(finish_mod, "finish_clip", lambda *a, **k: SimpleNamespace(
+        interpolated=False, face_restored=False, out_fps=24, frames_out=1))
+    monkeypatch.setattr(worker_mod, "standalone_server", lambda: object())
+    job = {"action": "finish_clip", "project": "p", "shot_id": "s1", "clip_key": "renders/p/clips/s1.mp4",
+           "output_hash": "abc"}
+    if output_key is not None:
+        job["output_key"] = output_key
+    res = handler_mod.run_finish_job(job, store=_Store(), workdir=tmp_path, job_id="j")
+    return res, written
+
+
+def test_finish_clip_writes_where_the_film_asked(tmp_path, monkeypatch):
+    key = "renders/p/clips/film-1/s1_finished.mp4"
+    res, written = _run_finish_with_output_key(tmp_path, monkeypatch, key)
+    assert res["clip_key"] == key
+    assert key in written and f"{key}.hash" in written
+    assert "renders/p/clips/s1_finished.mp4" not in written
+
+
+def test_finish_clip_with_no_output_key_keeps_the_shared_key(tmp_path, monkeypatch):
+    res, written = _run_finish_with_output_key(tmp_path, monkeypatch, None)
+    assert res["clip_key"] == "renders/p/clips/s1_finished.mp4"
+
+
+import pytest as _pytest  # noqa: E402
+
+
+@_pytest.mark.parametrize("bad", [
+    "renders/other/clips/film-1/s1_finished.mp4",  # another project
+    "renders/p/keyframes/s1.mp4",                  # not a clip
+    "renders/p/clips/film-1/s1_finished.png",      # not a video
+    "renders/p/clips/../../other/s1.mp4",          # traversal
+    "bundles/p/clips/s1.mp4",                      # another tree
+])
+def test_finish_clip_refuses_a_bad_output_key_without_failing_the_job(tmp_path, monkeypatch, bad):
+    res, written = _run_finish_with_output_key(tmp_path, monkeypatch, bad)
+    assert res["clip_key"] == "renders/p/clips/s1_finished.mp4"
+    assert bad not in written

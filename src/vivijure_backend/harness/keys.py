@@ -89,6 +89,24 @@ def finished_clip_key(project: str, shot_id: str) -> str:
     return f"renders/{_slug(project)}/clips/{_slug(shot_id)}_finished.mp4"
 
 
+def finish_output_key(requested, project: str, shot_id: str) -> tuple[str, str | None]:
+    """Where a finish_clip job writes (core#379). The caller's `output_key` when it is a safe clip key
+    of this project, or the shared per-project key. Returns (key, why the request was refused).
+
+    A refused key never fails the job: the shared key is what every older caller gets, and losing a
+    finished clip over a key name would be the worse outcome."""
+    fallback = finished_clip_key(project, shot_id)
+    if requested is None or requested == "":
+        return fallback, None
+    try:
+        key = check_scoped_job_key(str(requested), project=project, prefixes=("renders/",), what="output_key")
+    except ValueError as e:
+        return fallback, str(e)
+    if not key.startswith(f"renders/{_slug(project)}/clips/") or not key.endswith(".mp4"):
+        return fallback, f"output_key {key!r} is not an .mp4 under this project's clips/"
+    return key, None
+
+
 def bundle_key_matches_project(bundle_key: str, project: str) -> bool:
     """True when a job-supplied bundle_key belongs to the named project (defense-in-depth on the
     shared bucket: prefix-only checks are not enough). Accepts the flat, content-addressed, and

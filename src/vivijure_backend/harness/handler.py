@@ -565,7 +565,9 @@ def run_finish_job(
 
         # keys._slug via the shared helper: the SAME slug as the full-render path, so one project
         # never scatters its clips across two slug spellings ("My  Film" -> My_Film everywhere).
-        clip_key_out = keys.finished_clip_key(project, shot_id)
+        clip_key_out, refused = keys.finish_output_key(job.get("output_key"), project, shot_id)
+        if refused:
+            print(f"finish_clip: using the shared key: {refused}", flush=True)
         # Checked BEFORE the upload and never during it: once the artifact exists the GPU time is
         # already banked, and aborting mid-PUT would discard finished work for nothing. Past the budget
         # HERE we still degrade, because the ceiling has to mean what it says and core has moved on.
