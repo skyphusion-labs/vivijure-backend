@@ -774,3 +774,20 @@ def test_wants_i2v_prefetch_skips_train_only_and_finish():
         assert _wants_i2v_prefetch(action) is True, action
     # default/unknown action falls through to the render path -> keep the prefetch
     assert _wants_i2v_prefetch("render") is True
+
+
+def test_run_job_hydrates_before_it_touches_the_bundle(tmp_path, monkeypatch):
+    """The call has to precede any huggingface_hub import, so it runs before the bundle arrives."""
+    from vivijure_backend.harness import handler as h
+
+    order = []
+    monkeypatch.setattr(h, "maybe_hydrate", lambda emit: order.append("hydrate"))
+
+    class Store(FakeStore):
+        def get_file(self, key, dest):
+            order.append("bundle")
+            return super().get_file(key, dest)
+
+    run_job(_job(render_overrides={"finish_offloaded": True}), pipeline=FakePipeline(),
+            store=Store(_bundle_tar(tmp_path / "b.tar.gz")), workdir=tmp_path / "work")
+    assert order[:2] == ["hydrate", "bundle"]

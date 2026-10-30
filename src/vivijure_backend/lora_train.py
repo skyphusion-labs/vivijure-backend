@@ -24,6 +24,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .load_events import timed_load
+
 from .contract import Character
 from .device import current
 from .models import DEFAULT_SPECS, ModelRole, missing_keyframe_weights_error
@@ -143,8 +145,9 @@ def train_slot(
     # The VAE stays fp32 because SDXL's VAE produces NaNs under fp16/bf16 encode; everything
     # else lives in bf16. Only the UNet gets a trainable LoRA; the rest is inference-only.
     try:
-        vae = AutoencoderKL.from_pretrained(
-            base, subfolder="vae", torch_dtype=torch.float32, local_files_only=True).to(device)
+        with timed_load("lora_train.vae"):
+            vae = AutoencoderKL.from_pretrained(
+                base, subfolder="vae", torch_dtype=torch.float32, local_files_only=True).to(device)
     except (OSError, ValueError) as e:
         raise missing_keyframe_weights_error(base) from e
     # CLIPTokenizer, not AutoTokenizer: Auto* probes AutoConfig for a config.json the CLIP
@@ -156,17 +159,20 @@ def train_slot(
     # local_files_only=True: transformers probes the repo tree for additional_chat_templates on
     # from_pretrained; that tree-listing call raises under HF_HUB_OFFLINE=1. Safe here because
     # the R2 mirror has run before lora_train is called, so the weights are in the local cache.
-    text_encoder_one = CLIPTextModel.from_pretrained(
-        base, subfolder="text_encoder", torch_dtype=weight_dtype,
-        local_files_only=True).to(device)
-    text_encoder_two = CLIPTextModelWithProjection.from_pretrained(
-        base, subfolder="text_encoder_2", torch_dtype=weight_dtype,
-        local_files_only=True).to(device)
+    with timed_load("lora_train.text_encoder"):
+        text_encoder_one = CLIPTextModel.from_pretrained(
+            base, subfolder="text_encoder", torch_dtype=weight_dtype,
+            local_files_only=True).to(device)
+    with timed_load("lora_train.text_encoder_2"):
+        text_encoder_two = CLIPTextModelWithProjection.from_pretrained(
+            base, subfolder="text_encoder_2", torch_dtype=weight_dtype,
+            local_files_only=True).to(device)
     # local_files_only=True: diffusers calls model_info() to check for a newer revision before
     # loading; that API call raises OfflineModeIsEnabled under HF_HUB_OFFLINE=1. The R2 mirror
     # has already run, so the weights are in the local cache -- it is safe to skip the check.
-    unet = UNet2DConditionModel.from_pretrained(
-        base, subfolder="unet", torch_dtype=weight_dtype, local_files_only=True).to(device)
+    with timed_load("lora_train.unet"):
+        unet = UNet2DConditionModel.from_pretrained(
+            base, subfolder="unet", torch_dtype=weight_dtype, local_files_only=True).to(device)
     noise_scheduler = DDPMScheduler.from_pretrained(base, subfolder="scheduler",
                                                     local_files_only=True)
 

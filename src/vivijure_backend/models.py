@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import re
+from .load_events import timed_load
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -530,12 +531,14 @@ class ModelServer:
         # pipe.controlnet for scene-lock Pass B; not MultiControlNet.
         controlnet = self._controlnet(ModelRole.CONTROLNET_POSE)
         try:
-            pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
-                spec.repo_id, controlnet=controlnet, torch_dtype=torch.bfloat16,
-                local_files_only=True)
+            with timed_load("keyframe.base"):
+                pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
+                    spec.repo_id, controlnet=controlnet, torch_dtype=torch.bfloat16,
+                    local_files_only=True)
         except (OSError, ValueError) as e:
             raise missing_keyframe_weights_error(spec.repo_id) from e
-        pipe.to("cuda")
+        with timed_load("keyframe.to_gpu"):
+            pipe.to("cuda")
         _set_attention(pipe, self.device)
 
         # Stash the pristine (full-step) scheduler so keyframe._apply_scheduler can restore it for the
@@ -579,7 +582,8 @@ class ModelServer:
                 torch.cuda.empty_cache()
             except Exception:
                 pass
-        cn = self._load_controlnet(self.specs[role])
+        with timed_load(f"keyframe.{key}"):
+            cn = self._load_controlnet(self.specs[role])
         self._cache[key] = cn
         return cn
 
@@ -703,15 +707,17 @@ class ModelServer:
 
         base = self.specs[ModelRole.KEYFRAME_BASE]
         id_spec = self.specs[ModelRole.INSTANTID]
-        pipe = StableDiffusionXLPipeline.from_pretrained(
-            base.repo_id, torch_dtype=torch.bfloat16, local_files_only=True)
-        pipe.to("cuda")
+        with timed_load("instantid.base"):
+            pipe = StableDiffusionXLPipeline.from_pretrained(
+                base.repo_id, torch_dtype=torch.bfloat16, local_files_only=True)
+            pipe.to("cuda")
         _set_attention(pipe, self.device)
         pipe._vj_default_scheduler = pipe.scheduler
         self._attach_keyframe_distill(pipe)
 
         # Identity injection: project the face embedding (Resampler) and wire the IP cross-attention.
-        ckpt = torch.load(hf_hub_download(id_spec.repo_id, "ip-adapter.bin"), map_location="cpu")
+        with timed_load("instantid.ip_adapter"):
+            ckpt = torch.load(hf_hub_download(id_spec.repo_id, "ip-adapter.bin"), map_location="cpu")
         pipe._vj_image_proj = _iid.build_image_proj(ckpt["image_proj"]).to("cuda", torch.bfloat16)
         pipe._vj_id_attn = _iid.set_instantid_ip_attn(pipe.unet, ckpt["ip_adapter"])
         self._cache["instantid"] = pipe
@@ -726,7 +732,8 @@ class ModelServer:
         if few is None:
             return
         try:
-            pipe.load_lora_weights(few.repo_id, weight_name=few.weight_name, adapter_name="distill")
+            with timed_load("keyframe.distill"):
+                pipe.load_lora_weights(few.repo_id, weight_name=few.weight_name, adapter_name="distill")
             pipe._vj_distill = "distill"
         except Exception as e:  # noqa: BLE001 -- never let a finicky distill load down the worker
             print(f"keyframe distill LoRA load failed ({few.repo_id} / {few.weight_name}): {e}; "
