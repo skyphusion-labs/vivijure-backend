@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import shutil
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -141,7 +142,7 @@ def run_job(
         outputs = pipeline.execute(plan, bundle, workdir)
 
         # --- finish + results out ---
-        result = _finish(req, plan, bundle, outputs, store, workdir, progress)
+        result = _finish(req, plan, bundle, outputs, store, workdir, progress, job_id=job_id)
         progress.complete(output_key=result.output_key, seconds=result.seconds,
                           clips=len(result.clips), keyframes=len(result.keyframes))
         return result.to_dict()
@@ -239,7 +240,7 @@ def _inject_pretrained_loras(pipeline, staged: dict[str, str]) -> None:
 
 
 def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outputs,
-            store, workdir: Path, progress=None) -> RenderResult:
+            store, workdir: Path, progress=None, *, job_id: str = "local") -> RenderResult:
     progress = progress or NullEmitter()
     project = req.project
     result = RenderResult(project=project)
@@ -263,26 +264,34 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
     for slot, lora_id in req.pretrained_loras.items():
         result.lora.setdefault(slot, {"lora_id": lora_id})
 
-    # Keyframes: upload whatever the stage drew, each with its param-hash sidecar (#112).
-    # Every artifact this shard authored lands at its OWN per-identity key -- concurrent shards
-    # of one scattered render write disjoint objects, so nothing here can clobber a sibling.
+    # Keyframes: upload whatever the stage drew to THIS job's own keys (#534), then point the shot's
+    # reuse pointer at them. The PNG goes first, so a pointer never names an object not yet written.
     reported_shots: set[str] = set()
     for shot_id, path in outputs.keyframes.items():
-        key = store.put_file(Path(path), keys.keyframe_key(project, shot_id),
+        key = store.put_file(Path(path), keys.job_keyframe_key(project, job_id, shot_id),
                              content_type="image/png")
         result.keyframes.append(Keyframe(shot_id=shot_id, key=key))
         reported_shots.add(shot_id)
         hash_src = Path(path).with_suffix(".hash")
-        if hash_src.is_file():
-            store.put_file(hash_src, keys.keyframe_hash_key(project, shot_id),
-                           content_type="text/plain")
+        param_hash = hash_src.read_text().strip() if hash_src.is_file() else None
+        store.put_bytes(json.dumps({"key": key, "hash": param_hash or None}).encode("utf-8"),
+                        keys.keyframe_latest_key(project, shot_id),
+                        content_type="application/json")
 
-    # Reused keyframes: already in R2 from a prior run, not re-uploaded, but the caller needs
-    # their keys to animate them. Report every REUSE/INJECT shot that wasn't freshly generated.
+    # Reused and injected keyframes are not drawn, but the caller needs a key to animate. Copy each
+    # to this job's own key: the pointer's target belongs to the render that drew it, and deleting
+    # that render must not take this film's still with it. Only a frame with no local copy still
+    # reports the flat key, which is what a pre-#534 project holds.
     from ..orchestrator import Action, KeyframeMode, resolve_lora_family
     for sc in plan.scenes:
         if sc.shot_id not in reported_shots and sc.keyframe_mode in (KeyframeMode.REUSE, KeyframeMode.INJECT):
-            result.keyframes.append(Keyframe(shot_id=sc.shot_id, key=keys.keyframe_key(project, sc.shot_id)))
+            local = bundle.root / "keyframes" / f"{sc.shot_id}.png"
+            if local.is_file():
+                key = store.put_file(local, keys.job_keyframe_key(project, job_id, sc.shot_id),
+                                     content_type="image/png")
+            else:
+                key = keys.keyframe_key(project, sc.shot_id)
+            result.keyframes.append(Keyframe(shot_id=sc.shot_id, key=key))
 
     # Clips ordered by the storyboard (never the stage's incidental order).
     ordered = order_for_storyboard(
@@ -378,8 +387,9 @@ def _restore_prior_state(store, project: str, bundle: Bundle, *, model_family: s
 
     - LoRA slot `s` is trained iff its adapter object exists at lora_key(project, s). The upload
       in _finish happens only after a successful train, so existence == trained.
-    - Shot `sc.id` has a reusable keyframe iff its PNG exists at keyframe_key(project, sc.id);
-      its param hash comes from the .hash sidecar (absent sidecar -> None, which _keyframe_mode
+    - Shot `sc.id` has a reusable keyframe iff its pointer (#534) names a still that exists, or,
+      for a pre-#534 project, its PNG exists at keyframe_key(project, sc.id); that legacy hash
+      comes from the .hash sidecar (absent sidecar -> None, which _keyframe_mode
       treats as "reuse conservatively", the same contract as the old no-hash-file state). Only a
       real not-found is "absent": any other failure reading the sidecar raises HarnessError, for
       the same reason as the existence checks.
@@ -404,6 +414,9 @@ def _restore_prior_state(store, project: str, bundle: Bundle, *, model_family: s
             trained_slots.add(slot)
     kf_dir = bundle.root / "keyframes"
     for sc in bundle.storyboard.scenes:
+        if _restore_from_pointer(store, project, sc.id, kf_dir, existing_keyframes):
+            continue
+        # A pre-#534 project: its stills are at the flat key. Nothing writes there any more.
         if not _stored_exists(store, keys.keyframe_key(project, sc.id)):
             continue
         try:
@@ -434,6 +447,48 @@ def _restore_prior_state(store, project: str, bundle: Bundle, *, model_family: s
         except Exception:  # noqa: BLE001 -- any per-shot failure -> the planner GENERATEs it
             continue
     return trained_slots, existing_keyframes
+
+
+def _restore_from_pointer(store, project: str, shot_id: str, kf_dir: Path,
+                          existing_keyframes: dict[str, str | None]) -> bool:
+    """Stage a shot's reusable still through its pointer (#534). True iff the shot was restored.
+
+    A missing or malformed pointer, or a pointer whose still has been deleted with its render, is
+    False: the caller falls back to the legacy flat key, and then to a redraw. Only a failure to
+    READ raises, for the same reason as `_stored_exists`: it cannot tell absent from unusable."""
+    pointer_key = keys.keyframe_latest_key(project, shot_id)
+    if not _stored_exists(store, pointer_key):
+        return False
+    try:
+        raw = store.get_bytes(pointer_key)
+    except Exception as e:  # noqa: BLE001 -- classified below
+        if is_not_found(e):
+            return False
+        raise HarnessError(f"could not read keyframe pointer for {shot_id!r}: {e}") from e
+    try:
+        pointer = json.loads(raw)
+        key = pointer["key"]
+        param_hash = pointer.get("hash")
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return False
+    # The pointer is data read back from the bucket, so it stays inside this project's stills.
+    if not isinstance(key, str) or not key.startswith(f"renders/{keys._slug(project)}/keyframes/"):
+        return False
+    if param_hash is not None and not isinstance(param_hash, str):
+        return False
+    if not _stored_exists(store, key):
+        return False
+    try:
+        local_png = kf_dir / f"{shot_id}.png"
+        if not local_png.exists():  # bundle-provided frames win; only fill the gaps
+            local_png.parent.mkdir(parents=True, exist_ok=True)
+            store.get_file(key, local_png)
+        if param_hash:
+            local_png.with_suffix(".hash").write_text(param_hash)
+    except Exception:  # noqa: BLE001 -- a per-shot staging failure -> the planner GENERATEs it
+        return False
+    existing_keyframes[shot_id] = param_hash or None
+    return True
 
 
 def run_finish_job(

@@ -352,6 +352,10 @@ class FakeStore:
     def exists(self, key):
         return False  # FRESH project: the prior-state restore finds nothing (the real R2 contract)
 
+    def put_bytes(self, data, key, *, content_type=None, metadata=None):
+        self.puts.append(key)
+        return key
+
     def put_file(self, path, key, *, content_type=None, metadata=None):
         assert Path(path).exists(); self.puts.append(key); return key
 

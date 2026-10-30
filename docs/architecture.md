@@ -116,7 +116,7 @@ sequenceDiagram
     GPU->>GPU: i2v animate (per shot needing motion)
     GPU->>GPU: finish (interpolate + face restore, if enabled)
     W->>W: assemble clips (ffmpeg, off-GPU)
-    W->>R2: upload loras, keyframes (+ .hash sidecars), final.mp4
+    W->>R2: upload loras, job-scoped keyframes (+ .latest.json pointers), final.mp4
     W->>R2: progress events throughout (NDJSON + snapshot)
     W-->>CP: RenderResult {output_key, keyframes, clips, lora}
 ```
@@ -291,7 +291,7 @@ Two reuse mechanisms keep repeated work cheap:
   mirror (and the lazy i2v pull) likewise run once per worker; see [operations.md](operations.md).
 - **Incremental project state.** Per-artifact R2 objects, no shared state object (#112).
   Each render uploads exactly what it authored at per-identity keys: the keyframe PNG plus a
-  `.hash` param sidecar per shot, the adapter per trained slot. The next render derives what
+  `<shot>.latest.json` pointer per shot (job-scoped still plus param hash, #534), the adapter per trained slot. The next render derives what
   to reuse straight from those keys (the storyboard names every candidate; adapter existence
   == trained, PNG existence + matching hash == reusable keyframe), so a re-render of one
   tweaked shot retrains nothing and redraws only that shot. Because concurrent shards of a

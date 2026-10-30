@@ -279,7 +279,7 @@ replaces, a single long-lived credential in the RunPod template shared by every 
 | `seconds` | float \| null | Total duration of the final video. |
 | `has_audio` | bool | Whether an audio bed was muxed. |
 | `audio_missing` | bool | `true` ONLY on the explicit `audio_optional` soft-degrade: the requested bed could not be fetched and the job opted in, so the film shipped silent. Without the opt-in an unfetchable requested bed fails the render. |
-| `keyframes` | list[{shot_id, key}] | Per-shot keyframe PNG keys (generated, reused, and injected). Naming seam: the studio's `motion.backend` hook calls this field `keyframe_key`; this backend returns `key`, and the studio's own-gpu module translates `key` -> `keyframe_key` when mapping the result into the hook output. |
+| `keyframes` | list[{shot_id, key}] | Per-shot keyframe PNG keys (generated, reused, and injected). Naming seam: the studio's `motion.backend` hook calls this field `keyframe_key`; this backend returns `key`, and the studio's own-gpu module translates `key` -> `keyframe_key` when mapping the result into the hook output. Each key is job-scoped, `renders/<project>/keyframes/<job_id>/<shot>.png` (#534), because every render of one bundle has the same project. A reused or injected still is copied to the new job key. Reuse reads `<shot>.latest.json`, one object holding `{key, hash}`; a project from before this change is still read from the flat key. |
 | `clips` | list[{shot_id, key, target_seconds?}] | Per-shot clip keys (present when shots were animated). |
 | `lora` | dict[slot, {lora_id}] | Trained and passed-through adapters by slot. |
 | `state_key` | str \| null | Always `null` since #112 (kept for wire-compat): incremental state is per-artifact R2 objects, not a tarball. |
@@ -302,7 +302,7 @@ per shot: keyframe -> **i2v_clip** -> finish_clip -> assemble.
 | `project` | str | `"untitled"` | Keys the output clip. |
 | `shot_id` | str | `"shot"` | Identifies the shot; part of the output key. |
 | `prompt` | str | (required) | The motion description fed to Wan. |
-| `keyframe_key` | str | `renders/<project>/keyframes/<shot_id>.png` | R2 key of the keyframe still to animate. |
+| `keyframe_key` | str | `renders/<project>/keyframes/<shot_id>.png` | R2 key of the keyframe still to animate. The default is a legacy location that a render no longer writes (#534), so a caller animating a current still sends the key the render reported. |
 | `config` | object | `{}` | The i2v knobs (below). |
 
 `config` fields (a subset of [`I2VConfig`](configuration.md#i2vconfig), over the `quality` tier
@@ -482,8 +482,8 @@ scenes:
   "seconds": 11.0,
   "has_audio": true,
   "keyframes": [
-    { "shot_id": "shot_01", "key": "renders/the-long-walk-home/keyframes/shot_01.png" },
-    { "shot_id": "shot_02", "key": "renders/the-long-walk-home/keyframes/shot_02.png" }
+    { "shot_id": "shot_01", "key": "renders/the-long-walk-home/keyframes/<job_id>/shot_01.png" },
+    { "shot_id": "shot_02", "key": "renders/the-long-walk-home/keyframes/<job_id>/shot_02.png" }
   ],
   "clips": [
     { "shot_id": "shot_01", "key": "renders/the-long-walk-home/clips/shot_01.mp4", "target_seconds": 5 },
@@ -499,7 +499,7 @@ scenes:
 
 `shot_01` is single-character (the plain SDXL + IP-Adapter path); `shot_02` has two slots and
 renders on the regional no-bleed path. On a second render of the same project, the planner
-derives reuse from the per-artifact R2 objects (adapter keys, keyframe PNGs + `.hash`
+derives reuse from the per-artifact R2 objects (adapter keys, the `<shot>.latest.json` keyframe pointer, legacy keyframe PNGs + `.hash`
 sidecars) and reuses both LoRAs and any keyframe whose params have not changed.
 
 ## See also
