@@ -769,8 +769,11 @@ def test_wants_i2v_prefetch_skips_train_only_and_finish():
     # SKIP: these jobs never load the Wan i2v pipeline, so the ~120GB prefetch must not start.
     assert _wants_i2v_prefetch("finish_clip") is False
     assert _wants_i2v_prefetch("train_lora") is False
+    # A keyframe job cannot reach i2v. Its prefetch filled the disk and failed the job with ENOSPC.
+    assert _wants_i2v_prefetch("preview") is False
+    assert _wants_i2v_prefetch("regen_shot") is False
     # KEEP (positive controls): every render-path action still eagerly prefetches i2v.
-    for action in ("render", "finalize", "preview", "regen_shot"):
+    for action in ("render", "finalize"):
         assert _wants_i2v_prefetch(action) is True, action
     # default/unknown action falls through to the render path -> keep the prefetch
     assert _wants_i2v_prefetch("render") is True
