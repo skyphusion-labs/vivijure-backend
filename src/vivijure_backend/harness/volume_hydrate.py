@@ -133,7 +133,7 @@ def _copy_file(src: Path, dest: Path, size: int, pool: ThreadPoolExecutor, deadl
     """Parallel ranged copy to `<dest>.part`, then an atomic replace of the symlink."""
     part = dest.with_name(dest.name + ".part")
     src_fd = os.open(src, os.O_RDONLY)
-    dst_fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    dst_fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     done = False
     try:
         os.ftruncate(dst_fd, size)
