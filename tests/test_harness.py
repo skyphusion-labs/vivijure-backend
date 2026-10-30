@@ -131,6 +131,12 @@ class FakeStore:
         self.meta[key] = metadata
         return key
 
+    def put_bytes(self, data, key, *, content_type=None, metadata=None):
+        self.puts.append(key)
+        self.meta[key] = metadata
+        self.bytes_put = {**getattr(self, "bytes_put", {}), key: data}
+        return key
+
     def put_dir_as_tar(self, src_dir, key, *, metadata=None):
         self.tars.append(key)
         self.meta[key] = metadata
@@ -459,8 +465,10 @@ def test_run_job_uploads_keyframe_hash_sidecars(tmp_path):
     run_job(_job(render_overrides={"finish_offloaded": True}),
             pipeline=HashingPipeline(), store=store, workdir=tmp_path / "work")
     for shot_id in ("shot_01", "shot_02"):
-        assert keys.keyframe_key("neon", shot_id) in store.puts
-        assert keys.keyframe_hash_key("neon", shot_id) in store.puts
+        job_key = keys.job_keyframe_key("neon", "local", shot_id)
+        assert job_key in store.puts
+        pointer = json.loads(store.bytes_put[keys.keyframe_latest_key("neon", shot_id)])
+        assert pointer == {"key": job_key, "hash": f"hash-{shot_id}"}
 
 
 def test_run_job_writes_no_shared_state_object(tmp_path):
@@ -779,6 +787,120 @@ def test_wants_i2v_prefetch_skips_train_only_and_finish():
     assert _wants_i2v_prefetch("render") is True
 
 
+# --- #534: concurrent renders of one project keep their own stills -----------------------------
+
+def test_job_keyframe_key_is_job_scoped_and_slugged():
+    assert keys.job_keyframe_key("neon", "abc-u1", "shot_01") == "renders/neon/keyframes/abc-u1/shot_01.png"
+    assert keys.job_keyframe_key("neon", "a", "s") != keys.job_keyframe_key("neon", "b", "s")
+    assert "/../" not in keys.job_keyframe_key("neon", "../evil", "s")
+    # The i2v_clip wire template is a three-repo contract and does not move.
+    assert keys.keyframe_key("neon", "shot_01") == "renders/neon/keyframes/shot_01.png"
+
+
+def test_two_jobs_of_one_project_never_write_the_same_still_or_the_flat_key(tmp_path):
+    store = FakeStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    first = run_job(_job(render_overrides={"finish_offloaded": True}), pipeline=FakePipeline(),
+                    store=store, workdir=tmp_path / "w1", job_id="job-a")
+    second = run_job(_job(render_overrides={"finish_offloaded": True}), pipeline=FakePipeline(),
+                     store=store, workdir=tmp_path / "w2", job_id="job-b")
+    a = {k["key"] for k in first["keyframes"]}
+    b = {k["key"] for k in second["keyframes"]}
+    assert a and b and not (a & b)
+    assert all("/keyframes/job-a/" in k for k in a)
+    assert keys.keyframe_key("neon", "shot_01") not in store.puts
+    assert keys.keyframe_hash_key("neon", "shot_01") not in store.puts
+
+
+def _pointer(key, param_hash="abc"):
+    return json.dumps({"key": key, "hash": param_hash}).encode()
+
+
+def test_restore_reads_still_and_hash_through_the_pointer(tmp_path):
+    from vivijure_backend.harness.handler import _restore_prior_state
+
+    bundle = _extract_bundle(tmp_path)
+    still = keys.job_keyframe_key("neon", "job-a", "shot_01")
+    store = R2StateStore({keys.keyframe_latest_key("neon", "shot_01"): _pointer(still), still: b"A-PNG"})
+    _, existing = _restore_prior_state(store, "neon", bundle)
+    assert existing == {"shot_01": "abc"}
+    assert (bundle.root / "keyframes" / "shot_01.png").read_bytes() == b"A-PNG"
+    assert (bundle.root / "keyframes" / "shot_01.hash").read_text() == "abc"
+
+
+def test_pointer_outranks_a_legacy_flat_still(tmp_path):
+    from vivijure_backend.harness.handler import _restore_prior_state
+
+    bundle = _extract_bundle(tmp_path)
+    still = keys.job_keyframe_key("neon", "job-a", "shot_01")
+    store = R2StateStore({
+        keys.keyframe_latest_key("neon", "shot_01"): _pointer(still), still: b"NEW",
+        keys.keyframe_key("neon", "shot_01"): b"OLD",
+    })
+    _restore_prior_state(store, "neon", bundle)
+    assert (bundle.root / "keyframes" / "shot_01.png").read_bytes() == b"NEW"
+
+
+@pytest.mark.parametrize("raw", [
+    b"not json", b"[]", b'{"hash": "abc"}',
+    _pointer("renders/other/keyframes/job-a/shot_01.png"),  # outside this project
+    _pointer("renders/neon/keyframes/gone/shot_01.png"),     # deleted with its render
+])
+def test_a_bad_pointer_is_not_a_reusable_still(tmp_path, raw):
+    from vivijure_backend.harness.handler import _restore_prior_state
+
+    bundle = _extract_bundle(tmp_path)
+    store = R2StateStore({
+        keys.keyframe_latest_key("neon", "shot_01"): raw,
+        "renders/other/keyframes/job-a/shot_01.png": b"FOREIGN",
+    })
+    _, existing = _restore_prior_state(store, "neon", bundle)
+    assert existing == {}
+    assert not (bundle.root / "keyframes" / "shot_01.png").exists()
+
+
+def test_a_pointer_read_failure_fails_before_gpu_work(tmp_path):
+    from vivijure_backend.harness.handler import HarnessError, _restore_prior_state
+
+    class PointerReadFails(R2StateStore):
+        def get_bytes(self, key):
+            raise RuntimeError("403 Forbidden")
+
+    bundle = _extract_bundle(tmp_path)
+    store = PointerReadFails({keys.keyframe_latest_key("neon", "shot_01"): b"{}"})
+    with pytest.raises(HarnessError, match="pointer"):
+        _restore_prior_state(store, "neon", bundle)
+
+
+def test_a_reused_still_is_copied_to_this_jobs_own_key(tmp_path):
+    """The second render of a project reuses the first's still and reports its OWN key for it."""
+    still = keys.job_keyframe_key("neon", "job-a", "shot_01")
+    from vivijure_backend.contract import RenderRequest
+    from vivijure_backend.orchestrator import kf_hash
+    current = kf_hash(RenderRequest.from_dict(_job(render_overrides={"finish_offloaded": True})).config.keyframe)
+
+    class PriorStore(FakeStore):
+        def exists(self, key):
+            return key in (keys.keyframe_latest_key("neon", "shot_01"), still)
+
+        def get_bytes(self, key):
+            return _pointer(still, current)
+
+        def get_file(self, key, dest):
+            if key == still:
+                Path(dest).write_bytes(b"A-PNG")
+                return dest
+            return super().get_file(key, dest)
+
+    store = PriorStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    res = run_job(_job(render_overrides={"finish_offloaded": True}), pipeline=FakePipeline(),
+                  store=store, workdir=tmp_path / "work", job_id="job-b")
+    by_shot = {k["shot_id"]: k["key"] for k in res["keyframes"]}
+    assert by_shot["shot_01"] == keys.job_keyframe_key("neon", "job-b", "shot_01")
+    assert next(k for k in res["keyframes"] if k["shot_id"] == "shot_01")["reused"] is True
+    assert by_shot["shot_01"] in store.puts
+    assert still not in store.puts  # the first render's still is left alone
+
+
 def test_run_job_hydrates_before_it_touches_the_bundle(tmp_path, monkeypatch):
     """The call has to precede any huggingface_hub import, so it runs before the bundle arrives."""
     from vivijure_backend.harness import handler as h
@@ -816,7 +938,7 @@ def test_a_cloud_still_at_the_flat_key_with_no_sidecar_is_redrawn(tmp_path):
     store = CloudStillStore(_bundle_tar(tmp_path / "b.tar.gz"))
     res = run_job(_job(render_overrides={"finish_offloaded": True}), pipeline=FakePipeline(),
                   store=store, workdir=tmp_path / "work")
-    assert keys.keyframe_key("neon", "shot_01") in store.puts  # drawn and uploaded
+    assert keys.job_keyframe_key("neon", "local", "shot_01") in store.puts  # drawn and uploaded
     entry = next(k for k in res["keyframes"] if k["shot_id"] == "shot_01")
     assert "reused" not in entry
 
@@ -844,4 +966,6 @@ def test_a_proven_reuse_is_reported_as_reused(tmp_path):
                   store=store, workdir=tmp_path / "work")
     entry = next(k for k in res["keyframes"] if k["shot_id"] == "shot_01")
     assert entry["reused"] is True
+    # Copied to this job's key so the film owns its still. Nothing was drawn, and the flat key is untouched.
+    assert entry["key"] == keys.job_keyframe_key("neon", "local", "shot_01")
     assert keys.keyframe_key("neon", "shot_01") not in store.puts

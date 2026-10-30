@@ -56,6 +56,23 @@ def keyframe_hash_key(project: str, shot_id: str) -> str:
     return f"renders/{_slug(project)}/keyframes/{_slug(shot_id)}.hash"
 
 
+def job_keyframe_key(project: str, job_id: str, shot_id: str) -> str:
+    """The keyframe one job delivers (#534): `renders/<project>/keyframes/<job>/<shot>.png`.
+
+    Every film off one bundle has the same project, so a flat key let a concurrent render replace
+    a still after a film had recorded it. Nothing else writes under this job's segment. The flat
+    `keyframe_key` stays as the i2v_clip default template and as a read-only legacy location."""
+    return f"renders/{_slug(project)}/keyframes/{_slug(job_id)}/{_slug(shot_id)}.png"
+
+
+def keyframe_latest_key(project: str, shot_id: str) -> str:
+    """The reuse pointer for a shot (#534): one JSON object naming the newest job-scoped still and
+    its param hash. ONE object, so a concurrent writer can never pair one job's PNG with another
+    job's hash, which the flat PNG + .hash pair could. The name is not an image, so the studio's
+    keyframe listing ignores it."""
+    return f"renders/{_slug(project)}/keyframes/{_slug(shot_id)}.latest.json"
+
+
 def clip_key(project: str, shot_id: str) -> str:
     """A per-shot i2v clip, by shot (the offloaded/per-shot finish emits these)."""
     return f"renders/{_slug(project)}/clips/{_slug(shot_id)}.mp4"
