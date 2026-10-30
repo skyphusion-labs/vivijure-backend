@@ -190,3 +190,8 @@ the sum first. Lower another endpoint deliberately if needed, and read the resul
   Standby is free cold-start insurance: a standby worker bills only when it
   actually picks up a job. Do not mistake a non-zero `workersStandby` for idle
   spend; it is not.
+- **Measured 2026-10-30 on `xe5d1ivs40ohjo`:** hourly billing for 18:00 to 20:00Z read $0.14 and
+  $0.46 while 11 to 19 workers read `IDLE` in `list-endpoint-workers`, so those workers were not
+  billing. This settles rows reading `IDLE`. RunPod's concept doc says REST `IDLE` is billed; the
+  buckets disagree, and the buckets are what we were charged. It does not separately measure the idle
+  timeout after a job: "Why 180 s idle" above assumes that window bills, and that is not yet read.
