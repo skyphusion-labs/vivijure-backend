@@ -16,7 +16,7 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 | | `vivijure-backend-hosted` | `vivijure-upscale-hosted` |
 |---|---|---|
 | id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
-| Image | `vivijure-backend:1.1.2@sha256:69f06ab95ab75530af7e0fa135c768548d339435a3714036b6f32e95a2b0d586` | `vivijure-upscale:1.0.4` |
+| Image | `vivijure-backend:1.1.3@sha256:dc04da20fb0ec28136b942c2dffe9608b75f631d8de597e3855e3165ad670e64` | `vivijure-upscale:1.0.4` |
 | Pools | `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141`, `BLACKWELL_180`, `BLACKWELL_288` | `BLACKWELL_96` |
 | `workers` min / max | 0 / 30 | 0 / 10 |
 | Idle timeout | 180 s | 10 s |
@@ -40,8 +40,9 @@ a warm one $0.02, at $3.49 per hour. Idle costs $0.058 per minute, so holding a 
 job arrives within about 2 to 3.5 minutes. A one-off job pays up to about $0.17 of extra idle.
 
 **Previous values, for rollback:** image
-`vivijure-backend:1.1.1@sha256:0ebdc0e19b48676e310a10c863c7dfc4e6a8c642b3fbd887e73e248a6780157f`, same
-disk and idle timeout. Before that: image
+`vivijure-backend:1.1.2@sha256:69f06ab95ab75530af7e0fa135c768548d339435a3714036b6f32e95a2b0d586`, same
+disk and idle timeout. Before that: 1.1.1, same disk and idle timeout, digest
+`sha256:0ebdc0e19b48676e310a10c863c7dfc4e6a8c642b3fbd887e73e248a6780157f`. Before that: image
 `vivijure-backend:1.1.0@sha256:b42084bb1e295976d4ad555566aee1240c5ce86f1692a33560a127ecb155e6ac`,
 disk 300 GB, idle timeout 10 s. That image starts a 114 GiB Wan pull on every keyframe job and needs
 the larger disk, so restore all three together.
@@ -181,8 +182,8 @@ the sum first. Lower another endpoint deliberately if needed, and read the resul
 
 ## Billing note (so nobody re-flags standby)
 
-- **Per-second execution billing.** A worker bills only while it is *running a
-  job*, charged per second.
+- **Per-second billing while running.** A worker bills per second while it is
+  running, which includes the idle timeout after a job (see RunPod's rule below).
 - **`workersMin > 0` = "Always Active" = billed 24/7**, idle or not. Keep
   `workersMin = 0` on every endpoint. This is the only knob that creates idle
   spend; check it (not standby) when worried about a bleed.
@@ -190,3 +191,10 @@ the sum first. Lower another endpoint deliberately if needed, and read the resul
   Standby is free cold-start insurance: a standby worker bills only when it
   actually picks up a job. Do not mistake a non-zero `workersStandby` for idle
   spend; it is not.
+- **RunPod's rule ([worker lifecycle](https://docs.runpod.io/serverless/workers/overview#worker-lifecycle)):**
+  a worker bills while it is running, which is cold start, processing, and waiting through the idle
+  timeout after its last job. A scaled-down worker, shown as Idle, does not bill. So the $0.058 a minute
+  under "Why 180 s idle" stands for the idle timeout, and it is not standby.
+- **Evidence on standby only, 2026-10-30 on `xe5d1ivs40ohjo`:** hourly billing for 18:00 to 20:00Z read
+  $0.14 and $0.46 while 11 to 19 workers read `IDLE` in `list-endpoint-workers`. These buckets do not
+  measure the idle timeout. That part rests on RunPod's rule.
