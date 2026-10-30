@@ -21,6 +21,11 @@ Every worker reads the same files.
 ## Image
 
 Build the toolchain only.
+GitHub Actions does this on `ubuntu-latest`.
+See `.github/workflows/thin-image.yml`.
+A public runner has about 90 GB free.
+The toolchain is CUDA, torch, and deps.
+It is not the 87 GB bake.
 
 ```
 docker build -f deploy/runtime.Dockerfile --target toolchain -t vivijure-backend-toolchain .

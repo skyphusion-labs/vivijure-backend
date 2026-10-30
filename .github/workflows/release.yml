@@ -1,4 +1,7 @@
 name: Release worker image to GHCR (baked)
+# Keyframe path (#530): .github/workflows/thin-image.yml
+# That job builds --target toolchain + deploy/Dockerfile.thin on ubuntu-latest.
+# This file stays the baked film image. It stays disabled.
 # ############################################################################
 # DISABLED 2026-09-25 -- FAILS CLOSED. This release build needs a real NVIDIA GPU (and ~101 GB).
 #

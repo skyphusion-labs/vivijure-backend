@@ -1,0 +1,115 @@
+name: Thin keyframe image (#530)
+
+# No bake. No seed COPY. No .vj-baked.
+# Public ubuntu-latest has about 90 GB free (14 GB is only the floor).
+# The toolchain is CUDA + torch + deps. It is not the 87 GB weight set.
+# --target toolchain does not pull the seed.
+# Push to GHCR. Do not load the image into the runner daemon first.
+# CPU import smoke runs after push. No GPU. The CUDA EP session is a SKIP.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Worker image version X.Y.Z'
+        required: true
+        default: '1.1.0'
+        type: string
+      toolchain_tag:
+        description: 'Toolchain tag suffix (toolchain-<tag>)'
+        required: true
+        default: 't1'
+        type: string
+  push:
+    branches:
+      - ci/530-thin-gha
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: thin-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: skyphusion-labs
+  WORKER_IMAGE: vivijure-backend
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Disk before build
+        run: df -h /
+
+      - name: Resolve tags
+        id: cfg
+        run: |
+          set -eu
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            VER="${{ inputs.version }}"
+            TOOL="${{ inputs.toolchain_tag }}"
+          else
+            VER="1.1.0"
+            TOOL="t1"
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "toolchain=toolchain-${TOOL}" >> "$GITHUB_OUTPUT"
+          echo "Building ${WORKER_IMAGE}:${VER} from toolchain-${TOOL}."
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push toolchain
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/runtime.Dockerfile
+          target: toolchain
+          platforms: linux/amd64
+          push: true
+          load: false
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WORKER_IMAGE }}:${{ steps.cfg.outputs.toolchain }}
+          cache-from: type=gha,scope=toolchain
+          cache-to: type=gha,mode=max,scope=toolchain
+
+      - name: Build and push thin worker
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/Dockerfile.thin
+          platforms: linux/amd64
+          push: true
+          load: false
+          build-args: |
+            TOOLCHAIN_REF=${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WORKER_IMAGE }}:${{ steps.cfg.outputs.toolchain }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WORKER_IMAGE }}:${{ steps.cfg.outputs.version }}
+
+      - name: CPU import smoke
+        run: |
+          set -eu
+          IMG="${REGISTRY}/${OWNER}/${WORKER_IMAGE}:${{ steps.cfg.outputs.version }}"
+          docker pull "${IMG}"
+          docker run --rm "${IMG}" \
+            conda run --no-capture-output -n vivijure \
+            python /opt/vivijure/smoke_imports.py
+          echo "Pushed ${WORKER_IMAGE}:${{ steps.cfg.outputs.version }} (thin). CUDA EP smoke needs a GPU pod."
+
+      - name: Disk after build
+        if: always()
+        run: df -h /
