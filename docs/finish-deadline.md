@@ -1,6 +1,7 @@
 # The finish_clip wall-clock guard (#422)
 
-One monotonic budget bounds a whole `finish_clip` invocation on the RunPod worker. This page is the
+Two monotonic budgets, one after the other, bound a whole `finish_clip` invocation on the RunPod
+worker. This page is the
 coverage claim: which steps are inside the budget, which are not, and what the number was argued
 against. A guard whose coverage is not written down invites someone downstream to relay a partial
 number as an invocation ceiling, which is an under-claim nothing detects.
@@ -12,10 +13,41 @@ Code: [`finish.py`](../src/vivijure_backend/finish.py) (`Deadline`, `FinishDeadl
 
 ## What it does
 
-`Deadline.start()` opens the budget on the FIRST line of a `finish_clip` invocation, in
-`harness.handler.handler`, so the R2 client build and the cold-start model mirror are inside it and
-the number is an invocation ceiling rather than a stage total. One shared deadline, not a timeout
-per step: per-step timeouts multiply, and the invocation bound is then a sum nobody computes.
+`harness.handler.handler` opens the MIRROR budget on the first line of a `finish_clip` invocation. It
+covers the R2 client build and the cold-start model mirror. When the mirror returns, the handler opens
+the WORK budget, which covers everything else. The invocation ceiling is the sum of the two. Each
+budget is shared across its stages and is not a timeout per step, because per-step timeouts multiply
+and the invocation bound is then a sum nobody computes.
+
+### Why the mirror has its own budget (#553)
+
+The mirror used to count against the work budget, and there was a check at the point it returned. On
+film `film-f5e2a79e-c761-4752-90f8-9f4d085a9e1e` a cold worker spent 475.6 s mirroring, the check fired
+against the 420 s budget, and a worker that had just become ready gave up without running the step.
+
+The budget is sized for the work (see below), so it does not count the mirror. No check follows the
+mirror: a mirror that returned succeeded, so the job runs.
+
+The mirror still has a bound, because `rclone` can hang. This is a real limit and not only a check at
+its edge: a watchdog kills `rclone` when the budget runs out, and the job soft-degrades at stage
+`model_mirror`. The next job on that worker pulls again, because a leg's sentinel is written only after
+that leg finishes.
+
+### What a finish job mirrors
+
+Only the legs its step loads, read from the job's own config by `finish.mirror_legs`:
+
+| Step | Loads | Legs |
+|------|-------|------|
+| RIFE (`interpolate`) | `rife/flownet.pkl` | `rife` |
+| GFPGAN (`face_restore`) | `GFPGANv1.4/GFPGANv1.4.pth`, facexlib detection and parsing | `GFPGANv1.4`, `facexlib` |
+| CodeFormer (`face_restore: "codeformer"`) | `CodeFormer/codeformer.pth`, facexlib | `facexlib` (no mirror has a CodeFormer leg) |
+| Re-encode only (both off) | nothing | none |
+
+No finish step loads the `hf-cache` or `antelopev2` legs. Each pulled leg writes its own sentinel, so
+a warm worker does not copy it again. The base sentinel stays unwritten, so a later job that needs more
+still pulls it, and that pull skips the legs already present. A `render` runs its finish stage on the
+full mirror, as before. A finish job also never self-preloads a network volume.
 
 On expiry the handler RETURNS
 
@@ -43,7 +75,9 @@ The shape is the consumer contract, `vivijure-cf` `modules/_shared/finish-soft-d
 back to the default. There is deliberately NO value that turns the guard off: a guard an operator
 can disable by typo is the defect this closes.
 
-## Coverage: 13 of 14 compute steps are inside the budget
+`VJ_FINISH_MIRROR_MAX_SECONDS`, seconds, default `120`, is the mirror budget, with the same rules.
+
+## Coverage: 13 of 14 compute steps are inside a budget
 
 Enumerated end to end, in execution order. "Interruptible" is the honest column: a step can be
 INSIDE the budget and still not be cuttable mid-flight, and the difference is what decides whether
@@ -52,7 +86,7 @@ the ceiling is a guarantee or a strong bound.
 | # | Step | Where | In budget | Interruptible mid-step |
 |---|------|-------|-----------|------------------------|
 | 1 | R2 client build | `handler` | yes | edge only (local, no network) |
-| 2 | Cold-start model mirror `ensure_models` | `handler` | yes | edge only (no-ops on the baked image) |
+| 2 | Cold-start model mirror `ensure_models` | `handler` | yes (mirror budget) | YES, watchdog kills `rclone` |
 | 3 | R2 GET of the input clip | `run_finish_job` | yes | edge only (botocore socket timeouts) |
 | 4 | Container probe `iio.immeta` | `finish_clip` | yes | edge only (header read) |
 | 5 | Frame decode `iio.imiter` | `finish_clip` | yes | YES, per decoded frame |
@@ -66,8 +100,9 @@ the ceiling is a guarantee or a strong bound.
 | 13 | R2 PUT of the finished clip | `run_finish_job` | yes | edge only (botocore socket timeouts) |
 | 14 | R2 PUT of the `.hash` sidecar | `run_finish_job` | **NO** | deliberately outside |
 
-**13 of 14 inside. 6 of those 13 are interruptible mid-step** (3 hard-killed subprocesses, 3
-per-iteration loops); the other 7 are checked at their edges only.
+**13 of 14 inside. 7 of those 13 are interruptible mid-step** (4 hard-killed subprocesses, 3
+per-iteration loops); the other 6 are checked at their edges only. Rows 1 and 2 use the mirror budget,
+and the rest use the work budget.
 
 Step 14 is the one deliberate exclusion: the provenance sidecar is already best-effort, it runs
 AFTER the artifact is uploaded, and a miss only disables reuse (the core re-runs). Bounding it would
@@ -75,7 +110,7 @@ buy nothing and could only turn a free miss into a degrade.
 
 ### The residual, stated plainly
 
-The seven edge-only rows mean the budget is a STRONG BOUND and not a hard guarantee. Two of them
+The six edge-only rows mean the budget is a STRONG BOUND and not a hard guarantee. Two of them
 matter in practice:
 
 - **R2 GET and PUT** are bounded by botocore socket timeouts, not by this guard.
@@ -97,7 +132,9 @@ above first (`vivijure-core#223`).
 ## Why 420 seconds
 
 Three bounds. The default clears all three, and the first two are executable assertions in
-`tests/test_finish_deadline.py` so a later bump cannot quietly break either.
+`tests/test_finish_deadline.py` so a later bump cannot quietly break either. Bounds 1 and 2 apply to
+the whole invocation, so those tests add the 120 s mirror budget: 540 s stays under 600 s, and
+`3 * 540 = 1620 s` leaves the core floor untouched.
 
 ### 1. The platform ceiling, which is NOT settled
 

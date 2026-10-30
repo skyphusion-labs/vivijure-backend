@@ -69,6 +69,18 @@ _NVENC = None
 DEFAULT_MAX_SECONDS = 420
 MAX_SECONDS_ENV = "VJ_FINISH_MAX_SECONDS"
 
+# The cold-start mirror has its OWN bound, separate from the work budget above (#553). The 420s is
+# sized for the work, and a mirror charged against it throws away a worker that just became ready.
+# But the mirror must still end if it hangs, and the three bounds above still have to hold for the
+# WHOLE invocation, so the two budgets add up: 120 + 420 = 540s stays under the 600s platform reading
+# and 3 * 540 = 1620s leaves the core phase floor untouched. Tested.
+#
+# WHY 120 SECONDS. The legs a finish job pulls took 1.4s, 2.9s and 3.6s on the measured cold worker
+# (#553). The same run's copy fell to single-digit MiB/s at its slowest, and 120s still moves about
+# 600 MiB at 5 MiB/s, which is more than these legs hold.
+DEFAULT_MIRROR_MAX_SECONDS = 120
+MIRROR_MAX_SECONDS_ENV = "VJ_FINISH_MIRROR_MAX_SECONDS"
+
 
 def max_finish_seconds(env: dict | None = None) -> float:
     """The finish wall-clock budget in seconds: VJ_FINISH_MAX_SECONDS when it parses to a positive
@@ -86,6 +98,17 @@ def max_finish_seconds(env: dict | None = None) -> float:
     except (TypeError, ValueError):
         return float(DEFAULT_MAX_SECONDS)
     return v if v > 0 else float(DEFAULT_MAX_SECONDS)
+
+
+def max_mirror_seconds(env: dict | None = None) -> float:
+    """The finish mirror's budget in seconds. Same rules as `max_finish_seconds`: junk, an empty
+    string, zero and negatives fall back to the default, and no value turns it off. Pure."""
+    e = os.environ if env is None else env
+    try:
+        v = float(str(e.get(MIRROR_MAX_SECONDS_ENV)).strip())
+    except (TypeError, ValueError):
+        return float(DEFAULT_MIRROR_MAX_SECONDS)
+    return v if v > 0 else float(DEFAULT_MIRROR_MAX_SECONDS)
 
 
 class FinishDeadlineExceeded(BaseException):
@@ -227,6 +250,56 @@ class FinishParams:
         """Whether this clip needs the GPU finish stage at all. When neither pass is on, the
         pipeline skips `finish_clip` entirely and the raw i2v clip is delivered as-is."""
         return bool(self.interpolate or self.face_restore)
+
+
+def finish_params_from_job(cfg: dict) -> FinishParams:
+    """A `finish_clip` job's `config` as engine params. The ONE reading of that config: the job runs
+    on it, and the mirror decides which weights to pull from it, so the two cannot disagree."""
+    return FinishParams(
+        interpolate=bool(cfg.get("interpolate", True)),
+        factor=int(cfg.get("interpolation_factor", 2)),
+        target_fps=int(cfg.get("target_fps", 0)),
+        face_restore=bool(cfg.get("face_restore") not in (None, False, "none", "")),
+        # `true` means "on, default backend"; only a string names a backend (str(True) is "True",
+        # which FaceRestore rejects).
+        face_restore_backend=str(cfg["face_restore"]) if isinstance(cfg.get("face_restore"), str) and cfg["face_restore"] not in ("none", "") else "gfpgan",
+        face_fidelity=float(cfg.get("face_fidelity", 0.7)),
+        only_faces=bool(cfg.get("only_faces", True)),
+    )
+
+
+# The mirror legs that hold finish weights, named for the directories under VJ_MODELS_ROOT that the
+# loaders open: ModelServer.frame_interpolator, ModelServer.face_restorer, _ensure_facexlib_offline.
+RIFE_LEG = "rife"
+GFPGAN_LEG = "GFPGANv1.4"
+FACEXLIB_LEG = "facexlib"
+FINISH_LEGS = (RIFE_LEG, GFPGAN_LEG, FACEXLIB_LEG)
+
+
+def mirror_legs(params: FinishParams) -> tuple[str, ...]:
+    """The mirror legs a finish pass with these params can load, in FINISH_LEGS order (#553).
+
+    A finish pass loads no HF-cache repo and no antelopev2: RIFE reads one fixed path, and a restorer
+    reads its own weight plus facexlib's detection and parsing weights. CodeFormer has no leg of its
+    own in any mirror, because its non-commercial weight is a deploy-time opt-in, so it needs facexlib
+    only. A pass with both toggles off only re-encodes, and needs nothing."""
+    wanted = set()
+    if params.interpolate:
+        wanted.add(RIFE_LEG)
+    if params.face_restore:
+        wanted.add(FACEXLIB_LEG)
+        if params.face_restore_backend.lower() != "codeformer":
+            wanted.add(GFPGAN_LEG)
+    return tuple(leg for leg in FINISH_LEGS if leg in wanted)
+
+
+def job_mirror_legs(job: dict) -> tuple[str, ...]:
+    """The mirror legs for one `finish_clip` job's input. A config that does not parse names no legs:
+    `run_finish_job` parses the same config, fails the job on it by name, and loads no model."""
+    try:
+        return mirror_legs(finish_params_from_job(job.get("config") or {}))
+    except Exception:  # noqa: BLE001 -- the job itself reports this; the mirror must not pre-empt it
+        return ()
 
 
 # --------------------------------------------------------------------------- finish (GPU)

@@ -25,6 +25,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
+from ..finish import FINISH_LEGS, Deadline, FinishDeadlineExceeded
 from . import stills_manifest
 
 # Module-level handle for the eager i2v prefetch thread (see start_i2v_prefetch).
@@ -69,6 +70,9 @@ STILLS_SENTINEL = ".vj-stills-complete"
 # Actions that load only the SDXL stills set, including LoRA training's VAE, encoders and UNet. Every
 # other action, and an unnamed one, keeps the full base mirror.
 STILLS_ACTIONS = frozenset({"preview", "regen_shot", "train_lora"})
+# Written per finish leg, once that leg has been pulled. A finish job pulls only the legs it loads, so
+# the base sentinel stays unwritten and a later job that needs the rest still pulls it (#553).
+FINISH_LEG_SENTINEL = ".vj-leg-{}-complete"
 
 # Baked-image marker: present at VJ_MODELS_ROOT/.vj-baked when the model weights are BAKED INTO THE
 # IMAGE. The marker says BAKED and nothing about which precision was baked; that lives in the stamp's
@@ -284,18 +288,37 @@ def last_mirror_stats() -> dict | None:
     return _last_stats
 
 
-def _run_rclone(cmd: list[str], env: dict) -> int:
+def _run_rclone(cmd: list[str], env: dict, deadline: Deadline | None = None) -> int:
     """Run one rclone leg, passing its log through live. Returns the failed passes it logged, which is
-    how a leg that succeeded after retrying can be told from a clean one. Raises on a non-zero exit."""
+    how a leg that succeeded after retrying can be told from a clean one. Raises on a non-zero exit.
+
+    With a `deadline`, a watchdog kills rclone when the budget runs out, and that raises
+    FinishDeadlineExceeded. A stalled rclone writes nothing, so a check in the read loop would never
+    run. A leg that exits 0 succeeded, even if the watchdog fired in the same instant."""
     proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, errors="replace")
+    fired = threading.Event()
+    watchdog = None
+    if deadline is not None:
+        def _kill() -> None:
+            fired.set()
+            proc.kill()
+        watchdog = threading.Timer(deadline.remaining(), _kill)
+        watchdog.daemon = True
+        watchdog.start()
     retries = 0
-    for line in proc.stdout:
-        print(line, end="", flush=True)
-        if _RCLONE_ATTEMPT_FAILED.search(line):
-            retries += 1
-    returncode = proc.wait()
+    try:
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+            if _RCLONE_ATTEMPT_FAILED.search(line):
+                retries += 1
+        returncode = proc.wait()
+    finally:
+        if watchdog is not None:
+            watchdog.cancel()
     if returncode:
+        if deadline is not None and fired.is_set():
+            raise FinishDeadlineExceeded("model_mirror", deadline.elapsed(), deadline.budget_seconds)
         raise subprocess.CalledProcessError(returncode, cmd)
     return retries
 
@@ -671,7 +694,9 @@ def _resolve_volume(e: dict, model_version: str, log: Callable[[str], None],
         return state
     log(f"models_mirror: volume at {vol} is missing a sentinel THIS JOB NEEDS for v{model_version} "
         f"(base={base_ok}, i2v={i2v_ok}, i2v_required={i2v_required}); degrading wholesale.")
-    if _self_preload_allowed(e, vol):
+    # A finish job does not fill a volume: that is a pull of the whole corpus, which its legs do not
+    # need and its mirror budget cannot end. It falls through and pulls its legs to local disk.
+    if action != "finish_clip" and _self_preload_allowed(e, vol):
         filled = _self_preload_volume(e, model_version, log, i2v_required=i2v_required)
         return filled if filled.usable else _decline(e, filled)
     if kind == VOLUME_KIND_GLOBAL and _truthy(e.get("VJ_VOLUME_SELF_PRELOAD")):
@@ -681,9 +706,16 @@ def _resolve_volume(e: dict, model_version: str, log: Callable[[str], None],
     return _decline(e, state)
 
 
+def _finish_leg_current(models_root: Path, leg: str, model_version: str) -> bool:
+    """True iff this finish leg was already pulled at this model version."""
+    path = models_root / FINISH_LEG_SENTINEL.format(leg)
+    return path.exists() and path.read_text().strip() == model_version
+
+
 def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print,
                   skip_repos: tuple[str, ...] = DEFAULT_SKIP_REPOS,
-                  action: str | None = None) -> bool:
+                  action: str | None = None, finish_legs: tuple[str, ...] | None = None,
+                  deadline: Deadline | None = None) -> bool:
     """Mirror the kept model set from R2 into the local HF cache + antelopev2 dir.
 
     Returns True if a pull ran, False if it was skipped (warm worker, or no R2 creds so weights
@@ -692,6 +724,11 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     `action` is the job's action, and it is the ONLY thing that decides whether the network-volume
     readiness gate requires the i2v corpus (see `_resolve_volume`). Omitting it keeps the
     conservative pre-#453 behaviour: the i2v corpus is required.
+
+    `finish_legs` is set by a finish job, and it replaces the kept model set with exactly those legs
+    (#553). A pulled leg gets its own sentinel, so a warm worker does not copy it again, and the base
+    sentinel stays unwritten, so a later job that needs the rest still pulls the rest. `deadline`
+    ends that pull if it hangs, by raising FinishDeadlineExceeded.
     """
     global _last_stats
     _last_stats = None
@@ -736,6 +773,15 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
             log(_skip_event("warm"))
             return False
         log(f"models_mirror: sentinel version mismatch (want {model_version!r}); re-mirroring.")
+    pending = None
+    if finish_legs is not None:
+        pending = [leg for leg in FINISH_LEGS if leg in finish_legs
+                   and not _finish_leg_current(models_root, leg, model_version)]
+        if not pending:
+            reason = "warm_finish" if finish_legs else "finish_no_legs"
+            log(f"models_mirror: this finish step has nothing to pull ({reason}); skipping R2 pull.")
+            log(_skip_event(reason))
+            return False
     stills_only = wants_stills_only(action, e)
     stills_sentinel = models_root / STILLS_SENTINEL
     if stills_only and stills_sentinel.exists() and stills_sentinel.read_text().strip() == model_version:
@@ -758,7 +804,9 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     renv = rclone_env(e)
     hf_home.mkdir(parents=True, exist_ok=True)
     filters = None
-    if stills_only:
+    if pending is not None:
+        log(f"models_mirror: cold worker -> mirroring only {pending} for action={action!r}...")
+    elif stills_only:
         filters = stills_manifest.rclone_filters()
         log(f"models_mirror: cold worker -> mirroring the stills set for action={action!r} "
             f"({stills_manifest.total_bytes()} weight bytes) to {hf_home}...")
@@ -771,16 +819,35 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
         time.sleep(jitter)
     legs: list[tuple[str, float]] = []
     pull_started = time.monotonic()
-    stats = {"legs": {}, "retries": 0, "jitter_seconds": round(jitter, 1), "total_bytes": None}
+    stats: dict = {"legs": {}, "retries": 0, "jitter_seconds": round(jitter, 1), "total_bytes": None}
     _last_stats = stats
 
     def run_leg(name: str, cmd: list[str]) -> None:
         t0 = time.monotonic()
-        stats["retries"] += _run_rclone(cmd, renv) or 0
+        stats["retries"] += (_run_rclone(cmd, renv, deadline) if deadline is not None
+                             else _run_rclone(cmd, renv)) or 0
         seconds = time.monotonic() - t0
         legs.append((name, seconds))
         stats["legs"][name] = round(seconds, 1)
         stats["wall_seconds"] = round(time.monotonic() - pull_started, 1)
+
+    if pending is not None:
+        models_root.mkdir(parents=True, exist_ok=True)
+        for leg in pending:
+            if deadline is not None:
+                deadline.check("model_mirror")
+            dst = models_root / leg
+            dst.mkdir(parents=True, exist_ok=True)
+            run_leg(leg, mirror_cmd(f"r2:{bucket}/models/{leg}", dst))
+            (models_root / FINISH_LEG_SENTINEL.format(leg)).write_text(model_version + "\n")
+        try:  # best-effort telemetry, as below
+            stats["total_bytes"] = sum(_dir_bytes(models_root / leg) for leg in pending)
+            log(_mirror_event(legs, stats["total_bytes"], cold=True, model_version=model_version,
+                              retries=stats["retries"]))
+        except Exception as exc:  # noqa: BLE001 -- telemetry must never fail a good pull
+            log(f"models_mirror: mirror telemetry skipped ({exc})")
+        log(f"models_mirror: finish legs {pending} mirrored from R2.")
+        return True
 
     run_leg("hf-cache", mirror_cmd(f"r2:{bucket}/models/hf-cache", hf_home,
                                    skip_repos=() if stills_only else skip_repos, filters=filters))
@@ -794,7 +861,10 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     # ModelServer.face_restorer loads $VJ_MODELS_ROOT/GFPGANv1.4/GFPGANv1.4.pth directly,
     # so they need their own R2 mirror legs separate from the HF-cache pull above.
     # A stills job runs no finish stage, so it needs none of them.
-    for subdir in (() if stills_only else ("rife", "GFPGANv1.4", "facexlib")):
+    # A leg an earlier finish job already pulled is not copied again.
+    for subdir in (() if stills_only else FINISH_LEGS):
+        if _finish_leg_current(models_root, subdir, model_version):
+            continue
         dst = models_root / subdir
         dst.mkdir(parents=True, exist_ok=True)
         run_leg(subdir, mirror_cmd(f"r2:{bucket}/models/{subdir}", dst))

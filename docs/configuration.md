@@ -215,6 +215,7 @@ image (see [operations.md](operations.md#environment)); the R2 credential is the
 | `VJ_VOLUME_KIND` | `global` when the root is `/runpod-volume` | `global` or `network`. Global never self-preloads. |
 | `VJ_VOLUME_SELF_PRELOAD` | `0` | First-worker fill. Off for a global volume. |
 | `VJ_MODEL_VERSION` | `1` | Mirror sentinel version; bump to force a re-mirror on warm workers. |
+| `VJ_FINISH_MIRROR_MAX_SECONDS` | `120` | The budget for a `finish_clip` job to pull its model legs. A hung pull is killed at this budget and the job soft-degrades. See `docs/finish-deadline.md`. |
 | `VJ_I2V_DISTILL` | `1` | Toggle the Wan2.2-Lightning distill LoRA. |
 | `VJ_I2V_FP8` | `1` | Toggle Wan fp8 quantization. |
 | `HF_HOME` | `/opt/models/hf-cache` | HuggingFace cache the mirror fills (read offline). |
