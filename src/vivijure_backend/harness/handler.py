@@ -28,6 +28,10 @@ from . import keys
 from .progress import NullEmitter, ProgressEmitter
 from .r2 import is_not_found
 from . import job_done_diag
+from .volume_hydrate import maybe_hydrate
+
+# The actions that read the SDXL base set off the volume (train, draw). An i2v-only pass reads none.
+_SDXL_ACTIONS = frozenset({"render", "preview", "regen_shot", "train_lora"})
 
 
 class HarnessError(RuntimeError):
@@ -85,6 +89,9 @@ def run_job(
     progress = ProgressEmitter(store, req.project, job_id, on_progress=on_progress)
     progress.emit("started", action=req.action, quality=req.quality_tier, project=req.project)
     progress.emit("mirror_done", pulled=bool(mirrored))
+    # Before anything imports huggingface_hub, which reads HF_HOME once. See volume_hydrate.
+    if req.action in _SDXL_ACTIONS:
+        maybe_hydrate(progress.emit)
     try:
         # --- bundle in ---
         # Validate the required input up front (like finish_clip/i2v_clip do for their keys), so a
@@ -291,7 +298,7 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
                                      content_type="image/png")
             else:
                 key = keys.keyframe_key(project, sc.shot_id)
-            result.keyframes.append(Keyframe(shot_id=sc.shot_id, key=key))
+            result.keyframes.append(Keyframe(shot_id=sc.shot_id, key=key, reused=True))
 
     # Clips ordered by the storyboard (never the stage's incidental order).
     ordered = order_for_storyboard(
@@ -390,7 +397,7 @@ def _restore_prior_state(store, project: str, bundle: Bundle, *, model_family: s
     - Shot `sc.id` has a reusable keyframe iff its pointer (#534) names a still that exists, or,
       for a pre-#534 project, its PNG exists at keyframe_key(project, sc.id); that legacy hash
       comes from the .hash sidecar (absent sidecar -> None, which _keyframe_mode
-      treats as "reuse conservatively", the same contract as the old no-hash-file state). Only a
+      treats as unproven and redraws, #488). Only a
       real not-found is "absent": any other failure reading the sidecar raises HarnessError, for
       the same reason as the existence checks.
 
@@ -433,13 +440,13 @@ def _restore_prior_state(store, project: str, bundle: Bundle, *, model_family: s
                     # as legacy state would reuse a keyframe drawn with other parameters.
                     raise HarnessError(
                         f"could not read keyframe hash sidecar for {sc.id!r}: {e}") from e
-                raw = None  # a real not-found: legacy no-sidecar state -> reuse conservatively
+                raw = None  # a real not-found: no proof of parameters -> the planner redraws (#488)
             if raw is not None:
                 try:
                     stored = raw.decode("utf-8", "replace").strip() or None
                     if stored:
                         local_png.with_suffix(".hash").write_text(stored)
-                except Exception:  # noqa: BLE001 -- a local staging hiccup -> reuse conservatively
+                except Exception:  # noqa: BLE001 -- a local staging hiccup -> the planner redraws (#488)
                     pass
             existing_keyframes[sc.id] = stored
         except HarnessError:

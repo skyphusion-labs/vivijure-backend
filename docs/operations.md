@@ -173,6 +173,9 @@ Events (discrete stages):
 |---|---|---|
 | `started` | -- | Job begins. |
 | `mirror_done` | -- | Cold-start mirror complete. |
+| `hydrate_start` / `hydrate_progress` / `hydrate_file` / `hydrate_done` | `bytes`, `seconds`, `mb_per_s`, `complete`, `reason` | Weights copied from a global volume to container disk. See `docs/global-volume.md`. |
+| `hydrate_skipped` / `hydrate_failed` | `reason` or `error` | The job reads from the volume instead. |
+| `load_start` / `load_heartbeat` / `load_done` / `load_failed` | `name`, `elapsed_s` | One model load. A heartbeat every 30 s tells a slow load from a hang. |
 | `train_done` | `slot` | A character LoRA finished training. |
 | `keyframe_done` | `shot`, `identity_requested`, `identity_path`, `onnx_providers` | A keyframe was generated. `identity_requested` is the configured method; `identity_path` is which path actually RAN (`instantid`, `ip_adapter`, `regional_ip_adapter`, `lora_only`, `none`), and the two differ whenever InstantID falls back on a reference with no detectable face. `onnx_providers` is the providers onnxruntime ATTACHED (never the requested list), or `null` if the identity path never loaded an analyzer on this worker. Without these a CPU-bound face path is invisible in render history, which is how one shipped through three releases (backend#346 / #350). |
 | `i2v_done` | `shot` | A shot finished animating. |

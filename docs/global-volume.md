@@ -91,6 +91,33 @@ It falls back to R2 on local disk.
 That fallback is the miss path.
 It is not the plan.
 
+## Hydrate
+
+Reading weights straight off a global volume is slow.
+Measured on film-a9939630: the 9.99 GiB UNet shard took 404 s, about 26 MB/s.
+One job reads that shard twice: LoRA training, then the keyframe pipeline.
+
+So a stills job first copies what it reads to container disk.
+See `harness/volume_hydrate.py`.
+The copy happens once per worker.
+The worker then loads from local disk.
+
+The local tree is always complete.
+It starts as symlinks into the volume.
+A copied file replaces its symlink.
+A time cap, a full disk or a read error leaves a slower job, not a missing file.
+
+| Var | Default | Meaning |
+|---|---|---|
+| `VJ_HYDRATE` | on when `VJ_VOLUME_KIND=global` | `0` turns it off. `1` turns it on for any volume. |
+| `VJ_HYDRATE_ROOT` | `/tmp/vj-hydrate` | Local root. |
+| `VJ_HYDRATE_THREADS` | `8` | Parallel 64 MiB reads per file. |
+| `VJ_HYDRATE_MAX_SECONDS` | `600` | After this, the rest stays on the volume. |
+
+Read `hydrate_file` for the MB/s of each file.
+Read `load_done` for the seconds of each model load.
+Both appear as `@event` lines and in the progress snapshot.
+
 ## After the thin image is live
 
 Unpin the datacenter allow list.

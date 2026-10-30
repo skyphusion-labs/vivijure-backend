@@ -871,13 +871,16 @@ def test_a_pointer_read_failure_fails_before_gpu_work(tmp_path):
 def test_a_reused_still_is_copied_to_this_jobs_own_key(tmp_path):
     """The second render of a project reuses the first's still and reports its OWN key for it."""
     still = keys.job_keyframe_key("neon", "job-a", "shot_01")
+    from vivijure_backend.contract import RenderRequest
+    from vivijure_backend.orchestrator import kf_hash
+    current = kf_hash(RenderRequest.from_dict(_job(render_overrides={"finish_offloaded": True})).config.keyframe)
 
     class PriorStore(FakeStore):
         def exists(self, key):
             return key in (keys.keyframe_latest_key("neon", "shot_01"), still)
 
         def get_bytes(self, key):
-            return _pointer(still, None)
+            return _pointer(still, current)
 
         def get_file(self, key, dest):
             if key == still:
@@ -890,5 +893,76 @@ def test_a_reused_still_is_copied_to_this_jobs_own_key(tmp_path):
                   store=store, workdir=tmp_path / "work", job_id="job-b")
     by_shot = {k["shot_id"]: k["key"] for k in res["keyframes"]}
     assert by_shot["shot_01"] == keys.job_keyframe_key("neon", "job-b", "shot_01")
+    assert next(k for k in res["keyframes"] if k["shot_id"] == "shot_01")["reused"] is True
     assert by_shot["shot_01"] in store.puts
     assert still not in store.puts  # the first render's still is left alone
+
+
+def test_run_job_hydrates_before_it_touches_the_bundle(tmp_path, monkeypatch):
+    """The call has to precede any huggingface_hub import, so it runs before the bundle arrives."""
+    from vivijure_backend.harness import handler as h
+
+    order = []
+    monkeypatch.setattr(h, "maybe_hydrate", lambda emit: order.append("hydrate"))
+
+    class Store(FakeStore):
+        def get_file(self, key, dest):
+            order.append("bundle")
+            return super().get_file(key, dest)
+
+    run_job(_job(render_overrides={"finish_offloaded": True}), pipeline=FakePipeline(),
+            store=Store(_bundle_tar(tmp_path / "b.tar.gz")), workdir=tmp_path / "work")
+    assert order[:2] == ["hydrate", "bundle"]
+
+
+def test_a_cloud_still_at_the_flat_key_with_no_sidecar_is_redrawn(tmp_path):
+    """#488, through restore, plan and finish: the job must draw and report a drawn still."""
+    class CloudStillStore(FakeStore):
+        def exists(self, key):
+            return key == keys.keyframe_key("neon", "shot_01")
+
+        def get_bytes(self, key):
+            e = RuntimeError("no sidecar")
+            e.response = {"Error": {"Code": "NoSuchKey"}}
+            raise e
+
+        def get_file(self, key, dest):
+            if key == keys.keyframe_key("neon", "shot_01"):
+                Path(dest).write_bytes(b"CLOUD")
+                return dest
+            return super().get_file(key, dest)
+
+    store = CloudStillStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    res = run_job(_job(render_overrides={"finish_offloaded": True}), pipeline=FakePipeline(),
+                  store=store, workdir=tmp_path / "work")
+    assert keys.job_keyframe_key("neon", "local", "shot_01") in store.puts  # drawn and uploaded
+    entry = next(k for k in res["keyframes"] if k["shot_id"] == "shot_01")
+    assert "reused" not in entry
+
+
+def test_a_proven_reuse_is_reported_as_reused(tmp_path):
+    from vivijure_backend.orchestrator import kf_hash
+    from vivijure_backend.contract import RenderRequest
+    current = kf_hash(RenderRequest.from_dict(_job(render_overrides={"finish_offloaded": True})).config.keyframe)
+
+    class HashedStore(FakeStore):
+        def exists(self, key):
+            return key == keys.keyframe_key("neon", "shot_01")
+
+        def get_bytes(self, key):
+            return current.encode()
+
+        def get_file(self, key, dest):
+            if key == keys.keyframe_key("neon", "shot_01"):
+                Path(dest).write_bytes(b"PNG")
+                return dest
+            return super().get_file(key, dest)
+
+    store = HashedStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    res = run_job(_job(render_overrides={"finish_offloaded": True}), pipeline=FakePipeline(),
+                  store=store, workdir=tmp_path / "work")
+    entry = next(k for k in res["keyframes"] if k["shot_id"] == "shot_01")
+    assert entry["reused"] is True
+    # Copied to this job's key so the film owns its still. Nothing was drawn, and the flat key is untouched.
+    assert entry["key"] == keys.job_keyframe_key("neon", "local", "shot_01")
+    assert keys.keyframe_key("neon", "shot_01") not in store.puts
