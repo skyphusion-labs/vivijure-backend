@@ -310,3 +310,59 @@ def test_handler_config_failure_surfaces_to_stdout_and_reraises(monkeypatch, cap
         H.handler({"input": {"project": "neon"}, "id": "job-cfg"})
     out = capsys.readouterr().out
     assert "@event error" in out and '"stage":"config"' in out
+
+
+STATS = {"legs": {"hf-cache": 700.1, "antelopev2": 2.0}, "retries": 2, "jitter_seconds": 1.5,
+         "total_bytes": 28000000000, "wall_seconds": 703.0}
+
+
+def test_a_mirror_pull_is_named_in_the_progress_object(tmp_path):
+    """The worker log goes with the worker, and the progress object stays, so the cost must be in it."""
+    store = FullStore(_bundle_tar(tmp_path / "b.tar.gz"))
+    run_job({"action": "render", "project": "neon", "bundle_key": "bundles/neon.tar.gz",
+             "quality_tier": "draft", "render_overrides": {"finish_offloaded": True}},
+            pipeline=StubPipeline(RenderConfig.for_tier(QualityTier.DRAFT)),
+            store=store, workdir=tmp_path / "work", job_id="job-s", mirrored=True, mirror_stats=STATS)
+    recs = [json.loads(l) for l in store.objects["renders/neon/progress/job-s.ndjson"].decode().strip().split("\n")]
+    done = next(r for r in recs if r["event"] == "mirror_done")
+    assert done["pulled"] is True
+    assert done["retries"] == 2 and done["wall_seconds"] == 703.0 and done["total_bytes"] == 28000000000
+    assert done["legs"]["hf-cache"] == 700.1
+
+
+def test_handler_hands_the_pull_stats_to_the_job(monkeypatch):
+    from vivijure_backend.harness import handler as H, models_mirror, r2, pipeline_registry, job_done_diag
+
+    seen = {}
+    monkeypatch.setattr(r2.R2Config, "from_env", lambda *a, **k: object())
+    monkeypatch.setattr(r2, "R2", lambda cfg=None: RecordingStore())
+    monkeypatch.setattr(models_mirror, "ensure_models", lambda *a, **k: True)
+    monkeypatch.setattr(models_mirror, "last_mirror_stats", lambda: STATS)
+    monkeypatch.setattr(models_mirror, "start_i2v_prefetch", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline_registry, "get_pipeline", lambda *a, **k: object())
+    monkeypatch.setattr(job_done_diag, "register", lambda *a, **k: None)
+    monkeypatch.setattr(H, "_runpod_progress_hook", lambda job: None)
+    monkeypatch.setattr(H, "run_job", lambda payload, **kw: seen.update(kw) or {"ok": True})
+    H.handler({"input": {"project": "neon", "action": "preview"}, "id": "job-h"})
+    assert seen["mirror_stats"]["legs"] == STATS["legs"]
+    assert seen["mirror_stats"]["retries"] == 2
+    assert seen["mirror_stats"]["before_job_seconds"] >= seen["mirror_stats"]["pipeline_seconds"] >= 0
+
+
+def test_a_failed_pull_writes_the_legs_it_finished(monkeypatch):
+    import pytest
+    from vivijure_backend.harness import handler as H, models_mirror, r2, pipeline_registry
+
+    store = RecordingStore()
+    monkeypatch.setattr(r2.R2Config, "from_env", lambda *a, **k: object())
+    monkeypatch.setattr(r2, "R2", lambda cfg=None: store)
+    monkeypatch.setattr(models_mirror, "ensure_models",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("rclone died")))
+    monkeypatch.setattr(models_mirror, "last_mirror_stats", lambda: STATS)
+    monkeypatch.setattr(pipeline_registry, "get_pipeline", lambda: None)
+    with pytest.raises(RuntimeError, match="rclone died"):
+        H.handler({"input": {"project": "neon"}, "id": "job-f"})
+    recs = [json.loads(l) for l in store.objects["renders/neon/progress/job-f.ndjson"].decode().strip().split("\n")]
+    failed = next(r for r in recs if r["event"] == "mirror_failed")
+    assert failed["legs"]["hf-cache"] == 700.1 and failed["retries"] == 2
+    assert recs[-1]["event"] == "error"

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import threading
@@ -269,6 +270,36 @@ def mirror_cmd(src: str, dst: Path, *, skip_repos: tuple[str, ...] = (),
 # across workers/deploys is readable from logs, which is the foundation for choosing a
 # structural fix (bake vs pre-warm vs stage). Pure/best-effort: never abort a pull.
 
+# What rclone 1.75 logs at -v when a whole pass fails and it tries again. Its per-request "low level"
+# retries are logged only at -vv, so this count does not include them.
+_RCLONE_ATTEMPT_FAILED = re.compile(r"Attempt \d+/\d+ failed")
+
+# The last ensure_models pull in this process, for the job's progress channel. None means no pull ran.
+_last_stats: dict | None = None
+
+
+def last_mirror_stats() -> dict | None:
+    """What the last ensure_models pull cost, or None if it pulled nothing. On a failed pull this holds
+    the legs that finished. The worker's log goes when the worker does, and the progress object does not."""
+    return _last_stats
+
+
+def _run_rclone(cmd: list[str], env: dict) -> int:
+    """Run one rclone leg, passing its log through live. Returns the failed passes it logged, which is
+    how a leg that succeeded after retrying can be told from a clean one. Raises on a non-zero exit."""
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, errors="replace")
+    retries = 0
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+        if _RCLONE_ATTEMPT_FAILED.search(line):
+            retries += 1
+    returncode = proc.wait()
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, cmd)
+    return retries
+
+
 def _timed(fn: Callable, *args, **kwargs) -> float:
     """Run fn(*args, **kwargs) and return its wall-clock seconds (monotonic)."""
     t0 = time.monotonic()
@@ -291,7 +322,7 @@ def _dir_bytes(path: Path) -> int:
 
 
 def _mirror_event(legs: list[tuple[str, float]], total_bytes: int, *, cold: bool,
-                  model_version: str, event: str = "mirror_complete") -> str:
+                  model_version: str, event: str = "mirror_complete", retries: int = 0) -> str:
     """Build an @event telemetry line for a completed mirror run (pure; no disk/rclone).
 
     `legs` is a list of (leg_name, seconds). Emits per-leg + total timing, byte count, and
@@ -306,6 +337,7 @@ def _mirror_event(legs: list[tuple[str, float]], total_bytes: int, *, cold: bool
         "total_bytes": total_bytes,
         "throughput_mbps": round(mbps, 1),
         "legs": {name: round(s, 1) for name, s in legs},
+        "retries": retries,
     }
     return "@event " + event + " " + json.dumps(payload, sort_keys=True)
 
@@ -661,6 +693,8 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     readiness gate requires the i2v corpus (see `_resolve_volume`). Omitting it keeps the
     conservative pre-#453 behaviour: the i2v corpus is required.
     """
+    global _last_stats
+    _last_stats = None
     e = mirror_env(env)
     model_version = e.get("VJ_MODEL_VERSION") or _DEFAULT_MODEL_VERSION
 
@@ -736,16 +770,24 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
         log(f"models_mirror: jitter {jitter:.1f}s before R2 pull (de-stagger concurrent egress).")
         time.sleep(jitter)
     legs: list[tuple[str, float]] = []
-    legs.append(("hf-cache", _timed(
-        subprocess.run,
-        mirror_cmd(f"r2:{bucket}/models/hf-cache", hf_home, skip_repos=() if stills_only else skip_repos,
-                   filters=filters),
-        check=True, env=renv)))
+    pull_started = time.monotonic()
+    stats = {"legs": {}, "retries": 0, "jitter_seconds": round(jitter, 1), "total_bytes": None}
+    _last_stats = stats
+
+    def run_leg(name: str, cmd: list[str]) -> None:
+        t0 = time.monotonic()
+        stats["retries"] += _run_rclone(cmd, renv) or 0
+        seconds = time.monotonic() - t0
+        legs.append((name, seconds))
+        stats["legs"][name] = round(seconds, 1)
+        stats["wall_seconds"] = round(time.monotonic() - pull_started, 1)
+
+    run_leg("hf-cache", mirror_cmd(f"r2:{bucket}/models/hf-cache", hf_home,
+                                   skip_repos=() if stills_only else skip_repos, filters=filters))
 
     antelope = models_root / "antelopev2"
     antelope.mkdir(parents=True, exist_ok=True)
-    legs.append(("antelopev2", _timed(
-        subprocess.run, mirror_cmd(f"r2:{bucket}/models/antelopev2", antelope), check=True, env=renv)))
+    run_leg("antelopev2", mirror_cmd(f"r2:{bucket}/models/antelopev2", antelope))
 
     # Finishing-stage weights: stored at fixed paths under models_root (NOT in the HF cache).
     # ModelServer.frame_interpolator loads $VJ_MODELS_ROOT/rife/flownet.pkl and
@@ -755,8 +797,7 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     for subdir in (() if stills_only else ("rife", "GFPGANv1.4", "facexlib")):
         dst = models_root / subdir
         dst.mkdir(parents=True, exist_ok=True)
-        legs.append((subdir, _timed(
-            subprocess.run, mirror_cmd(f"r2:{bucket}/models/{subdir}", dst), check=True, env=renv)))
+        run_leg(subdir, mirror_cmd(f"r2:{bucket}/models/{subdir}", dst))
 
     # rclone --links stores HF-cache symlinks as `<name>.rclonelink` text files (the link target),
     # and rclone >= 1.7x does NOT translate them back to real symlinks on download -- it leaves the
@@ -781,9 +822,11 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
         total_bytes = (_dir_bytes(hf_home) + _dir_bytes(antelope)
                        + _dir_bytes(models_root / "rife") + _dir_bytes(models_root / "GFPGANv1.4")
                        + _dir_bytes(models_root / "facexlib"))
-        log(_mirror_event(legs, total_bytes, cold=True, model_version=model_version))
+        stats["total_bytes"] = total_bytes
+        log(_mirror_event(legs, total_bytes, cold=True, model_version=model_version, retries=stats["retries"]))
     except Exception as exc:
         log(f"models_mirror: mirror telemetry skipped ({exc})")
+    stats["wall_seconds"] = round(time.monotonic() - pull_started, 1)
     log("models_mirror: model mirror from R2 complete.")
     return True
 

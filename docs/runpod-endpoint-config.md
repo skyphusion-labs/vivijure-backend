@@ -16,7 +16,7 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 | | `vivijure-backend-hosted` | `vivijure-upscale-hosted` |
 |---|---|---|
 | id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
-| Image | `vivijure-backend:1.1.1@sha256:0ebdc0e19b48676e310a10c863c7dfc4e6a8c642b3fbd887e73e248a6780157f` | `vivijure-upscale:1.0.4` |
+| Image | `vivijure-backend:1.1.2@sha256:69f06ab95ab75530af7e0fa135c768548d339435a3714036b6f32e95a2b0d586` | `vivijure-upscale:1.0.4` |
 | Pools | `BLACKWELL_96`, `BLACKWELL_180`, `BLACKWELL_288` | `BLACKWELL_96` |
 | `workers` min / max | 0 / 30 | 0 / 10 |
 | Idle timeout | 180 s | 10 s |
@@ -39,7 +39,9 @@ takes the R2 mirror.
 a warm one $0.02, at $3.49 per hour. Idle costs $0.058 per minute, so holding a worker pays when the next
 job arrives within about 2 to 3.5 minutes. A one-off job pays up to about $0.17 of extra idle.
 
-**Previous values, for rollback** (read from the release before this one): image
+**Previous values, for rollback:** image
+`vivijure-backend:1.1.1@sha256:0ebdc0e19b48676e310a10c863c7dfc4e6a8c642b3fbd887e73e248a6780157f`, same
+disk and idle timeout. Before that: image
 `vivijure-backend:1.1.0@sha256:b42084bb1e295976d4ad555566aee1240c5ce86f1692a33560a127ecb155e6ac`,
 disk 300 GB, idle timeout 10 s. That image starts a 114 GiB Wan pull on every keyframe job and needs
 the larger disk, so restore all three together.
@@ -151,6 +153,8 @@ live endpoint (`docs/operations.md`). You pin the template, and the endpoint pul
 the new image on its next cold start.
 
 After an image change, jobs can land on stale workers until the rollout finishes. Read the worker's `version` and image before crediting a proof.
+
+Keep a test endpoint until its logs are read. A worker's logs go when the endpoint is deleted: `stream-worker-logs` then returns 404.
 
 ## Deploy constraint 2: the account worker quota
 
