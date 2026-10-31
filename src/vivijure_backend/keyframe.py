@@ -130,14 +130,32 @@ def slot_trigger(cast: Cast, slot: str) -> str:
     return (char.name if char and char.name else slot)
 
 
+def slot_description(cast: Cast, slot: str, scene_prompt: str = "") -> str:
+    """The slot's character description from the cast registry, or "" when it has none or the
+    scene prompt already contains it. This is what holds hair and wardrobe on a shot prompt that
+    names only the character: a trained LoRA carries the face, not the outfit."""
+    char = cast.characters.get(slot)
+    text = (char.prompt if char else "").strip()
+    if not text or text.lower() in (scene_prompt or "").lower():
+        return ""
+    return text
+
+
 def build_prompt(scene: Scene, cast: Cast, storyboard: Storyboard, *,
                  include_triggers: bool = True, lock_clause: bool = False) -> str:
     """Compose the SDXL prompt: the storyboard style prefix, the scene's own prompt, and
-    optionally the LoRA trigger tokens and the Pass B location-lock clause. Pass A is
-    style + scene only (no triggers). Pieces are comma-joined and de-duplicated of empty
-    fragments so a missing style or prompt never leaves a dangling comma."""
+    optionally the LoRA trigger tokens, each slot's character description, and the Pass B
+    location-lock clause. Pass A is style + scene only (no triggers, no people). Pieces are
+    comma-joined and de-duplicated of empty fragments so a missing style or prompt never leaves
+    a dangling comma.
+
+    The description follows the triggers because SDXL's text encoder keeps the first 77 tokens:
+    if a prompt runs long, a description is what gets cut, never the scene or a trigger. It is
+    skipped when the scene prompt already carries it word for word, which saves those tokens."""
     triggers = ", ".join(slot_trigger(cast, s) for s in scene.character_slots) if include_triggers else ""
     parts = [storyboard.style_prefix, scene.prompt, triggers]
+    if include_triggers:
+        parts.extend(slot_description(cast, s, scene.prompt) for s in scene.character_slots)
     if storyboard.style_preset and storyboard.style_preset != "None":
         parts.append(storyboard.style_preset)
     if lock_clause:
