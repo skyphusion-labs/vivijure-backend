@@ -1,0 +1,3 @@
+**Fix: a shot that names only its character keeps that character's hair and clothes (vivijure-cf#1147).**
+
+The scene plate now gets the character description. Rendering a plate alone at the same seed showed the identity pass keeps the plate's hair and outline through canny, so a description added only there came too late. The token budget now keeps a stated adult age first, then hair and garments, then other physical traits, and mood last. A portrait direction in a description, such as a studio background, no longer reaches a shot.

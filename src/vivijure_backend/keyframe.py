@@ -156,21 +156,53 @@ def slot_description(cast: Cast, slot: str, scene_prompt: str = "") -> str:
     return text
 
 
+# What a description clause is, for the token budget (vivijure-cf#1147). The order is the priority:
+# a stated adult age first, then what a viewer tells people apart by, then other physical traits.
+# Mood goes last. A portrait direction is not a trait at all, and it fights the shot's location.
+_ADULT_CLAUSE = re.compile(r"\b(adult|grown|(?:twenties|thirties|forties|fifties|sixties|seventies|eighties))\b", re.I)
+_LOOK_CLAUSE = re.compile(
+    r"\b(hair|haired|curls?|curly|ringlets?|braids?|ponytail|bun|bangs|fringe|undercut|mohawk|dreadlocks|bald|buzz|"
+    r"buzz-cut|crew-cut|shaved|beard|bearded|stubble|mustache|moustache|goatee|sideburns|eye\s?patch|goggles|glasses|scar|"
+    r"jacket|coat|hoodie|shirt|t-shirt|top|tee|blouse|sweater|cardigan|vest|dress|skirt|overalls|apron|uniform|robe|"
+    r"trousers|pants|jeans|shorts|boots|shoes|gloves|hat|cap|helmet|scarf|armband|tie|suit|plating|armor|armour)\b", re.I)
+_MOOD_CLAUSE = re.compile(
+    r"\b(calm|presence|composed|restless|alert|energy|demeanou?r|expression|attitude|mood|vibe|watchful|"
+    r"gaze|quiet|stern|resolute|gentle|confident|tired|magnetic)\b", re.I)
+_DIRECTION_CLAUSE = re.compile(r"\b(portrait|head-and-shoulders|background|focus|studio|headshot)\b", re.I)
+
+
+def clause_rank(clause: str) -> int:
+    """0 is kept first. A clause naming a garment or hair outranks a mood word in the same clause."""
+    if _ADULT_CLAUSE.search(clause):
+        return 0
+    if _LOOK_CLAUSE.search(clause):
+        return 1
+    return 3 if _MOOD_CLAUSE.search(clause) else 2
+
+
 def fit_description(text: str, budget: int, *, name: str = "", scene_prompt: str = "") -> str:
-    """The clauses of a description that fit `budget` estimated tokens, in order. A clause that
-    does not fit is skipped and a later shorter one may still fit, so a long lead clause cannot
-    cost the wardrobe. A clause that is only the character's name is dropped, because the trigger
-    says it, and so is one the scene prompt already says, because tokens are scarce."""
-    kept: list[str] = []
+    """The clauses of a description that fit `budget` estimated tokens, in their written order.
+
+    The budget is spent by clause_rank, so a mood phrase can never cost a garment. A clause that
+    does not fit is skipped and a lower one may still fit. Dropped outright: a clause that is only
+    the character's name, because the trigger says it; one the scene prompt already says, because
+    tokens are scarce; and a portrait direction, because it pulls the shot out of its location."""
+    clauses = [c.strip() for c in re.split(r"[,;]|\.\s", text.strip().rstrip(". "))]
+    usable = [
+        (i, c) for i, c in enumerate(clauses)
+        if c and c.lower() != name.lower() and c.lower() not in (scene_prompt or "").lower()
+        and not _DIRECTION_CLAUSE.search(c)
+    ]
+    kept: list[tuple[int, str]] = []
     used = 0
-    for clause in (c.strip() for c in text.rstrip(". ").split(",")):
-        if not clause or clause.lower() == name.lower() or clause.lower() in (scene_prompt or "").lower():
-            continue
-        cost = estimate_tokens(clause) + 1  # the joining comma
-        if used + cost <= budget:
-            kept.append(clause)
-            used += cost
-    return ", ".join(kept)
+    for i, clause in sorted(usable, key=lambda item: (clause_rank(item[1]), item[0])):
+        for form in (clause, clause.split(" over ")[0]):  # a jacket without what is under it still reads
+            cost = estimate_tokens(form) + 1  # the joining comma
+            if used + cost <= budget:
+                kept.append((i, form))
+                used += cost
+                break
+    return ", ".join(c for _, c in sorted(kept))
 
 
 def _join_prompt(parts: list[str]) -> str:
@@ -183,10 +215,13 @@ def _join_prompt(parts: list[str]) -> str:
 
 def build_prompt(scene: Scene, cast: Cast, storyboard: Storyboard, *,
                  include_triggers: bool = True, lock_clause: bool = False) -> str:
-    """Compose the SDXL prompt: the storyboard style prefix, the scene's own prompt, and
-    optionally the LoRA trigger tokens, the Pass B location-lock clause, and each slot's character
-    description. Pass A is style + scene only (no triggers, no people). Pieces are comma-joined and
-    de-duplicated of empty fragments so a missing style or prompt never leaves a dangling comma.
+    """Compose the SDXL prompt: the storyboard style prefix, the scene's own prompt, optionally the
+    LoRA trigger tokens and the Pass B location-lock clause, and each slot's character description.
+    Pass A has no triggers and no lock, but it does get the description: it draws the person whose
+    outline Pass B then keeps through canny, so a plate with no description fixes the hair and the
+    cut of the clothes before identity runs (vivijure-cf#1147, seen by rendering the plate alone at
+    the same seed). Pieces are comma-joined and de-duplicated of empty fragments so a missing style
+    or prompt never leaves a dangling comma.
 
     Descriptions come LAST and are FITTED to what is left of the token budget, split evenly across
     the shot's slots. Everything before them outranks them, and the lock clause above all: it is
@@ -199,8 +234,6 @@ def build_prompt(scene: Scene, cast: Cast, storyboard: Storyboard, *,
     if lock_clause:
         parts.append(PASS_B_LOCK_CLAUSE)
     prompt = _join_prompt(parts)
-    if not include_triggers:
-        return prompt
     wanted = [(s, slot_description(cast, s, scene.prompt)) for s in scene.character_slots]
     wanted = [(s, d) for s, d in wanted if d]
     if not wanted:

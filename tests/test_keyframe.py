@@ -21,6 +21,7 @@ from vivijure_backend.keyframe import (
     build_prompt,
     estimate_tokens,
     fit_description,
+    clause_rank,
     engine_for,
     keyframe_render_path,
     plan_keyframe_passes,
@@ -59,7 +60,7 @@ def test_prompt_combines_style_scene_and_triggers():
 def test_pass_a_prompt_omits_triggers():
     sc = Scene.from_dict({"id": "shot_01", "prompt": "diner booth", "character_slots": ["A"]}, 0)
     p = build_prompt(sc, CAST, _sb(), include_triggers=False)
-    assert p == "cyberpunk anime, diner booth"
+    assert p == "cyberpunk anime, diner booth, teal-haired netrunner"
     assert "Vesper" not in p
 
 
@@ -527,10 +528,10 @@ def test_identity_prompt_carries_the_description_when_the_shot_names_only_the_ch
     assert "teal-haired netrunner" in build_prompt(sc, CAST, _sb())
 
 
-def test_plate_prompt_has_no_description():
-    # Pass A draws the empty location, so a person's description must not plant a person in it.
+def test_plate_prompt_has_the_description():
+    # Pass A draws the person whose outline Pass B keeps, so it has to know who they are.
     sc = Scene.from_dict({"id": "s", "prompt": "a dim workshop", "character_slots": ["A"]}, 0)
-    assert "teal-haired netrunner" not in build_prompt(sc, CAST, _sb(), include_triggers=False)
+    assert "teal-haired netrunner" in build_prompt(sc, CAST, _sb(), include_triggers=False)
 
 
 def test_every_slot_in_the_shot_gets_its_description_and_no_other():
@@ -553,10 +554,10 @@ def test_scene_and_trigger_come_before_the_description():
     assert p.index("crosses the floor") < p.index("Vesper") < p.index("teal-haired netrunner")
 
 
-def test_identity_pass_gets_the_description_and_plate_pass_does_not():
+def test_both_passes_get_the_description():
     sc = Scene.from_dict({"id": "s", "prompt": "Vesper crosses the floor", "character_slots": ["A"]}, 0)
     plate, identity = plan_keyframe_passes(sc, CAST, _sb(), KeyframeParams())
-    assert "teal-haired netrunner" not in plate.prompt
+    assert "teal-haired netrunner" in plate.prompt
     assert "teal-haired netrunner" in identity.prompt
 
 
@@ -605,3 +606,100 @@ def test_fit_keeps_order_skips_what_does_not_fit_and_drops_the_bare_name():
 
 def test_fit_skips_a_clause_the_scene_already_says():
     assert fit_description("an adult woman, red coat", 100, scene_prompt="An adult woman runs") == "red coat"
+
+
+# vivijure-cf#1147: rendering the plate alone at the same seed showed that Pass B keeps the plate's hair
+# and outline. Mara's plate had a ponytail and her keyframe had the same ponytail with the description on.
+MARA_REAL = "Mara, an adult woman in her thirties, dark shoulder-length curls, sharp brown eyes, charcoal field jacket over a black top, calm presence."
+DEV_REAL = "Dev, an adult man in his thirties, dark buzz cut, light stubble, grey zip hoodie, lean and alert."
+REAL = Cast.from_registry({"characters": {"A": {"name": "Mara", "prompt": MARA_REAL}, "B": {"name": "Dev", "prompt": DEV_REAL}}})
+WORKSHOP = "photoreal, cinematic film still, natural skin texture, 35mm, dim industrial workshop at night,"
+
+
+def _real_sb():
+    return Storyboard.from_dict({"style_prefix": WORKSHOP, "use_characters": ["A", "B"], "scenes": [{"id": "s", "prompt": "x"}]})
+
+
+def _real_scene(prompt, slots):
+    return Scene.from_dict({"id": "s", "prompt": prompt, "character_slots": slots}, 0)
+
+
+def test_the_plate_is_told_the_hair_and_clothes():
+    plate, _ = plan_keyframe_passes(_real_scene("Mara crosses the workshop.", ["A"]), REAL, _real_sb(), KeyframeParams())
+    assert "dark shoulder-length curls" in plate.prompt
+    assert "charcoal field jacket" in plate.prompt
+
+
+def test_the_plate_still_has_no_trigger_and_no_lock():
+    plate, ident = plan_keyframe_passes(_real_scene("Dev walks.", ["B"]), REAL, _real_sb(), KeyframeParams())
+    assert "not a studio portrait" not in plate.prompt
+    assert "not a studio portrait" in ident.prompt
+    assert "grey zip hoodie" in plate.prompt
+
+
+def test_a_plate_with_no_people_gets_no_description():
+    passes = plan_keyframe_passes(_real_scene("An empty workshop.", []), REAL, _real_sb(), KeyframeParams())
+    assert "curls" not in passes[0].prompt and "hoodie" not in passes[0].prompt
+
+
+LONG_SHOT = "Mara wipes grease from her hands with a rag in the dim workshop and frowns at a gauge."
+
+
+def test_a_tight_budget_keeps_the_garment_and_loses_the_mood():
+    fitted = fit_description(MARA_REAL, 22, name="Mara")
+    assert "charcoal field jacket over a black top" in fitted
+    assert "dark shoulder-length curls" in fitted
+    assert "calm presence" not in fitted
+
+
+def test_the_measured_shots_keep_hair_and_clothes_in_both_passes():
+    for prompt in (LONG_SHOT, "Mara packs tools into the toolbox in the workshop one at a time."):
+        for p in plan_keyframe_passes(_real_scene(prompt, ["A"]), REAL, _real_sb(), KeyframeParams()):
+            assert "dark shoulder-length curls" in p.prompt, p.name
+            assert "charcoal field jacket" in p.prompt, p.name
+
+
+def test_a_stated_adult_age_is_kept_first():
+    assert fit_description(MARA_REAL, 9, name="Mara") == "an adult woman in her thirties"
+
+
+def test_written_order_survives_the_ranking():
+    assert fit_description("calm presence, red coat, adult woman", 100) == "calm presence, red coat, adult woman"
+
+
+@pytest.mark.parametrize("clause,rank", [
+    ("an adult woman in her thirties", 0),
+    ("a man in his fifties", 0),
+    ("dark shoulder-length curls", 1),
+    ("grey zip hoodie", 1),
+    ("bald head", 1),
+    ("sharp brown eyes", 2),
+    ("square jaw", 2),
+    ("calm presence", 3),
+    ("lean and alert", 3),
+    ("calm gaze behind round glasses", 1),
+])
+def test_clause_rank(clause, rank):
+    assert clause_rank(clause) == rank
+
+
+def test_a_portrait_direction_never_reaches_a_shot():
+    bible = "younger man, buzz-cut dark hair, grey zip hoodie, head-and-shoulders portrait, neutral studio background, sharp focus"
+    fitted = fit_description(bible, 100)
+    assert fitted == "younger man, buzz-cut dark hair, grey zip hoodie"
+
+
+def test_a_description_written_in_sentences_splits_on_the_full_stop():
+    fitted = fit_description("Goro, a burly adult man. Square jaw, orange overalls.", 100, name="Goro")
+    assert fitted == "a burly adult man, Square jaw, orange overalls"
+
+
+def test_two_people_on_a_plate_share_the_budget():
+    plate, _ = plan_keyframe_passes(_real_scene("Mara and Dev talk.", ["A", "B"]), REAL, _real_sb(), KeyframeParams())
+    assert "curls" in plate.prompt or "jacket" in plate.prompt
+    assert "buzz cut" in plate.prompt or "hoodie" in plate.prompt
+
+
+def test_a_clause_that_does_not_fit_keeps_the_garment_without_its_layer():
+    assert fit_description("charcoal field jacket over a black top", 5) == "charcoal field jacket"
+    assert fit_description("charcoal field jacket over a black top", 2) == ""
