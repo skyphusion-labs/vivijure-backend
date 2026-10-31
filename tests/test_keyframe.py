@@ -22,6 +22,8 @@ from vivijure_backend.keyframe import (
     estimate_tokens,
     fit_description,
     clause_rank,
+    drop_place_from_garment,
+    PLATE_FRAMING,
     engine_for,
     keyframe_render_path,
     plan_keyframe_passes,
@@ -60,7 +62,7 @@ def test_prompt_combines_style_scene_and_triggers():
 def test_pass_a_prompt_omits_triggers():
     sc = Scene.from_dict({"id": "shot_01", "prompt": "diner booth", "character_slots": ["A"]}, 0)
     p = build_prompt(sc, CAST, _sb(), include_triggers=False)
-    assert p == "cyberpunk anime, diner booth, teal-haired netrunner"
+    assert p == "cyberpunk anime, diner booth, wide shot, full figure, teal-haired netrunner"
     assert "Vesper" not in p
 
 
@@ -573,7 +575,7 @@ LONG_SCENE = "Mara, an adult woman in her thirties with dark shoulder-length cur
 def test_lock_clause_comes_before_the_description():
     sc = Scene.from_dict({"id": "s", "prompt": "crosses the floor", "character_slots": ["A"]}, 0)
     p = build_prompt(sc, LONG, _sb(), include_triggers=True, lock_clause=True)
-    assert p.index(PASS_B_LOCK_CLAUSE) < p.index("charcoal field jacket")
+    assert p.index(PASS_B_LOCK_CLAUSE) < p.index("charcoal jacket")
 
 
 def test_a_long_shot_keeps_its_lock_clause_inside_the_budget():
@@ -627,7 +629,7 @@ def _real_scene(prompt, slots):
 def test_the_plate_is_told_the_hair_and_clothes():
     plate, _ = plan_keyframe_passes(_real_scene("Mara crosses the workshop.", ["A"]), REAL, _real_sb(), KeyframeParams())
     assert "dark shoulder-length curls" in plate.prompt
-    assert "charcoal field jacket" in plate.prompt
+    assert "charcoal jacket" in plate.prompt
 
 
 def test_the_plate_still_has_no_trigger_and_no_lock():
@@ -647,7 +649,7 @@ LONG_SHOT = "Mara wipes grease from her hands with a rag in the dim workshop and
 
 def test_a_tight_budget_keeps_the_garment_and_loses_the_mood():
     fitted = fit_description(MARA_REAL, 22, name="Mara")
-    assert "charcoal field jacket over a black top" in fitted
+    assert "charcoal field jacket over a black top" in fitted  # fit_description does not rewrite
     assert "dark shoulder-length curls" in fitted
     assert "calm presence" not in fitted
 
@@ -656,7 +658,7 @@ def test_the_measured_shots_keep_hair_and_clothes_in_both_passes():
     for prompt in (LONG_SHOT, "Mara packs tools into the toolbox in the workshop one at a time."):
         for p in plan_keyframe_passes(_real_scene(prompt, ["A"]), REAL, _real_sb(), KeyframeParams()):
             assert "dark shoulder-length curls" in p.prompt, p.name
-            assert "charcoal field jacket" in p.prompt, p.name
+            assert "charcoal jacket" in p.prompt, p.name
 
 
 def test_a_stated_adult_age_is_kept_first():
@@ -703,3 +705,56 @@ def test_two_people_on_a_plate_share_the_budget():
 def test_a_clause_that_does_not_fit_keeps_the_garment_without_its_layer():
     assert fit_description("charcoal field jacket over a black top", 5) == "charcoal field jacket"
     assert fit_description("charcoal field jacket over a black top", 2) == ""
+
+
+# vivijure-cf#1147: plates rendered at seed 20311 chose this shape. Scene first, then a wide framing, then
+# only age, hair and garment. "field jacket" drew a field; the whole description drew a portrait.
+def test_the_plate_is_scene_then_framing_then_look_only():
+    plate, _ = plan_keyframe_passes(_real_scene("Dev carries a toolbox.", ["B"]), REAL, _real_sb(), KeyframeParams())
+    p = plate.prompt
+    assert p.index("carries a toolbox") < p.index(PLATE_FRAMING) < p.index("grey zip hoodie")
+    assert "light stubble" in p  # a look clause
+    assert "lean and alert" not in p
+
+
+def test_the_plate_leaves_out_eyes_and_mood_and_identity_keeps_eyes():
+    plate, ident = plan_keyframe_passes(_real_scene("Mara walks.", ["A"]), REAL, _real_sb(), KeyframeParams())
+    assert "sharp brown eyes" not in plate.prompt and "calm presence" not in plate.prompt
+    assert "sharp brown eyes" in ident.prompt
+
+
+def test_identity_has_no_framing_words():
+    _, ident = plan_keyframe_passes(_real_scene("Mara walks.", ["A"]), REAL, _real_sb(), KeyframeParams())
+    assert PLATE_FRAMING not in ident.prompt
+
+
+def test_a_shot_with_no_people_gets_no_framing():
+    passes = plan_keyframe_passes(_real_scene("An empty workshop.", []), REAL, _real_sb(), KeyframeParams())
+    assert PLATE_FRAMING not in passes[0].prompt
+
+
+@pytest.mark.parametrize("prompt", ["Close-up of Mara's hands.", "A medium shot of Mara.", "Portrait of Mara."])
+def test_a_shot_that_asks_for_its_framing_keeps_it(prompt):
+    plate, _ = plan_keyframe_passes(_real_scene(prompt, ["A"]), REAL, _real_sb(), KeyframeParams())
+    assert PLATE_FRAMING not in plate.prompt
+
+
+def test_no_prompt_says_field_jacket():
+    scene = "Mara, in a charcoal field jacket, walks in."
+    for p in plan_keyframe_passes(_real_scene(scene, ["A"]), REAL, _real_sb(), KeyframeParams()):
+        assert "field" not in p.prompt, p.name
+
+
+@pytest.mark.parametrize("before,after", [
+    ("charcoal field jacket", "charcoal jacket"),
+    ("a Beach dress", "a dress"),
+    ("walks across the field", "walks across the field"),
+    ("a jacket in a field", "a jacket in a field"),
+    ("", ""),
+])
+def test_drop_place_from_garment(before, after):
+    assert drop_place_from_garment(before) == after
+
+
+def test_max_rank_filters_even_with_room():
+    assert fit_description("adult woman, red coat, brown eyes, calm presence", 100, max_rank=1) == "adult woman, red coat"
