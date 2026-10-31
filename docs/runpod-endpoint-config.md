@@ -16,7 +16,7 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 | | `vivijure-backend-hosted` | `vivijure-upscale-hosted` |
 |---|---|---|
 | id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
-| Image | `vivijure-backend:1.1.3@sha256:dc04da20fb0ec28136b942c2dffe9608b75f631d8de597e3855e3165ad670e64` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
+| Image | `vivijure-backend:1.1.4@sha256:44a571135d2f9f4ecd88e603a62e4bab2a98cb81e0b947614261fcfb5ba2cbc7` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
 | Pools | `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141`, `BLACKWELL_180`, `BLACKWELL_288` | `BLACKWELL_96` |
 | `workers` min / max | 0 / 30 | 0 / 10 |
 | Idle timeout | 180 s | 10 s |
@@ -47,6 +47,8 @@ the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 1
 1080x1920 in 6.0 s. The presigned path has not run on this image yet.
 
 **Previous values, for rollback:** image
+`vivijure-backend:1.1.3@sha256:dc04da20fb0ec28136b942c2dffe9608b75f631d8de597e3855e3165ad670e64`, same
+disk and idle timeout. On 1.1.3 a cold `finish_clip` pulls the whole base set again (#553). Before that:
 `vivijure-backend:1.1.2@sha256:69f06ab95ab75530af7e0fa135c768548d339435a3714036b6f32e95a2b0d586`, same
 disk and idle timeout. Before that: 1.1.1, same disk and idle timeout, digest
 `sha256:0ebdc0e19b48676e310a10c863c7dfc4e6a8c642b3fbd887e73e248a6780157f`. Before that: image
@@ -80,6 +82,25 @@ Nothing has been measured on `ADA_80_PRO` or `HOPPER_141`. The times below are n
 | Warm | 0 s | 25 s | 26 s |
 
 Mirror on the cold run: 136 s at 192.5 MB/s. Each model load after that took 1.5 to 7 s.
+
+### Measured finish and keyframe times, image 1.1.4
+
+Three jobs on one worker of a separate test endpoint: 80 GB, no volume, the same pools, RTX PRO 6000,
+`workers.max` 1. Clip: 854x480, 24 fps, 97 frames. Cost is execution time at $3.49 per hour. It does not
+include cold start or idle.
+
+| Job | Queue | Execution | Legs pulled | Bytes pulled | Cost |
+|---|---|---|---|---|---|
+| Cold `finish_clip`, RIFE 2x | 178 s | 14.6 s | `rife` 1.3 s | 12,186,817 | $0.014 |
+| `regen_shot`, one shot, `draft`, no LoRA | 0 s | 117 s | `hf-cache` 78.9 s, `antelopev2` 4.3 s | 26,236,131,927 | $0.113 |
+| Warm `finish_clip`, RIFE 2x | 0 s | 6.7 s | none | 0 | $0.006 |
+
+The cold job wrote 193 frames at 48 fps to a film folder (`ffprobe`). On 1.1.3 the same kind of job
+ran for 477 s and $0.46, and the step did not run (#553).
+
+One run on one worker. Not run on this image: a face restore job, which pulls `GFPGANv1.4` and `facexlib`;
+a full mirror after a finish job; and a mirror that hangs. Tests cover those, except that no live run
+measures the 120 s mirror budget against a slow worker.
 
 ### Two cold submits ran serially
 
