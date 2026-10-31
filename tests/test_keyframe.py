@@ -50,7 +50,7 @@ def test_slot_trigger_is_the_character_name():
 def test_prompt_combines_style_scene_and_triggers():
     sc = Scene.from_dict({"id": "shot_01", "prompt": "rooftop standoff", "character_slots": ["A", "B"]}, 0)
     p = build_prompt(sc, CAST, _sb())
-    assert p == "cyberpunk anime, rooftop standoff, Vesper, Rhode"
+    assert p == "cyberpunk anime, rooftop standoff, Vesper, Rhode, teal-haired netrunner, bearded fixer"
 
 
 def test_pass_a_prompt_omits_triggers():
@@ -513,3 +513,45 @@ def test_few_step_still_plans_pass_b():
     cfg = KeyframeParams(few_step=True, steps=4)
     names = [p.name for p in plan_keyframe_passes(sc, CAST, _sb(), cfg)]
     assert names == ["plate", "identity"]
+
+
+# --------------------------------------------------------------------------- character description
+
+def test_identity_prompt_carries_the_description_when_the_shot_names_only_the_character():
+    # A trained LoRA carries the face. The hair and clothes live only in the registry prompt, so a
+    # shot prompt that says just the name must still receive them (vivijure-cf#1147).
+    sc = Scene.from_dict({"id": "s", "prompt": "Vesper crosses the floor", "character_slots": ["A"]}, 0)
+    assert "teal-haired netrunner" in build_prompt(sc, CAST, _sb())
+
+
+def test_plate_prompt_has_no_description():
+    # Pass A draws the empty location, so a person's description must not plant a person in it.
+    sc = Scene.from_dict({"id": "s", "prompt": "a dim workshop", "character_slots": ["A"]}, 0)
+    assert "teal-haired netrunner" not in build_prompt(sc, CAST, _sb(), include_triggers=False)
+
+
+def test_every_slot_in_the_shot_gets_its_description_and_no_other():
+    both = Scene.from_dict({"id": "s", "prompt": "x", "character_slots": ["A", "B"]}, 0)
+    p = build_prompt(both, CAST, _sb())
+    assert "teal-haired netrunner" in p and "bearded fixer" in p
+    one = Scene.from_dict({"id": "s", "prompt": "x", "character_slots": ["B"]}, 0)
+    assert "teal-haired netrunner" not in build_prompt(one, CAST, _sb())
+
+
+def test_description_already_in_the_scene_is_not_repeated():
+    sc = Scene.from_dict({"id": "s", "prompt": "a Teal-Haired Netrunner runs", "character_slots": ["A"]}, 0)
+    assert build_prompt(sc, CAST, _sb()).lower().count("teal-haired netrunner") == 1
+
+
+def test_scene_and_trigger_come_before_the_description():
+    # SDXL truncates at 77 tokens, so what must survive has to come first.
+    sc = Scene.from_dict({"id": "s", "prompt": "crosses the floor", "character_slots": ["A"]}, 0)
+    p = build_prompt(sc, CAST, _sb())
+    assert p.index("crosses the floor") < p.index("Vesper") < p.index("teal-haired netrunner")
+
+
+def test_identity_pass_gets_the_description_and_plate_pass_does_not():
+    sc = Scene.from_dict({"id": "s", "prompt": "Vesper crosses the floor", "character_slots": ["A"]}, 0)
+    plate, identity = plan_keyframe_passes(sc, CAST, _sb(), KeyframeParams())
+    assert "teal-haired netrunner" not in plate.prompt
+    assert "teal-haired netrunner" in identity.prompt
