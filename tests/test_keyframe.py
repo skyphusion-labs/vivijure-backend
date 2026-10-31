@@ -23,7 +23,7 @@ from vivijure_backend.keyframe import (
     fit_description,
     clause_rank,
     drop_place_from_garment,
-    PLATE_FRAMING,
+    PLATE_SOLO,
     engine_for,
     keyframe_render_path,
     plan_keyframe_passes,
@@ -62,7 +62,7 @@ def test_prompt_combines_style_scene_and_triggers():
 def test_pass_a_prompt_omits_triggers():
     sc = Scene.from_dict({"id": "shot_01", "prompt": "diner booth", "character_slots": ["A"]}, 0)
     p = build_prompt(sc, CAST, _sb(), include_triggers=False)
-    assert p == "cyberpunk anime, diner booth, wide shot, full figure, teal-haired netrunner"
+    assert p == "cyberpunk anime, diner booth, solo, teal-haired netrunner, diner booth"
     assert "Vesper" not in p
 
 
@@ -707,12 +707,15 @@ def test_a_clause_that_does_not_fit_keeps_the_garment_without_its_layer():
     assert fit_description("charcoal field jacket over a black top", 2) == ""
 
 
-# vivijure-cf#1147: plates rendered at seed 20311 chose this shape. Scene first, then a wide framing, then
-# only age, hair and garment. "field jacket" drew a field; the whole description drew a portrait.
-def test_the_plate_is_scene_then_framing_then_look_only():
+# vivijure-cf#1147: plates rendered at seeds 31055 and 41077 chose this shape. The scene, then age, hair and
+# garment, then the scene again. "field jacket" drew a field; the whole description drew a portrait; a
+# description last drew someone posing for the camera. Repeating the action brought it back.
+def test_the_plate_is_scene_then_look_then_scene_again():
     plate, _ = plan_keyframe_passes(_real_scene("Dev carries a toolbox.", ["B"]), REAL, _real_sb(), KeyframeParams())
     p = plate.prompt
-    assert p.index("carries a toolbox") < p.index(PLATE_FRAMING) < p.index("grey zip hoodie")
+    first = p.index("Dev carries a toolbox")
+    assert first < p.index(PLATE_SOLO) < p.index("grey zip hoodie") < p.rindex("Dev carries a toolbox")
+    assert p.count("Dev carries a toolbox") == 2
     assert "light stubble" in p  # a look clause
     assert "lean and alert" not in p
 
@@ -723,20 +726,29 @@ def test_the_plate_leaves_out_eyes_and_mood_and_identity_keeps_eyes():
     assert "sharp brown eyes" in ident.prompt
 
 
-def test_identity_has_no_framing_words():
+def test_identity_says_the_scene_once_and_has_no_solo():
     _, ident = plan_keyframe_passes(_real_scene("Mara walks.", ["A"]), REAL, _real_sb(), KeyframeParams())
-    assert PLATE_FRAMING not in ident.prompt
+    assert ident.prompt.count("Mara walks") == 1
+    assert PLATE_SOLO not in ident.prompt
 
 
-def test_a_shot_with_no_people_gets_no_framing():
+def test_a_shot_with_no_people_says_its_scene_once():
     passes = plan_keyframe_passes(_real_scene("An empty workshop.", []), REAL, _real_sb(), KeyframeParams())
-    assert PLATE_FRAMING not in passes[0].prompt
+    assert passes[0].prompt.count("An empty workshop") == 1
+    assert PLATE_SOLO not in passes[0].prompt
 
 
-@pytest.mark.parametrize("prompt", ["Close-up of Mara's hands.", "A medium shot of Mara.", "Portrait of Mara."])
-def test_a_shot_that_asks_for_its_framing_keeps_it(prompt):
-    plate, _ = plan_keyframe_passes(_real_scene(prompt, ["A"]), REAL, _real_sb(), KeyframeParams())
-    assert PLATE_FRAMING not in plate.prompt
+def test_two_people_are_not_told_solo():
+    plate, _ = plan_keyframe_passes(_real_scene("Mara and Dev talk.", ["A", "B"]), REAL, _real_sb(), KeyframeParams())
+    assert PLATE_SOLO not in plate.prompt
+
+
+def test_the_repeat_cannot_cost_the_look():
+    # A long scene overruns 77 tokens. What is cut must be the end of the repeat, so the look comes first.
+    long_scene = " ".join(["word"] * 30)
+    plate, _ = plan_keyframe_passes(_real_scene(long_scene, ["A"]), REAL, _real_sb(), KeyframeParams())
+    words = plate.prompt.split()
+    assert words.index("charcoal") < 60
 
 
 def test_no_prompt_says_field_jacket():

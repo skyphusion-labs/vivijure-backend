@@ -176,9 +176,9 @@ _DIRECTION_CLAUSE = re.compile(r"\b(portrait|head-and-shoulders|background|focus
 # (vivijure-cf#1147, and the likely cause of the field seen on vivijure-cf#1145).
 _PLACE_GARMENT = re.compile(
     r"\b(?:field|beach|desert|forest|safari|street|ski|mountain|garden)\s+(jacket|coat|vest|dress|boots|hat|shirt|cap)\b", re.I)
-# What the plate adds so the description does not turn the shot into a head-and-shoulders portrait.
-PLATE_FRAMING = "wide shot, full figure"
-_FRAMING_WORD = re.compile(r"\b(close-?up|wide|medium|shot|framing|portrait|full[- ]body|full figure|headshot)\b", re.I)
+# Said before the description on a one-person plate. Saying the action again after the description is
+# what keeps it, and saying it twice can draw the person twice (vivijure-cf#1147).
+PLATE_SOLO = "solo"
 
 
 def drop_place_from_garment(text: str) -> str:
@@ -236,8 +236,10 @@ def build_prompt(scene: Scene, cast: Cast, storyboard: Storyboard, *,
     Pass A has no triggers and no lock, but it draws the person whose outline Pass B then keeps
     through canny, so a plate with no description fixes the hair and the cut of the clothes before
     identity runs (vivijure-cf#1147, seen by rendering the plate alone at the same seed). It gets
-    only the age, hair and garments, after a wide framing, because the whole description makes a
-    head-and-shoulders portrait that loses the action and the location. Pieces are comma-joined and de-duplicated of empty fragments so a missing style
+    only the age, hair and garments, because the whole description makes a head-and-shoulders
+    portrait, and the scene is said again after them, because a person described last poses for the
+    camera instead of doing the action. The repeat comes last, so the 77 token limit only ever cuts
+    the repeat. Pieces are comma-joined and de-duplicated of empty fragments so a missing style
     or prompt never leaves a dangling comma.
 
     Descriptions come LAST and are FITTED to what is left of the token budget, split evenly across
@@ -250,8 +252,8 @@ def build_prompt(scene: Scene, cast: Cast, storyboard: Storyboard, *,
         parts.append(storyboard.style_preset)
     if lock_clause:
         parts.append(PASS_B_LOCK_CLAUSE)
-    if not include_triggers and scene.character_slots and not _FRAMING_WORD.search(scene.prompt or ""):
-        parts.append(PLATE_FRAMING)
+    if not include_triggers and len(scene.character_slots) == 1:
+        parts.append(PLATE_SOLO)
     prompt = drop_place_from_garment(_join_prompt(parts))
     wanted = [(s, drop_place_from_garment(slot_description(cast, s, scene.prompt))) for s in scene.character_slots]
     wanted = [(s, d) for s, d in wanted if d]
@@ -264,6 +266,8 @@ def build_prompt(scene: Scene, cast: Cast, storyboard: Storyboard, *,
     max_rank = 3 if include_triggers else 1
     fitted = [fit_description(d, share, name=slot_trigger(cast, s), scene_prompt=scene.prompt, max_rank=max_rank)
               for s, d in wanted]
+    if not include_triggers:
+        return drop_place_from_garment(_join_prompt([prompt, *fitted, scene.prompt]))
     return _join_prompt([prompt, *fitted])
 
 
