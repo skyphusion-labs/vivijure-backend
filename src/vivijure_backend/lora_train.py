@@ -28,6 +28,7 @@ from .load_events import timed_load
 
 from .contract import Character
 from .device import current
+from .harness.models_mirror import ensure_keyframe_base
 from .models import DEFAULT_SPECS, ModelRole, missing_keyframe_weights_error
 
 # The UNet attention projections a character LoRA needs to bind identity. Matches the
@@ -141,39 +142,43 @@ def train_slot(
     weight_dtype = torch.bfloat16
     torch.manual_seed(cfg.seed)
 
+    # The loads open `source`; `base` stays the repo id this adapter records as its base.
+    # Outside the try below: a failed pull keeps its own error, and nothing loads in its place.
+    source = ensure_keyframe_base(base)
+
     # --- frozen backbone: VAE (fp32 for stable latents), both text encoders, the UNet ---
     # The VAE stays fp32 because SDXL's VAE produces NaNs under fp16/bf16 encode; everything
     # else lives in bf16. Only the UNet gets a trainable LoRA; the rest is inference-only.
     try:
         with timed_load("lora_train.vae"):
             vae = AutoencoderKL.from_pretrained(
-                base, subfolder="vae", torch_dtype=torch.float32, local_files_only=True).to(device)
+                source, subfolder="vae", torch_dtype=torch.float32, local_files_only=True).to(device)
     except (OSError, ValueError) as e:
         raise missing_keyframe_weights_error(base) from e
     # CLIPTokenizer, not AutoTokenizer: Auto* probes AutoConfig for a config.json the CLIP
     # tokenizer subfolders do not have, which is a graceful 404 online but a FATAL
     # LocalEntryNotFoundError under HF_HUB_OFFLINE=1 on the deployed worker. CLIPTokenizer loads
     # the tokenizer files directly (the diffusers SDXL path), so it works offline from the cache.
-    tokenizer_one = CLIPTokenizer.from_pretrained(base, subfolder="tokenizer")
-    tokenizer_two = CLIPTokenizer.from_pretrained(base, subfolder="tokenizer_2")
+    tokenizer_one = CLIPTokenizer.from_pretrained(source, subfolder="tokenizer")
+    tokenizer_two = CLIPTokenizer.from_pretrained(source, subfolder="tokenizer_2")
     # local_files_only=True: transformers probes the repo tree for additional_chat_templates on
     # from_pretrained; that tree-listing call raises under HF_HUB_OFFLINE=1. Safe here because
     # the R2 mirror has run before lora_train is called, so the weights are in the local cache.
     with timed_load("lora_train.text_encoder"):
         text_encoder_one = CLIPTextModel.from_pretrained(
-            base, subfolder="text_encoder", torch_dtype=weight_dtype,
+            source, subfolder="text_encoder", torch_dtype=weight_dtype,
             local_files_only=True).to(device)
     with timed_load("lora_train.text_encoder_2"):
         text_encoder_two = CLIPTextModelWithProjection.from_pretrained(
-            base, subfolder="text_encoder_2", torch_dtype=weight_dtype,
+            source, subfolder="text_encoder_2", torch_dtype=weight_dtype,
             local_files_only=True).to(device)
     # local_files_only=True: diffusers calls model_info() to check for a newer revision before
     # loading; that API call raises OfflineModeIsEnabled under HF_HUB_OFFLINE=1. The R2 mirror
     # has already run, so the weights are in the local cache -- it is safe to skip the check.
     with timed_load("lora_train.unet"):
         unet = UNet2DConditionModel.from_pretrained(
-            base, subfolder="unet", torch_dtype=weight_dtype, local_files_only=True).to(device)
-    noise_scheduler = DDPMScheduler.from_pretrained(base, subfolder="scheduler",
+            source, subfolder="unet", torch_dtype=weight_dtype, local_files_only=True).to(device)
+    noise_scheduler = DDPMScheduler.from_pretrained(source, subfolder="scheduler",
                                                     local_files_only=True)
 
     for module in (vae, text_encoder_one, text_encoder_two, unet):

@@ -152,7 +152,8 @@ def _namespaces_from_specs(specs: dict[ModelRole, ModelSpec]) -> frozenset[str]:
 
 
 # Photoreal is the loaded default. Anime is a job-time KEYFRAME_BASE swap, not a second
-# warm role. Animagine stays out of the default bake (see deploy/bake-manifest.json).
+# warm role. Animagine stays out of the default bake and the cold pull (see deploy/bake-manifest.json);
+# models_mirror.ensure_keyframe_base pulls it when a job's load asks for it.
 KEYFRAME_ANIME_REPO = "cagliostrolab/animagine-xl-4.0"
 EXTRA_ALLOWED_NAMESPACES: frozenset[str] = frozenset({KEYFRAME_ANIME_REPO.split("/", 1)[0]})
 
@@ -169,8 +170,8 @@ def missing_keyframe_weights_error(repo_id: str) -> RuntimeError:
     return RuntimeError(
         f"keyframe base {repo_id} is not on this worker. "
         "Photoreal uses SG161222/RealVisXL_V5.0 (default bake). "
-        "Anime uses cagliostrolab/animagine-xl-4.0 (not in the default bake). "
-        "Stage those weights or bake a worker that keeps that repo."
+        "Anime uses cagliostrolab/animagine-xl-4.0, pulled on demand from the R2 mirror. "
+        "Any other base must be staged on the worker."
     )
 
 
@@ -526,14 +527,18 @@ class ModelServer:
         import torch
         from diffusers import StableDiffusionXLControlNetPipeline
 
+        from .harness.models_mirror import ensure_keyframe_base
+
         spec = self.specs[ModelRole.KEYFRAME_BASE]
+        # Outside the try: a failed pull keeps its own error, and nothing loads in its place.
+        source = ensure_keyframe_base(spec.repo_id)
         # Pose first (regional Pass A plants bodies). Canny is cached separately and swapped onto
         # pipe.controlnet for scene-lock Pass B; not MultiControlNet.
         controlnet = self._controlnet(ModelRole.CONTROLNET_POSE)
         try:
             with timed_load("keyframe.base"):
                 pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
-                    spec.repo_id, controlnet=controlnet, torch_dtype=torch.bfloat16,
+                    source, controlnet=controlnet, torch_dtype=torch.bfloat16,
                     local_files_only=True)
         except (OSError, ValueError) as e:
             raise missing_keyframe_weights_error(spec.repo_id) from e
@@ -704,12 +709,13 @@ class ModelServer:
         from diffusers import StableDiffusionXLPipeline
         from huggingface_hub import hf_hub_download
         from . import instantid as _iid
+        from .harness.models_mirror import ensure_keyframe_base
 
         base = self.specs[ModelRole.KEYFRAME_BASE]
         id_spec = self.specs[ModelRole.INSTANTID]
         with timed_load("instantid.base"):
             pipe = StableDiffusionXLPipeline.from_pretrained(
-                base.repo_id, torch_dtype=torch.bfloat16, local_files_only=True)
+                ensure_keyframe_base(base.repo_id), torch_dtype=torch.bfloat16, local_files_only=True)
             pipe.to("cuda")
         _set_attention(pipe, self.device)
         pipe._vj_default_scheduler = pipe.scheduler

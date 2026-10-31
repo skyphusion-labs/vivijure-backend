@@ -14,6 +14,13 @@ was verified at the pinned revision shown (the Hugging Face commit SHA, or, for 
 two repos that are access-restricted on the Hub, the upstream source the weights
 originate from).
 
+## Pulled at runtime, not baked
+
+`cagliostrolab/animagine-xl-4.0` (the anime keyframe base, CreativeML Open RAIL++-M,
+https://huggingface.co/cagliostrolab/animagine-xl-4.0) is not in `DEFAULT_SPECS` and not in the
+image. A worker pulls it from the project's R2 mirror when an anime job loads it. The mirror holds
+revision `2b7c1b397761bf5bd3cc42e5b39ec99314a75a96`.
+
 ## Models
 
 | Role | repo_id | Pinned revision | License | Source |

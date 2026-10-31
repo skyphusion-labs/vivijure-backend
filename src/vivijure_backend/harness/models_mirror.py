@@ -42,16 +42,23 @@ I2V_LAZY_REPOS = (
     "models--lightx2v--Wan2.2-Lightning",
 )
 
-# Repos NOT pulled at cold start: the lazy i2v repos above, plus dead weight nothing in the model
+# Keyframe bases only some jobs load, pulled by ensure_keyframe_base() when a job's own load asks for
+# one. A photoreal job never asks, so it never pays for the anime checkpoint (6.5 GiB).
+KEYFRAME_LAZY_REPOS = (
+    "models--cagliostrolab--animagine-xl-4.0",
+)
+# The pipeline parts a keyframe base must hold, each with its own weight file.
+KEYFRAME_BASE_COMPONENTS = ("unet", "vae", "text_encoder", "text_encoder_2")
+
+# Repos NOT pulled at cold start: the lazy repos above, plus dead weight nothing in the model
 # spec loads (T2V is never used; the stray SDXL repos are not in the spec). Storage in R2 is kept
 # (cheap, safer); these are pull-time excludes only. Tune per the live model set, the deploy's call.
 # This list MUST agree with the bake keep/drop set (deploy/bake-manifest.json): runtime and bake
 # derive the same model set from the same source, so neither pulls/bakes a repo the other ignores.
-DEFAULT_SKIP_REPOS = I2V_LAZY_REPOS + (
+DEFAULT_SKIP_REPOS = I2V_LAZY_REPOS + KEYFRAME_LAZY_REPOS + (
     "models--Wan-AI--Wan2.2-T2V-A14B-Diffusers",          # text-to-video: never loaded
     "models--stabilityai--stable-diffusion-xl-base-1.0",  # not in the model spec (dead weight)
     "models--stabilityai--sdxl-turbo",                    # not in the model spec (dead weight)
-    "models--cagliostrolab--animagine-xl-4.0",            # anime alt in a note only; not loaded (#13)
     "spaces--InstantX--InstantID",                        # the HF Space, not the model repo
 )
 
@@ -73,6 +80,10 @@ STILLS_ACTIONS = frozenset({"preview", "regen_shot", "train_lora"})
 # Written per finish leg, once that leg has been pulled. A finish job pulls only the legs it loads, so
 # the base sentinel stays unwritten and a later job that needs the rest still pulls it (#553).
 FINISH_LEG_SENTINEL = ".vj-leg-{}-complete"
+# Written per lazy keyframe base. It holds PULL_IN_PROGRESS during the pull and the model version after
+# it, so weights a dead pull left on disk are not mistaken for a complete repo.
+KEYFRAME_BASE_SENTINEL = ".vj-keyframe-base-{}-complete"
+PULL_IN_PROGRESS = "pulling"
 
 # Baked-image marker: present at VJ_MODELS_ROOT/.vj-baked when the model weights are BAKED INTO THE
 # IMAGE. The marker says BAKED and nothing about which precision was baked; that lives in the stamp's
@@ -1017,6 +1028,75 @@ def start_i2v_prefetch(*, env: dict | None = None, log: Callable[[str], None] = 
     t.start()
     log("models_mirror: eager i2v prefetch started (overlaps LoRA training).")
     return t
+
+
+def _snapshot_source(repo_id: str, env: dict) -> str | None:
+    """The snapshot directory holding `repo_id`'s weights under this env's roots, or None."""
+    rev = aux_weights_revision(repo_id, env)
+    return str(hub_cache_dir(repo_id, env) / "snapshots" / rev) if rev else None
+
+
+def ensure_keyframe_base(repo_id: str, *, env: dict | None = None,
+                         log: Callable[[str], None] = print) -> str:
+    """Return what a keyframe load should open for `repo_id`, pulling it first if this job needs it.
+
+    A base outside KEYFRAME_LAZY_REPOS comes back unchanged and nothing is pulled, so a photoreal job
+    behaves as it always has. A lazy base comes back as its snapshot DIRECTORY, because the cache a
+    worker reads can be a read-only volume while the pull lands on local disk.
+
+    Weights already present (a bake that kept the repo, or a preloaded volume) are used as they are.
+    Otherwise the repo is mirrored from R2, baked image or not: `.vj-baked` does not say which roles
+    were baked. Every failure raises, because the only other outcome is a job with no checkpoint, and
+    the caller has no other base it could honestly use."""
+    cache_dir = "models--" + repo_id.replace("/", "--")
+    if cache_dir not in KEYFRAME_LAZY_REPOS:
+        return repo_id
+    e = mirror_env(env)
+    model_version = e.get("VJ_MODEL_VERSION") or _DEFAULT_MODEL_VERSION
+    # The endpoint's own roots: a volume is never written (see _resolve_volume).
+    local = dict(e)
+    _decline(local, VolumeState.ABSENT)
+    models_root = Path(local.get("VJ_MODELS_ROOT", "/opt/models"))
+    sentinel = models_root / KEYFRAME_BASE_SENTINEL.format(cache_dir)
+    state = sentinel.read_text().strip() if sentinel.exists() else None
+    source = _snapshot_source(repo_id, local) if state == model_version else None
+    if state is None:
+        source = _snapshot_source(repo_id, e)
+    if source:
+        log(f"models_mirror: keyframe base {repo_id} is on this worker; skipping R2 pull.")
+        return source
+
+    if not e.get("R2_ACCESS_KEY_ID"):
+        raise RuntimeError(f"models_mirror: keyframe base {repo_id} is not on this worker "
+                           "and there are no R2 credentials to pull it")
+    if shutil.which("rclone") is None:
+        raise RuntimeError("models_mirror: rclone is not installed in the image")
+    hub = _hf_home(local) / "hub"
+    hub.mkdir(parents=True, exist_ok=True)
+    models_root.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text(PULL_IN_PROGRESS + "\n")
+    bucket = e.get("R2_BUCKET", "vivijure")
+    log(f"models_mirror: this job loads {repo_id}; mirroring {cache_dir} from R2...")
+    t0 = time.monotonic()
+    retries = _run_rclone(mirror_cmd(f"r2:{bucket}/models/hf-cache/hub/{cache_dir}", hub / cache_dir),
+                          rclone_env(e))
+    seconds = time.monotonic() - t0
+    _reconstruct_symlinks(hub / cache_dir, log)
+
+    source = _snapshot_source(repo_id, local)
+    missing = [c for c in KEYFRAME_BASE_COMPONENTS
+               if source is None or not snapshot_has_weights(Path(source) / c)]
+    if missing:
+        raise RuntimeError(f"models_mirror: the R2 mirror of {repo_id} has no weights for "
+                           + ", ".join(missing))
+    sentinel.write_text(model_version + "\n")
+    try:  # best-effort telemetry, as in ensure_models
+        log(_mirror_event([(cache_dir, seconds)], _dir_bytes(hub / cache_dir), cold=True,
+                          model_version=model_version, event="keyframe_base_mirror_complete",
+                          retries=retries))
+    except Exception as exc:  # noqa: BLE001 -- telemetry must never fail a good pull
+        log(f"models_mirror: mirror telemetry skipped ({exc})")
+    return str(source)
 
 
 def ensure_hub_repos(repos: tuple[str, ...], *, env: dict | None = None,

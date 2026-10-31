@@ -115,7 +115,7 @@
     },
     {
       "repo": "models--cagliostrolab--animagine-xl-4.0",
-      "reason": "only an 'anime alt' mentioned in a KEYFRAME_BASE note; NOT loaded by the spec. Added to the runtime DEFAULT_SKIP_REPOS in this PR so runtime and bake derive the same set."
+      "reason": "the anime keyframe base. Not baked and not in the cold pull (DEFAULT_SKIP_REPOS): models_mirror.ensure_keyframe_base pulls it when an anime job loads it, so a photoreal worker never carries it. ~6.5 GiB saved."
     }
   ]
 }
