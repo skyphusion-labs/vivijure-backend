@@ -17,7 +17,10 @@ from vivijure_backend.keyframe import (
     _guidance,
     _normalize_lora_state_dict,
     _pose_skeleton,
+    PROMPT_TOKEN_BUDGET,
     build_prompt,
+    estimate_tokens,
+    fit_description,
     engine_for,
     keyframe_render_path,
     plan_keyframe_passes,
@@ -77,7 +80,7 @@ def test_prompt_has_no_dangling_comma_without_style():
 def test_prompt_appends_real_style_preset():
     sc = Scene.from_dict({"id": "s", "prompt": "x", "character_slots": ["A"]}, 0)
     p = build_prompt(sc, CAST, _sb(style_preset="neon noir"))
-    assert p.endswith("neon noir")
+    assert p.index("neon noir") > p.index("Vesper")
     # the literal "None" preset is never appended
     assert "None" not in build_prompt(sc, CAST, _sb())
 
@@ -555,3 +558,50 @@ def test_identity_pass_gets_the_description_and_plate_pass_does_not():
     plate, identity = plan_keyframe_passes(sc, CAST, _sb(), KeyframeParams())
     assert "teal-haired netrunner" not in plate.prompt
     assert "teal-haired netrunner" in identity.prompt
+
+
+# --------------------------------------------------------------------------- the 77 token limit
+
+LONG = Cast.from_registry({"characters": {
+    "A": {"name": "Mara", "prompt": "Mara, an adult woman in her thirties, dark shoulder-length curls, sharp brown eyes, charcoal field jacket over a black top, calm presence."},
+    "B": {"name": "Dev", "prompt": "Dev, an adult man in his thirties, dark buzz cut, light stubble, grey zip hoodie, lean and alert."},
+}})
+LONG_SCENE = "Mara, an adult woman in her thirties with dark shoulder-length curls and a charcoal field jacket, walks into a dim workshop at night and switches on a work light."
+
+
+def test_lock_clause_comes_before_the_description():
+    sc = Scene.from_dict({"id": "s", "prompt": "crosses the floor", "character_slots": ["A"]}, 0)
+    p = build_prompt(sc, LONG, _sb(), include_triggers=True, lock_clause=True)
+    assert p.index(PASS_B_LOCK_CLAUSE) < p.index("charcoal field jacket")
+
+
+def test_a_long_shot_keeps_its_lock_clause_inside_the_budget():
+    sc = Scene.from_dict({"id": "s", "prompt": LONG_SCENE, "character_slots": ["A"]}, 0)
+    p = build_prompt(sc, LONG, _sb(), include_triggers=True, lock_clause=True)
+    assert PASS_B_LOCK_CLAUSE in p
+    assert estimate_tokens(p) <= PROMPT_TOKEN_BUDGET
+
+
+def test_two_people_share_the_budget():
+    sc = Scene.from_dict({"id": "s", "prompt": "Mara and Dev open a generator panel in the workshop", "character_slots": ["A", "B"]}, 0)
+    p = build_prompt(sc, LONG, _sb(), include_triggers=True, lock_clause=True)
+    assert estimate_tokens(p) <= PROMPT_TOKEN_BUDGET
+    # Both people get something past their names. The defect left slot B with nothing.
+    assert "dark shoulder-length curls" in p or "charcoal field jacket" in p
+    assert "dark buzz cut" in p or "grey zip hoodie" in p
+
+
+def test_a_prompt_with_no_room_is_left_alone():
+    sc = Scene.from_dict({"id": "s", "prompt": " ".join(["word"] * 90), "character_slots": ["A"]}, 0)
+    assert "charcoal" not in build_prompt(sc, LONG, _sb())
+
+
+def test_fit_keeps_order_skips_what_does_not_fit_and_drops_the_bare_name():
+    text = "Mara, an adult woman in her thirties, red coat."
+    assert fit_description(text, 100, name="Mara") == "an adult woman in her thirties, red coat"
+    assert fit_description(text, 3, name="Mara") == "red coat"
+    assert fit_description(text, 0, name="Mara") == ""
+
+
+def test_fit_skips_a_clause_the_scene_already_says():
+    assert fit_description("an adult woman, red coat", 100, scene_prompt="An adult woman runs") == "red coat"

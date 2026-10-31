@@ -18,6 +18,8 @@ pod. Engine knobs live in `KeyframeParams` here; the control plane's typed `Keyf
 """
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -130,6 +132,19 @@ def slot_trigger(cast: Cast, slot: str) -> str:
     return (char.name if char and char.name else slot)
 
 
+# SDXL's text encoders keep 77 tokens including start and end, so 75 are ours. The pipeline has no way
+# past that here, so anything over it is silently dropped from the end of the prompt.
+PROMPT_TOKEN_BUDGET = 75
+# The estimate below is not the real tokenizer, which is not on this CPU path. This margin absorbs the
+# difference. Measured against CLIP on the vivijure-cf#1147 boards: it estimated low by at most 7.
+PROMPT_TOKEN_MARGIN = 8
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough CLIP token count: one per word and one per punctuation mark."""
+    return len(re.findall(r"\w+|[^\w\s]", text or ""))
+
+
 def slot_description(cast: Cast, slot: str, scene_prompt: str = "") -> str:
     """The slot's character description from the cast registry, or "" when it has none or the
     scene prompt already contains it. This is what holds hair and wardrobe on a shot prompt that
@@ -141,30 +156,61 @@ def slot_description(cast: Cast, slot: str, scene_prompt: str = "") -> str:
     return text
 
 
-def build_prompt(scene: Scene, cast: Cast, storyboard: Storyboard, *,
-                 include_triggers: bool = True, lock_clause: bool = False) -> str:
-    """Compose the SDXL prompt: the storyboard style prefix, the scene's own prompt, and
-    optionally the LoRA trigger tokens, each slot's character description, and the Pass B
-    location-lock clause. Pass A is style + scene only (no triggers, no people). Pieces are
-    comma-joined and de-duplicated of empty fragments so a missing style or prompt never leaves
-    a dangling comma.
+def fit_description(text: str, budget: int, *, name: str = "", scene_prompt: str = "") -> str:
+    """The clauses of a description that fit `budget` estimated tokens, in order. A clause that
+    does not fit is skipped and a later shorter one may still fit, so a long lead clause cannot
+    cost the wardrobe. A clause that is only the character's name is dropped, because the trigger
+    says it, and so is one the scene prompt already says, because tokens are scarce."""
+    kept: list[str] = []
+    used = 0
+    for clause in (c.strip() for c in text.rstrip(". ").split(",")):
+        if not clause or clause.lower() == name.lower() or clause.lower() in (scene_prompt or "").lower():
+            continue
+        cost = estimate_tokens(clause) + 1  # the joining comma
+        if used + cost <= budget:
+            kept.append(clause)
+            used += cost
+    return ", ".join(kept)
 
-    The description follows the triggers because SDXL's text encoder keeps the first 77 tokens:
-    if a prompt runs long, a description is what gets cut, never the scene or a trigger. It is
-    skipped when the scene prompt already carries it word for word, which saves those tokens."""
-    triggers = ", ".join(slot_trigger(cast, s) for s in scene.character_slots) if include_triggers else ""
-    parts = [storyboard.style_prefix, scene.prompt, triggers]
-    if include_triggers:
-        parts.extend(slot_description(cast, s, scene.prompt) for s in scene.character_slots)
-    if storyboard.style_preset and storyboard.style_preset != "None":
-        parts.append(storyboard.style_preset)
-    if lock_clause:
-        parts.append(PASS_B_LOCK_CLAUSE)
+
+def _join_prompt(parts: list[str]) -> str:
     # Fragments may carry their own edge commas (the control plane's style_prefix ends in ","),
     # so strip leading/trailing commas per fragment before joining; internal commas (the trigger
     # list) are untouched, so two characters never collapse into one.
     cleaned = [c for c in (p.strip().strip(",").strip() for p in parts if p) if c]
     return ", ".join(cleaned)
+
+
+def build_prompt(scene: Scene, cast: Cast, storyboard: Storyboard, *,
+                 include_triggers: bool = True, lock_clause: bool = False) -> str:
+    """Compose the SDXL prompt: the storyboard style prefix, the scene's own prompt, and
+    optionally the LoRA trigger tokens, the Pass B location-lock clause, and each slot's character
+    description. Pass A is style + scene only (no triggers, no people). Pieces are comma-joined and
+    de-duplicated of empty fragments so a missing style or prompt never leaves a dangling comma.
+
+    Descriptions come LAST and are FITTED to what is left of the token budget, split evenly across
+    the shot's slots. Everything before them outranks them, and the lock clause above all: it is
+    what keeps a person in the scene (vivijure-cf#1147). The even split is what stops the first
+    slot from taking the whole budget on a two-person shot."""
+    triggers = ", ".join(slot_trigger(cast, s) for s in scene.character_slots) if include_triggers else ""
+    parts = [storyboard.style_prefix, scene.prompt, triggers]
+    if storyboard.style_preset and storyboard.style_preset != "None":
+        parts.append(storyboard.style_preset)
+    if lock_clause:
+        parts.append(PASS_B_LOCK_CLAUSE)
+    prompt = _join_prompt(parts)
+    if not include_triggers:
+        return prompt
+    wanted = [(s, slot_description(cast, s, scene.prompt)) for s in scene.character_slots]
+    wanted = [(s, d) for s, d in wanted if d]
+    if not wanted:
+        return prompt
+    room = PROMPT_TOKEN_BUDGET - PROMPT_TOKEN_MARGIN - estimate_tokens(prompt)
+    share = room // len(wanted)
+    if share <= 0:
+        return prompt
+    fitted = [fit_description(d, share, name=slot_trigger(cast, s), scene_prompt=scene.prompt) for s, d in wanted]
+    return _join_prompt([prompt, *fitted])
 
 
 def scene_lock_negative(scene: Scene, base: str) -> str:
