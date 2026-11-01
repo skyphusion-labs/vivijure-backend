@@ -22,7 +22,7 @@ from typing import Protocol, runtime_checkable
 
 from ..assemble import ClipInput, assemble, build_manifest, order_for_storyboard, write_manifest
 from ..contract import Bundle, RenderRequest, RenderResult, Keyframe, Clip
-from ..finish import Deadline, FinishDeadlineExceeded, job_mirror_legs, max_mirror_seconds
+from ..finish import Deadline, FinishDeadlineExceeded, job_mirror_legs, max_job_mirror_seconds, max_mirror_seconds
 from ..orchestrator import (Action, KeyframeMode, RenderPlan, plan as make_plan,
                             resolve_lora_family, validate)
 from . import keys
@@ -798,12 +798,12 @@ def handler(job: dict) -> dict:
     # never costs a ready worker its job. Each budget is shared across its stages rather than being a
     # timeout per step, and the invocation ceiling is their sum (finish.py tests it).
     #
-    # SCOPED TO finish_clip ALONE (#422 D). Every other action gets None, and every check here and
-    # in finish.py is guarded on deadline-is-not-None, so render / i2v_clip / train_lora / health
-    # cannot raise FinishDeadlineExceeded at all. Unchanged by CONSTRUCTION, not by a promise.
+    # The work budget is SCOPED TO finish_clip ALONE (#422 D): every other action gets None. Every other
+    # action does get a budget on its model pull (#564), and the clause around ensure_models turns that
+    # expiry into a plain failure, so it cannot reach the soft degrade below.
     action_in = str(payload.get("action", "render"))
     is_finish = action_in == "finish_clip"
-    mirror_deadline = Deadline.start(max_mirror_seconds()) if is_finish else None
+    mirror_deadline = Deadline.start(max_mirror_seconds() if is_finish else max_job_mirror_seconds())
     store = None  # bound below; named here so the expiry handler can pass it to the emitter
 
     # Everything below runs inside the quiesce guard (#90): on EVERY exit -- return or raise --
@@ -827,7 +827,7 @@ def handler(job: dict) -> dict:
         # no run context (#90). Best-effort; a config failure above never reaches here (R2 is the
         # failure, so its own rejection can only degrade to stdout).
         job_done_diag.register(store, project, job_id)
-        if mirror_deadline is not None:
+        if is_finish:
             mirror_deadline.check("r2_client")
         try:
             # The job's action is handed to the mirror because the network-volume readiness gate
@@ -840,9 +840,14 @@ def handler(job: dict) -> dict:
         except FinishDeadlineExceeded:
             # Not an Exception (see its docstring), so it needs its own clause to keep this record.
             # The handler's one catch site below turns the expiry into the soft degrade.
-            ProgressEmitter(store, project, job_id, on_progress=on_progress).emit(
-                "mirror_failed", **(last_mirror_stats() or {}))
-            raise
+            failed = ProgressEmitter(store, project, job_id, on_progress=on_progress)
+            failed.emit("mirror_failed", **(last_mirror_stats() or {}))
+            if is_finish:
+                raise
+            # A job that needs these weights has nothing to pass through, so it fails, and the worker goes free.
+            error = RuntimeError(f"model pull ran past its {mirror_deadline.budget_seconds:.0f} s budget")
+            failed.error("mirror", error)
+            raise error from None
         except Exception as e:
             failed = ProgressEmitter(store, project, job_id, on_progress=on_progress)
             failed.emit("mirror_failed", **(last_mirror_stats() or {}))
