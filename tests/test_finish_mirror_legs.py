@@ -358,12 +358,12 @@ def _render_with_a_mirror(monkeypatch, mirror):
 
 def test_a_stuck_pull_fails_a_render_by_name_and_never_soft_degrades(monkeypatch):
     def stuck(**k):
-        raise FinishDeadlineExceeded("model_mirror", 1800.0, 1800.0)
+        raise FinishDeadlineExceeded("model_mirror", 3000.0, 3000.0)
 
     ran = _render_with_a_mirror(monkeypatch, stuck)
     monkeypatch.setattr(handler_mod, "_finish_deadline_degrade",
                         lambda *a, **k: pytest.fail("a render has nothing to pass through"))
-    with pytest.raises(RuntimeError, match=r"model pull ran past its 1800 s budget"):
+    with pytest.raises(RuntimeError, match=r"model pull ran past its 3000 s budget"):
         handler_mod.handler({"id": "j", "input": {"action": "render", "project": "p"}})
     assert ran == []
 

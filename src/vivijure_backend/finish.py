@@ -82,10 +82,11 @@ DEFAULT_MIRROR_MAX_SECONDS = 120
 MIRROR_MAX_SECONDS_ENV = "VJ_FINISH_MIRROR_MAX_SECONDS"
 
 # Every other action's model pull (#564). A stills pull was measured at 104 to 2618 s for the same 26 GB, on the
-# GPU clock, and nothing ended it but the endpoint's own 3600 s job timeout. 1800 s is above every pull that went on
-# to do work and bounds a stuck worker at about $1.75. Unlike a finish step, a job that needs its weights cannot
-# pass through: it fails, by name.
-DEFAULT_JOB_MIRROR_MAX_SECONDS = 1800
+# GPU clock, and nothing ended it but the endpoint's own 3600 s job timeout. About 1 pull in 8 ran past 1800 s and
+# then did its work, and a failure costs a person's retry and another pull, so this is set above the slowest pull
+# seen to finish. It catches a hung rclone at about $2.90, 10 minutes before the endpoint would. Unlike a finish
+# step, a job that needs its weights cannot pass through: it fails, by name.
+DEFAULT_JOB_MIRROR_MAX_SECONDS = 3000
 JOB_MIRROR_MAX_SECONDS_ENV = "VJ_MIRROR_MAX_SECONDS"
 
 
