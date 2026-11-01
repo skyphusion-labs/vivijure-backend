@@ -81,6 +81,13 @@ MAX_SECONDS_ENV = "VJ_FINISH_MAX_SECONDS"
 DEFAULT_MIRROR_MAX_SECONDS = 120
 MIRROR_MAX_SECONDS_ENV = "VJ_FINISH_MIRROR_MAX_SECONDS"
 
+# Every other action's model pull (#564). A stills pull was measured at 104 to 2618 s for the same 26 GB, on the
+# GPU clock, and nothing ended it but the endpoint's own 3600 s job timeout. 1800 s is above every pull that went on
+# to do work and bounds a stuck worker at about $1.75. Unlike a finish step, a job that needs its weights cannot
+# pass through: it fails, by name.
+DEFAULT_JOB_MIRROR_MAX_SECONDS = 1800
+JOB_MIRROR_MAX_SECONDS_ENV = "VJ_MIRROR_MAX_SECONDS"
+
 
 def max_finish_seconds(env: dict | None = None) -> float:
     """The finish wall-clock budget in seconds: VJ_FINISH_MAX_SECONDS when it parses to a positive
@@ -109,6 +116,16 @@ def max_mirror_seconds(env: dict | None = None) -> float:
     except (TypeError, ValueError):
         return float(DEFAULT_MIRROR_MAX_SECONDS)
     return v if v > 0 else float(DEFAULT_MIRROR_MAX_SECONDS)
+
+
+def max_job_mirror_seconds(env: dict | None = None) -> float:
+    """The budget for a model pull outside finish_clip. Same rules as `max_mirror_seconds`. Pure."""
+    e = os.environ if env is None else env
+    try:
+        v = float(str(e.get(JOB_MIRROR_MAX_SECONDS_ENV)).strip())
+    except (TypeError, ValueError):
+        return float(DEFAULT_JOB_MIRROR_MAX_SECONDS)
+    return v if v > 0 else float(DEFAULT_JOB_MIRROR_MAX_SECONDS)
 
 
 class FinishDeadlineExceeded(BaseException):

@@ -341,7 +341,67 @@ def test_other_actions_keep_the_full_mirror_with_no_budget(monkeypatch):
     monkeypatch.setattr(pipeline_registry, "get_pipeline", lambda *a, **k: object())
     monkeypatch.setattr(handler_mod, "run_job", lambda payload, **kw: {"ran": True})
     handler_mod.handler({"id": "j", "input": {"action": "render", "project": "p"}})
-    assert seen["finish_legs"] is None and seen["deadline"] is None
+    assert seen["finish_legs"] is None
+    assert seen["deadline"].budget_seconds == finish.DEFAULT_JOB_MIRROR_MAX_SECONDS
+
+
+def _render_with_a_mirror(monkeypatch, mirror):
+    from vivijure_backend.harness import models_mirror, pipeline_registry
+    _stub_store(monkeypatch)
+    monkeypatch.setattr(models_mirror, "ensure_models", mirror)
+    monkeypatch.setattr(models_mirror, "start_i2v_prefetch", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline_registry, "get_pipeline", lambda *a, **k: object())
+    ran = []
+    monkeypatch.setattr(handler_mod, "run_job", lambda payload, **kw: ran.append(1) or {"ran": True})
+    return ran
+
+
+def test_a_stuck_pull_fails_a_render_by_name_and_never_soft_degrades(monkeypatch):
+    def stuck(**k):
+        raise FinishDeadlineExceeded("model_mirror", 1800.0, 1800.0)
+
+    ran = _render_with_a_mirror(monkeypatch, stuck)
+    monkeypatch.setattr(handler_mod, "_finish_deadline_degrade",
+                        lambda *a, **k: pytest.fail("a render has nothing to pass through"))
+    with pytest.raises(RuntimeError, match=r"model pull ran past its 1800 s budget"):
+        handler_mod.handler({"id": "j", "input": {"action": "render", "project": "p"}})
+    assert ran == []
+
+
+def test_the_budget_runs_out_on_a_real_stalled_rclone(tmp_path, monkeypatch):
+    # Through the real watchdog, with the budget the handler would have read.
+    _real_rclone_script(tmp_path, monkeypatch, "exec sleep 60")
+    monkeypatch.setenv("VJ_MIRROR_MAX_SECONDS", "0.3")
+    started = time.monotonic()
+    with pytest.raises(FinishDeadlineExceeded):
+        mm._run_rclone(["rclone", "copy"], dict(os.environ), Deadline.start(finish.max_job_mirror_seconds()))
+    assert time.monotonic() - started < 20
+
+
+def test_a_long_pull_that_finishes_inside_the_budget_runs_the_job(monkeypatch):
+    # The budget bounds the pull, and the job after it is not timed by it.
+    monkeypatch.setenv("VJ_MIRROR_MAX_SECONDS", "0.2")
+    ran = _render_with_a_mirror(monkeypatch, lambda **k: time.sleep(0.3) or True)
+    assert handler_mod.handler({"id": "j", "input": {"action": "render", "project": "p"}}) == {"ran": True}
+    assert ran == [1]
+
+
+def test_a_slow_store_setup_does_not_soft_degrade_a_render(monkeypatch):
+    # That check is the finish path's. On a render it would raise outside the clause that makes a plain failure.
+    monkeypatch.setenv("VJ_MIRROR_MAX_SECONDS", "0.05")
+    ran = _render_with_a_mirror(monkeypatch, lambda **k: False)
+    from vivijure_backend.harness.r2 import R2, R2Config
+    monkeypatch.setattr(R2, "__init__", lambda self, config: time.sleep(0.1))
+    assert handler_mod.handler({"id": "j", "input": {"action": "render", "project": "p"}}) == {"ran": True}
+    assert ran == [1]
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("600", 600.0), ("", finish.DEFAULT_JOB_MIRROR_MAX_SECONDS), ("junk", finish.DEFAULT_JOB_MIRROR_MAX_SECONDS),
+    ("0", finish.DEFAULT_JOB_MIRROR_MAX_SECONDS), ("-5", finish.DEFAULT_JOB_MIRROR_MAX_SECONDS),
+])
+def test_the_job_pull_budget_cannot_be_turned_off(value, expected):
+    assert finish.max_job_mirror_seconds({"VJ_MIRROR_MAX_SECONDS": value}) == expected
 
 
 def test_a_hung_mirror_ends_as_a_soft_degrade_with_its_record(tmp_path, monkeypatch):
