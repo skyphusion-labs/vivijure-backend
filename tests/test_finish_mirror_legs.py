@@ -363,9 +363,12 @@ def test_a_stuck_pull_fails_a_render_by_name_and_never_soft_degrades(monkeypatch
     ran = _render_with_a_mirror(monkeypatch, stuck)
     monkeypatch.setattr(handler_mod, "_finish_deadline_degrade",
                         lambda *a, **k: pytest.fail("a render has nothing to pass through"))
+    errors = []
+    monkeypatch.setattr(handler_mod.ProgressEmitter, "error", lambda self, stage, e: errors.append((stage, str(e))))
     with pytest.raises(RuntimeError, match=r"model pull ran past its 3000 s budget"):
         handler_mod.handler({"id": "j", "input": {"action": "render", "project": "p"}})
     assert ran == []
+    assert errors == [("mirror", "model pull ran past its 3000 s budget")]
 
 
 def test_the_budget_runs_out_on_a_real_stalled_rclone(tmp_path, monkeypatch):
