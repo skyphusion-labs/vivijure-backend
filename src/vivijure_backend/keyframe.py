@@ -156,21 +156,69 @@ def slot_description(cast: Cast, slot: str, scene_prompt: str = "") -> str:
     return text
 
 
-def fit_description(text: str, budget: int, *, name: str = "", scene_prompt: str = "") -> str:
-    """The clauses of a description that fit `budget` estimated tokens, in order. A clause that
-    does not fit is skipped and a later shorter one may still fit, so a long lead clause cannot
-    cost the wardrobe. A clause that is only the character's name is dropped, because the trigger
-    says it, and so is one the scene prompt already says, because tokens are scarce."""
-    kept: list[str] = []
+# What a description clause is, for the token budget (vivijure-cf#1147). The order is the priority:
+# a stated adult age first, then what a viewer tells people apart by, then other physical traits.
+# Mood goes last. A portrait direction is not a trait at all, and it fights the shot's location.
+_ADULT_CLAUSE = re.compile(r"\b(adult|grown|(?:twenties|thirties|forties|fifties|sixties|seventies|eighties))\b", re.I)
+_LOOK_CLAUSE = re.compile(
+    r"\b(hair|haired|curls?|curly|ringlets?|braids?|ponytail|bun|bangs|fringe|undercut|mohawk|dreadlocks|bald|buzz|"
+    r"buzz-cut|crew-cut|shaved|beard|bearded|stubble|mustache|moustache|goatee|sideburns|eye\s?patch|goggles|glasses|scar|"
+    r"jacket|coat|hoodie|shirt|t-shirt|top|tee|blouse|sweater|cardigan|vest|dress|skirt|overalls|apron|uniform|robe|"
+    r"trousers|pants|jeans|shorts|boots|shoes|gloves|hat|cap|helmet|scarf|armband|tie|suit|plating|armor|armour)\b", re.I)
+_MOOD_CLAUSE = re.compile(
+    r"\b(calm|presence|composed|restless|alert|energy|demeanou?r|expression|attitude|mood|vibe|watchful|"
+    r"gaze|quiet|stern|resolute|gentle|confident|tired|magnetic)\b", re.I)
+_DIRECTION_CLAUSE = re.compile(r"\b(portrait|head-and-shoulders|background|focus|studio|headshot)\b", re.I)
+
+
+# A garment named after a place draws the place. "charcoal field jacket" put a shot that says "in the
+# dim workshop" in a field of grass, 4 of 4 at one seed, and "charcoal jacket" put the same 4 indoors
+# (vivijure-cf#1147, and the likely cause of the field seen on vivijure-cf#1145).
+_PLACE_GARMENT = re.compile(
+    r"\b(?:field|beach|desert|forest|safari|street|ski|mountain|garden)\s+(jacket|coat|vest|dress|boots|hat|shirt|cap)\b", re.I)
+# Said before the description on a one-person plate. Saying the action again after the description is
+# what keeps it, and saying it twice can draw the person twice (vivijure-cf#1147).
+PLATE_SOLO = "solo"
+
+
+def drop_place_from_garment(text: str) -> str:
+    """"charcoal field jacket" -> "charcoal jacket". A place the prompt means to be in is untouched."""
+    return _PLACE_GARMENT.sub(r"\1", text or "")
+
+
+def clause_rank(clause: str) -> int:
+    """0 is kept first. A clause naming a garment or hair outranks a mood word in the same clause."""
+    if _ADULT_CLAUSE.search(clause):
+        return 0
+    if _LOOK_CLAUSE.search(clause):
+        return 1
+    return 3 if _MOOD_CLAUSE.search(clause) else 2
+
+
+def fit_description(text: str, budget: int, *, name: str = "", scene_prompt: str = "", max_rank: int = 3) -> str:
+    """The clauses of a description that fit `budget` estimated tokens, in their written order.
+
+    The budget is spent by clause_rank, so a mood phrase can never cost a garment. A clause that
+    does not fit is skipped and a lower one may still fit. Dropped outright: a clause that is only
+    the character's name, because the trigger says it; one the scene prompt already says, because
+    tokens are scarce; and a portrait direction, because it pulls the shot out of its location.
+    A clause ranked below `max_rank` is left out however much room there is."""
+    clauses = [c.strip() for c in re.split(r"[,;]|\.\s", text.strip().rstrip(". "))]
+    usable = [
+        (i, c) for i, c in enumerate(clauses)
+        if c and c.lower() != name.lower() and c.lower() not in (scene_prompt or "").lower()
+        and not _DIRECTION_CLAUSE.search(c) and clause_rank(c) <= max_rank
+    ]
+    kept: list[tuple[int, str]] = []
     used = 0
-    for clause in (c.strip() for c in text.rstrip(". ").split(",")):
-        if not clause or clause.lower() == name.lower() or clause.lower() in (scene_prompt or "").lower():
-            continue
-        cost = estimate_tokens(clause) + 1  # the joining comma
-        if used + cost <= budget:
-            kept.append(clause)
-            used += cost
-    return ", ".join(kept)
+    for i, clause in sorted(usable, key=lambda item: (clause_rank(item[1]), item[0])):
+        for form in (clause, clause.split(" over ")[0]):  # a jacket without what is under it still reads
+            cost = estimate_tokens(form) + 1  # the joining comma
+            if used + cost <= budget:
+                kept.append((i, form))
+                used += cost
+                break
+    return ", ".join(c for _, c in sorted(kept))
 
 
 def _join_prompt(parts: list[str]) -> str:
@@ -183,10 +231,16 @@ def _join_prompt(parts: list[str]) -> str:
 
 def build_prompt(scene: Scene, cast: Cast, storyboard: Storyboard, *,
                  include_triggers: bool = True, lock_clause: bool = False) -> str:
-    """Compose the SDXL prompt: the storyboard style prefix, the scene's own prompt, and
-    optionally the LoRA trigger tokens, the Pass B location-lock clause, and each slot's character
-    description. Pass A is style + scene only (no triggers, no people). Pieces are comma-joined and
-    de-duplicated of empty fragments so a missing style or prompt never leaves a dangling comma.
+    """Compose the SDXL prompt: the storyboard style prefix, the scene's own prompt, optionally the
+    LoRA trigger tokens and the Pass B location-lock clause, and each slot's character description.
+    Pass A has no triggers and no lock, but it draws the person whose outline Pass B then keeps
+    through canny, so a plate with no description fixes the hair and the cut of the clothes before
+    identity runs (vivijure-cf#1147, seen by rendering the plate alone at the same seed). It gets
+    only the age, hair and garments, because the whole description makes a head-and-shoulders
+    portrait, and the scene is said again after them, because a person described last poses for the
+    camera instead of doing the action. The repeat comes last, so the 77 token limit only ever cuts
+    the repeat. Pieces are comma-joined and de-duplicated of empty fragments so a missing style
+    or prompt never leaves a dangling comma.
 
     Descriptions come LAST and are FITTED to what is left of the token budget, split evenly across
     the shot's slots. Everything before them outranks them, and the lock clause above all: it is
@@ -198,10 +252,10 @@ def build_prompt(scene: Scene, cast: Cast, storyboard: Storyboard, *,
         parts.append(storyboard.style_preset)
     if lock_clause:
         parts.append(PASS_B_LOCK_CLAUSE)
-    prompt = _join_prompt(parts)
-    if not include_triggers:
-        return prompt
-    wanted = [(s, slot_description(cast, s, scene.prompt)) for s in scene.character_slots]
+    if not include_triggers and len(scene.character_slots) == 1:
+        parts.append(PLATE_SOLO)
+    prompt = drop_place_from_garment(_join_prompt(parts))
+    wanted = [(s, drop_place_from_garment(slot_description(cast, s, scene.prompt))) for s in scene.character_slots]
     wanted = [(s, d) for s, d in wanted if d]
     if not wanted:
         return prompt
@@ -209,7 +263,11 @@ def build_prompt(scene: Scene, cast: Cast, storyboard: Storyboard, *,
     share = room // len(wanted)
     if share <= 0:
         return prompt
-    fitted = [fit_description(d, share, name=slot_trigger(cast, s), scene_prompt=scene.prompt) for s, d in wanted]
+    max_rank = 3 if include_triggers else 1
+    fitted = [fit_description(d, share, name=slot_trigger(cast, s), scene_prompt=scene.prompt, max_rank=max_rank)
+              for s, d in wanted]
+    if not include_triggers:
+        return drop_place_from_garment(_join_prompt([prompt, *fitted, scene.prompt]))
     return _join_prompt([prompt, *fitted])
 
 
