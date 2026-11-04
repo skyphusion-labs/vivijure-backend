@@ -11,15 +11,15 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 **Do not pin `:1.0.1`** (t2 weight-digest rewrite; RunPod `unexpected EOF`). Incident:
 [`runpod-1.0.1-weight-digest-eof.md`](runpod-1.0.1-weight-digest-eof.md).
 
-## Current state (read from `GET /v2/serverless` on 2026-10-30)
+## Current state (backend read from `GET /v2/serverless` on 2026-11-04, upscale on 2026-10-30)
 
 | | `vivijure-backend-hosted` | `vivijure-upscale-hosted` |
 |---|---|---|
 | id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
-| Image | `vivijure-backend:1.1.4@sha256:44a571135d2f9f4ecd88e603a62e4bab2a98cb81e0b947614261fcfb5ba2cbc7` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
+| Image | `vivijure-backend:1.1.5@sha256:5b3e7140ac6b7ddcd8ebf0d65c034cf6501aa5049b1a7c47db56b8b62b887ec6` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
 | Pools | `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141`, `BLACKWELL_180`, `BLACKWELL_288` | `BLACKWELL_96` |
-| `workers` min / max | 0 / 30 | 0 / 10 |
-| Idle timeout | 180 s | 10 s |
+| `workers` min / max | 0 / 12 | 0 / 10 |
+| Idle timeout | 60 s | 10 s |
 | Scaler | `QUEUE_DELAY` 4 | `QUEUE_DELAY` 4 |
 | FlashBoot | on | on |
 | Container disk | 80 GB | 40 GB |
@@ -35,7 +35,8 @@ takes the R2 mirror.
 **Why 80 GB.** A stills job pulls 26.22 GB from R2 (`mirror_complete total_bytes`). Six jobs on two
 80 GB workers ran with no ENOSPC. Below 80 GB is untested.
 
-**Why 180 s idle.** Measured on the same image: a cold keyframe cost $0.13 to $0.23 of worker time and
+**Why 180 s idle (historical).** The live endpoint reads 60 s idle and max 12 workers on 2026-11-04;
+this section explains the earlier 180 s value. Measured on the same image: a cold keyframe cost $0.13 to $0.23 of worker time and
 a warm one $0.02, at $3.49 per hour. Idle costs $0.058 per minute, so holding a worker pays when the next
 job arrives within about 2 to 3.5 minutes. A one-off job pays up to about $0.17 of extra idle.
 
@@ -46,7 +47,22 @@ v1.42.0 sends `target_height` by default, so rolling back under one delivers 2x 
 the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 11.5 s, and 720x1280 to
 1080x1920 in 6.0 s. The presigned path has not run on this image yet.
 
+**Backend 1.1.5, pinned 2026-11-04.** A thin image (`deploy/Dockerfile.thin`) at main `1ac386e`, built on
+the Vultr bake box ([bake-box.md](bake-box.md)) from `toolchain-t1@sha256:456b417bffc7d80cef7e2f93d400beda9ebbea38dcb5e4efc7676460eee4d45d`,
+the same toolchain as 1.1.4 (no `deploy/` dependency change since). It adds #560, #561 and #562 (the
+character description in the keyframe and plate prompts, within the 77 token limit) and #565 (a deadline
+on every model pull). Proof: a `preview` job on `bundles/verify/Verify_Smoke.tar.gz` (job
+`82644d5a-dc84-446d-b4b5-ba898b447787-u1`) ran on a fresh 1.1.5 worker after the pool was drained to 0,
+an H100 80GB, cold: 74 s delay, 527 s execution, COMPLETED with one keyframe.
+
+**Backend rollback from 1.1.5:** image
+`vivijure-backend:1.1.4-kf-e54b0d0@sha256:a9b86c7bfd8f886601fe07281fdd38801a7781be9bebd21aa367776aef3f8a09`
+(1.1.4 with the #562 `keyframe.py` laid over it), idle timeout 60 s, max 12, same disk. Drain the pool to
+0 and restore it after the repin, or old workers keep serving.
+
 **Previous values, for rollback:** image
+`vivijure-backend:1.1.4@sha256:44a571135d2f9f4ecd88e603a62e4bab2a98cb81e0b947614261fcfb5ba2cbc7`, same disk and idle timeout
+as 1.1.3. Before that:
 `vivijure-backend:1.1.3@sha256:dc04da20fb0ec28136b942c2dffe9608b75f631d8de597e3855e3165ad670e64`, same
 disk and idle timeout. On 1.1.3 a cold `finish_clip` pulls the whole base set again (#553). Before that:
 `vivijure-backend:1.1.2@sha256:69f06ab95ab75530af7e0fa135c768548d339435a3714036b6f32e95a2b0d586`, same
