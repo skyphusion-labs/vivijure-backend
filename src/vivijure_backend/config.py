@@ -187,6 +187,9 @@ class KeyframeConfig:
     lora_scale: float = 0.30         # 0..2; single-char LoRA; regional uses multi_char.lora_scale_per_slot
     scene_lock: bool = True          # two-pass plate then canny; default true only on the canny-bearing image
     canny_scale: float = 0.70        # 0..1.5; Pass B ControlNet conditioning
+    # 0..2; Pass B identity crop padding, as a fraction of the face box on each side. 0.35 is a face with little
+    # hair. Larger keeps the hair and shoulders for the masked IP-Adapter (vivijure-cf#1143).
+    face_crop_pad: float = 0.35
     multi_char: MultiCharConfig = field(default_factory=MultiCharConfig)
 
     @classmethod
@@ -237,6 +240,7 @@ class KeyframeConfig:
             lora_scale=_clamp(d.get("lora_scale"), 0.0, 2.0, base.lora_scale),
             scene_lock=bool(d.get("scene_lock", base.scene_lock)),
             canny_scale=_clamp(d.get("canny_scale"), 0.0, 1.5, base.canny_scale),
+            face_crop_pad=_clamp(d.get("face_crop_pad"), 0.0, 2.0, base.face_crop_pad),
             multi_char=MultiCharConfig.from_dict(d.get("multi_char")),
         )
 

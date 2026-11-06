@@ -172,6 +172,7 @@ def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard
         "max_slots": mc.max_slots,
         "scene_lock": kc.scene_lock,
         "canny_scale": kc.canny_scale,
+        "face_crop_pad": kc.face_crop_pad,
         "two_pass": "scene_lock_v1",
         "engine": KEYFRAME_ENGINE_VERSION,
     }
