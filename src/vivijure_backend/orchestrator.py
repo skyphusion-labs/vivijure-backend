@@ -179,6 +179,10 @@ def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard
         "two_pass": "scene_lock_v1",
         "engine": KEYFRAME_ENGINE_VERSION,
     }
+    # Only when set: at 0 the skeleton is byte-identical to the one drawn before this field existed, so a
+    # still drawn then is still the same image and keeps its hash (no fleet-wide redraw for a no-op).
+    if mc.pose_spread:
+        payload["pose_spread"] = mc.pose_spread
     if scene is not None and storyboard is not None:
         from .keyframe import DEFAULT_NEGATIVE, build_prompt, scene_lock_negative
 

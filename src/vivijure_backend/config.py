@@ -135,6 +135,10 @@ class MultiCharConfig:
     max_slots: int = 2                        # 1..4; characters the no-bleed path supports at once
     controlnet_pose_scale: float = 0.55       # 0..1.5; OpenPose ControlNet conditioning scale
     region_gutter: int = 64                   # 0..256 px dead band between regional masks (anti seam-blend)
+    # 0 = each pose figure at the centre of its region (unchanged). 0.15..0.9 = the figures' centres sit this
+    # fraction of the width apart around the frame centre, so no empty band is left between two people
+    # (vivijure-cf#1143: the plate drew a third person in that band). Clamped so a figure stays in its region.
+    pose_spread: float = 0.0
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "MultiCharConfig":
@@ -147,6 +151,7 @@ class MultiCharConfig:
             max_slots=_clamp_int(d.get("max_slots"), 1, 4, base.max_slots),
             controlnet_pose_scale=_clamp(d.get("controlnet_pose_scale"), 0.0, 1.5, base.controlnet_pose_scale),
             region_gutter=_clamp_int(d.get("region_gutter"), 0, 256, base.region_gutter),
+            pose_spread=_clamp(d.get("pose_spread"), 0.0, 0.9, base.pose_spread),
         )
 
 
