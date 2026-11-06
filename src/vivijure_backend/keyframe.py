@@ -96,6 +96,7 @@ class KeyframeParams:
     pose_conditioning: bool = True   # ControlNet-OpenPose to separate bodies in multi-char shots
     controlnet_pose_scale: float = 0.55  # OpenPose ControlNet conditioning scale (regional path)
     region_gutter: int = 64          # px dead band between regional masks so they do not seam-blend
+    pose_spread: float = 0.0         # 0 = figures at region centres; else centre-to-centre spacing (cf#1143)
     negative_prompt: str = DEFAULT_NEGATIVE
     max_slots: int = 2               # regional path is tuned for 2; more is future work
 
@@ -667,7 +668,7 @@ def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image, 
             from PIL import Image
             control = Image.open(pose_image).convert("RGB").resize((cfg.width, cfg.height))
         else:
-            control = _pose_skeleton(cfg.width, cfg.height, boxes)
+            control = _pose_skeleton(cfg.width, cfg.height, boxes, spread=cfg.pose_spread)
         cn_scale = cfg.controlnet_pose_scale
         if sink is not None:
             sink["pose"] = control
@@ -910,7 +911,7 @@ def _render_regional(pipe, prompt, scene, cast, cfg, loras, generator, pose_imag
             from PIL import Image
             control = Image.open(pose_image).convert("RGB").resize((w, h))
         else:
-            control = _pose_skeleton(w, h, boxes)
+            control = _pose_skeleton(w, h, boxes, spread=cfg.pose_spread)
         cn_scale = cfg.controlnet_pose_scale
     else:
         control = _blank_control(w, h)
@@ -1166,18 +1167,43 @@ _POSE_COLORS = [(255, 0, 0), (255, 85, 0), (255, 170, 0), (255, 255, 0), (170, 2
                 (255, 0, 255), (255, 0, 170), (255, 0, 85)]
 
 
-def _pose_skeleton(width, height, boxes):
+def pose_figure_shifts(width: int, boxes, spread: float) -> list[float]:
+    """Horizontal shift of each region's pose figure, in pixels (vivijure-cf#1143).
+
+    With `spread` 0 (or one box) every shift is 0: each figure stands at the centre of its region, as it always
+    has. Otherwise the figures' centres are placed `spread * width` apart in total, evenly around the frame
+    centre, which closes the empty band a wide frame leaves between two people (the plate drew a third person
+    there). Each shift is clamped so the figure, which spans _POSE_KP's x range of its box width, stays inside
+    its own region box: the masks, LoRAs and per-region text that key on those boxes still match the bodies."""
+    n = len(boxes)
+    if n < 2 or spread <= 0:
+        return [0.0] * n
+    xs = [x for x, _ in _POSE_KP]
+    lo, hi = min(xs), max(xs)
+    shifts = []
+    for i, (l, _t, r, _b) in enumerate(boxes):
+        bw = r - l
+        target = width * (0.5 + spread * (i / (n - 1) - 0.5))
+        centre = l + 0.5 * bw
+        dx = target - centre
+        dx = max(l - (l + lo * bw), min(r - (l + hi * bw), dx))  # keep [l+lo*bw+dx, l+hi*bw+dx] in [l, r]
+        shifts.append(dx)
+    return shifts
+
+
+def _pose_skeleton(width, height, boxes, *, spread: float = 0.0):
     """Render an OpenPose skeleton with ONE standing COCO-18 figure per region box on black, so the
     ControlNet plants exactly that many distinct bodies (the fix for two characters merging into
-    one). Each figure scales into its box with a small vertical margin. Geometry is deterministic;
-    visual fidelity to the ControlNet's training distribution is validated on the pod."""
+    one). Each figure scales into its box with a small vertical margin, shifted sideways by
+    `pose_figure_shifts` (none at `spread` 0). Geometry is deterministic; visual fidelity to the
+    ControlNet's training distribution is validated on the pod."""
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (width, height), (0, 0, 0))
     draw = ImageDraw.Draw(img)
-    for (l, t, r, b) in boxes:
+    for (l, t, r, b), dx in zip(boxes, pose_figure_shifts(width, boxes, spread)):
         bw, bh = r - l, b - t
         my = int(bh * 0.04)  # top/bottom margin so head + ankles are not clipped at the box edge
-        pts = [(l + x * bw, t + my + y * (bh - 2 * my)) for (x, y) in _POSE_KP]
+        pts = [(l + x * bw + dx, t + my + y * (bh - 2 * my)) for (x, y) in _POSE_KP]
         lw = max(2, bw // 70)
         for i, (a, c) in enumerate(_POSE_LIMBS):
             draw.line([pts[a], pts[c]], fill=_POSE_COLORS[i % len(_POSE_COLORS)], width=lw)

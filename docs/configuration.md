@@ -93,6 +93,7 @@ single-face by nature), so the regional path stays masked-IP-Adapter only.
 | `max_slots` | int | 2 | 1-4 | Characters the no-bleed path supports at once. |
 | `controlnet_pose_scale` | float | 0.55 | 0-1.5 | OpenPose ControlNet conditioning scale. |
 | `region_gutter` | int | 64 | 0-256 | Dead-band px between masks (anti seam-blend). |
+| `pose_spread` | float | 0 | 0-0.9 | 0 keeps each pose figure at the centre of its region. Above 0, the two figures' centres sit this fraction of the width apart around the frame centre, so the plate leaves no empty band between two people where it can draw a third (vivijure-cf#1143). Each figure is clamped inside its own region. In the reuse hash only when set. |
 
 ## I2VConfig
 
