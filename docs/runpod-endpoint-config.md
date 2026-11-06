@@ -39,18 +39,28 @@ the endpoint's release history records (`list-endpoint-releases`, field `templat
 - v41, 2026-11-06T15:01:44Z: from 80 to 200, after the full-disk worker;
 - v42, 2026-11-06T15:20:17Z: from 200 to 300, to hold the whole set below with room to spare rather than only the Wan set.
 
-`get-endpoint` on `xe5d1ivs40ohjo` read `disk: 300` on 2026-11-06, and the 1.1.17 repin (v43) kept it at 300. A repin changes only the image and the workers, so it leaves the disk alone. The arithmetic, in GiB (80 GB is 74.5 GiB):
+`get-endpoint` on `xe5d1ivs40ohjo` read `disk: 300` on 2026-11-06, and the 1.1.17 repin (v43) kept it at 300. A repin changes only the image and the workers, so it leaves the disk alone.
 
-| What a worker may hold | GiB | Source |
-|---|---|---|
-| The image (stills weights base, #591) | about 29 | the image pull, see the 1.1.16 notes below |
-| The stills set, on an image that does not carry it | 24.0 | `stills_manifest.total_bytes()`, 25,750,958,201 bytes |
-| The Wan i2v set, pulled on the first i2v-capable job | about 114 | the `_wants_i2v_prefetch` record in `harness/handler.py` |
-| The job's own I/O floor | 4 | `harness/disk.py` `DEFAULT_MIN_FREE_GB` |
+**Measured on 1.1.17, 2026-11-06,** one cold `i2v_clip` job (the own-gpu motion live check, job
+`5bedf426-a997-4a1e-8926-8796c0c718c9-e1`, worker `5po0bwtutn8k0e`). Every figure is that job's own event, in GiB
+(300 GB is 279.4 GiB):
 
-The Wan set alone (114 GiB) does not fit in 80 GB (74.5 GiB), so on the old disk one i2v-capable job filled the
-worker. Everything together is about 171 GiB, which fits in 300 GB (279 GiB) with room to spare. The model cache
-persists across jobs on purpose, so a worker that has run every kind of job holds all of it.
+| Point in the job | Free | Used | Event |
+|---|---|---|---|
+| `started`, after the base mirror | 250.9 | 28.5 | `started.disk_free_gb` |
+| The i2v pull: Wan 2.2 I2V plus Lightning | | +156.8 | `i2v_mirror_complete.total_bytes` 168,327,909,540 |
+| `complete`, after the clip | 94.1 | 185.3 | `complete.disk_free_gb` |
+
+The free space fell by exactly the bytes pulled (250.9 less 156.8 is 94.1), so each weight is stored once on disk.
+Of the 156.8 GiB, the Lightning leg is 39.2 GiB (its final rclone stats line); the rest is the Wan 2.2 I2V repo,
+which R2 lists at 126.2 GB (117.5 GiB). This record earlier carried 114 GiB for the whole i2v set and 171 GiB for a
+full worker: both were too low, because Lightning is 39.2 GiB, not about 3.
+
+**Why 80 GB and 200 GB both failed.** A worker that has run an i2v job holds 185.3 GiB, and the job floor keeps 4
+GiB free, so it needs about 189 GiB. 80 GB is 74.5 GiB, so the i2v pull alone overflowed it. 200 GB is 186.3 GiB,
+so a worker there ran out on its last leg, Lightning, which is what happened at 15:20Z. 300 GB (279.4 GiB) leaves
+94 GiB free after the whole set. The model cache persists across jobs on purpose, so a worker that has run every
+kind of job holds all of it.
 
 Since #600 a too-small disk fails loudly instead of silently: a pull that cannot fit fails its job by number
 before it writes, a disk below 4 GiB free fails a job before it starts (`VJ_MIN_FREE_GB` sets the floor), and
