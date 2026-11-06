@@ -16,7 +16,7 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 | | `vivijure-backend-hosted` | `vivijure-upscale-hosted` |
 |---|---|---|
 | id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
-| Image | `vivijure-backend:1.1.10@sha256:6bdbe03ad7653597768d55f7acbf1e01e698a21181a3d46dfb4cdd673e4da052` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
+| Image | `vivijure-backend:1.1.12@sha256:5164674342cdb841013aacc3498762ccf0322d67e306955874309071d179dde5` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
 | Pools | `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141`, `BLACKWELL_180`, `BLACKWELL_288` | `BLACKWELL_96` |
 | `workers` min / max | 0 / 12 | 0 / 10 |
 | Idle timeout | 60 s | 10 s |
@@ -46,6 +46,29 @@ settings the same. 1.1.3 honours `target_height`, which 1.0.4 ignores and runs 2
 v1.42.0 sends `target_height` by default, so rolling back under one delivers 2x against a budget priced at
 the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 11.5 s, and 720x1280 to
 1080x1920 in 6.0 s. The presigned path has not run on this image yet.
+
+**Repinning the backend endpoint (standing procedure).**
+1. Drain the pool to 0, repin by digest, then restore max 12 and idle 60 s.
+2. Wait 65 s after the release before submitting anything. Renders through the studio got `keyframe /run -> 409` in that window after the 1.1.7 repin.
+3. After a repin, every worker is cold and pulls about 24 GB from R2. Submit 2 or 3 jobs first, and wait until they run before submitting the rest. On 2026-11-06, 15 cold workers at once slowed pulls to 2.6 MiB/s and stretched cold jobs to about 20 minutes each.
+
+**Backend 1.1.12, pinned 2026-11-06 (release v36, 09:49:22Z).** A thin image (`deploy/Dockerfile.thin`) at main `ec6dd0f`, built on the
+Vultr bake box from the same `toolchain-t1@sha256:456b417bffc7d80cef7e2f93d400beda9ebbea38dcb5e4efc7676460eee4d45d`
+(no `deploy/` change since `1ac386e`). It adds #585, `multi_char.pose_spread`. Image
+`vivijure-backend:1.1.12@sha256:5164674342cdb841013aacc3498762ccf0322d67e306955874309071d179dde5`. The push digest and the GHCR read-back match.
+In the image, `orchestrator.py`, `keyframe.py`, `pipeline.py` and `contract.py` hash the same as at `ec6dd0f`, and the image holds 29 .py files, as the tree does. The CPU import smoke passed.
+Repin check: the rollout read 100% on 1.1.12, with 0 unhealthy, 65 s after the release. No render job was submitted.
+
+**Backend rollback from 1.1.12:** image
+`vivijure-backend:1.1.11@sha256:bbc525a1b22f707f64601fae89a23c8641c39ef8fd9ca2202cd170ebdfe0da6c`, idle timeout 60 s,
+max 12, same disk. Follow the repinning procedure above.
+
+**Backend 1.1.11, pinned 2026-11-06 (release v35, 09:15:47Z).** A thin image at main `69ff143`, on the same toolchain. It adds #584,
+`debug_intermediates`: a diagnostic job flag that saves the scene-lock plate beside the still. Image
+`vivijure-backend:1.1.11@sha256:bbc525a1b22f707f64601fae89a23c8641c39ef8fd9ca2202cd170ebdfe0da6c`. The push digest and the GHCR read-back match.
+`orchestrator.py`, `keyframe.py`, `pipeline.py` and `contract.py` hash the same as at `69ff143`, and the image holds 29 .py files. The import smoke passed.
+Repin check: the rollout read 100% on 1.1.11, with 0 unhealthy, 65 s after the release. No render job was submitted.
+Rollback from 1.1.11: `vivijure-backend:1.1.10@sha256:6bdbe03ad7653597768d55f7acbf1e01e698a21181a3d46dfb4cdd673e4da052`.
 
 **Backend 1.1.10, pinned 2026-11-06.** A thin image (`deploy/Dockerfile.thin`) at main `1d78182`, built on
 the Vultr bake box from the same `toolchain-t1@sha256:456b417bffc7d80cef7e2f93d400beda9ebbea38dcb5e4efc7676460eee4d45d`
