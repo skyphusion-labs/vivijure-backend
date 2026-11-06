@@ -27,6 +27,7 @@ clearing real crashes; a logging-induced one is not allowed.
 from __future__ import annotations
 
 import json
+import tempfile
 import time
 from typing import Any, Callable
 
@@ -36,6 +37,10 @@ from . import keys
 _COUNTED = ("train_done", "keyframe_done", "i2v_done", "assemble_done", "upload_done",
             "train_step", "i2v_step")
 
+# Events that carry the container's free disk, so every job records it at its start and at its end
+# (vivijure-backend#600: a worker whose model cache filled the disk failed every later job).
+_DISK_EVENTS = ("started", "complete", "error")
+
 
 class ProgressEmitter:
     """Emits a render's stage events to R2 (+ stdout + an optional RunPod hook). Single-job, single
@@ -43,8 +48,11 @@ class ProgressEmitter:
 
     def __init__(self, store, project: str, job_id: str, *,
                  on_progress: Callable[[dict], Any] | None = None,
-                 log: Callable[[str], Any] = print, clock: Callable[[], float] = time.time):
+                 log: Callable[[str], Any] = print, clock: Callable[[], float] = time.time,
+                 disk_path: str | None = None):
         self.store = store
+        # Where the job's own files live: the temp root the handler makes each job's workdir under.
+        self._disk_path = disk_path if disk_path is not None else tempfile.gettempdir()
         self.project = project
         self.job_id = str(job_id)
         self.on_progress = on_progress          # option A hook: callable(snapshot) best-effort
@@ -61,6 +69,10 @@ class ProgressEmitter:
 
     def emit(self, event: str, **fields) -> None:
         """Record one stage event and fan it out (R2 + stdout + hook), all best-effort."""
+        if event in _DISK_EVENTS and "disk_free_gb" not in fields:
+            # Best-effort: None when it cannot be measured, never a raise.
+            from .disk import free_gb
+            fields["disk_free_gb"] = free_gb(self._disk_path)
         rec = {"ts": round(self._clock(), 3), "event": event, **fields}
         self._events.append(rec)
         self._update_snapshot(rec)

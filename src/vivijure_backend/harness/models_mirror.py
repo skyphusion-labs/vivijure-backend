@@ -281,6 +281,58 @@ def mirror_cmd(src: str, dst: Path, *, skip_repos: tuple[str, ...] = (),
     return cmd
 
 
+# ----------------------------------------------------------- pull-size guard (vivijure-backend#600)
+
+# How long a `rclone size` listing may take before the guard gives up measuring. A listing is metadata only.
+SIZE_TIMEOUT_SECONDS = 120
+
+
+def size_cmd_for(copy_cmd: list[str]) -> list[str]:
+    """argv for `rclone size --json` over exactly what `copy_cmd` (a mirror_cmd argv) would copy: the same source and
+    the same --exclude and --filter rules, so the guard measures the pull that will run and not the whole remote. Pure."""
+    if len(copy_cmd) < 4 or copy_cmd[:2] != ["rclone", "copy"]:
+        raise ValueError("size_cmd_for takes a mirror_cmd argv")
+    cmd = ["rclone", "size", "--json", "--links"]
+    flags = copy_cmd[2:-2]
+    for i, arg in enumerate(flags):
+        if arg in ("--exclude", "--filter") and i + 1 < len(flags):
+            cmd += [arg, flags[i + 1]]
+    return cmd + [copy_cmd[-2]]
+
+
+def remote_bytes(cmd: list[str], env: dict) -> int | None:
+    """Bytes `rclone size --json` reports for `cmd`, or None when it cannot say (rclone failed, timed out, or printed
+    something else). None means "could not measure", never zero."""
+    try:
+        r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=SIZE_TIMEOUT_SECONDS, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return int(json.loads(r.stdout)["bytes"])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def guard_pull(leg: str, copy_cmd: list[str], renv: dict, e: dict, log: Callable[[str], None] = print) -> None:
+    """Fail a pull that cannot fit BEFORE it writes, instead of filling the disk (#600). The bytes still to pull are the
+    source's size less what the destination already holds (a copy skips identical files). Raises DiskSpaceError when
+    they do not fit with the job floor left free. A listing that cannot be measured is logged and the pull goes ahead:
+    the job-start floor and the ENOSPC handling still stand behind it, and a blind refusal would stop every pull."""
+    from .disk import GIB, check_pull_fits
+    dst = Path(copy_cmd[-1])
+    total = remote_bytes(size_cmd_for(copy_cmd), renv)
+    if total is None:
+        log(f"models_mirror: could not measure {leg!r} before the pull; pulling without the size guard.")
+        return
+    have = _dir_bytes(dst) if dst.exists() else 0
+    needed = max(0, total - have)
+    log(f"models_mirror: {leg!r} needs {needed / GIB:.1f} GiB ({total / GIB:.1f} GiB at the source, "
+        f"{have / GIB:.1f} GiB already here).")
+    check_pull_fits(leg, needed, dst, e)
+
+
 # ----------------------------------------------------------- cold-start telemetry (issue #55)
 # Cold-start staging cost was only ever measured by SSHing into live pods (the 2026-06-13 load
 # test). These helpers emit it as structured @event lines so the staging-time distribution
@@ -914,6 +966,7 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     _last_stats = stats
 
     def run_leg(name: str, cmd: list[str]) -> None:
+        guard_pull(name, cmd, renv, e, log)
         t0 = time.monotonic()
 
         def report(moved: int, planned: int) -> None:
@@ -1066,9 +1119,10 @@ def ensure_i2v_models(*, env: dict | None = None, log: Callable[[str], None] = p
     legs: list[tuple[str, float]] = []
     for repo in repos:
         log(f"models_mirror: lazy i2v pull -> mirroring {repo} from R2...")
+        cmd = mirror_cmd(f"r2:{bucket}/models/hf-cache/hub/{repo}", hub / repo)
+        guard_pull(repo, cmd, renv, e, log)
         # _run_rclone, not subprocess.run, so a stalled pull is killed (#566) instead of holding the worker.
-        legs.append((repo, _timed(
-            _run_rclone, mirror_cmd(f"r2:{bucket}/models/hf-cache/hub/{repo}", hub / repo), renv)))
+        legs.append((repo, _timed(_run_rclone, cmd, renv)))
     _reconstruct_symlinks(hf_home, log)
     sentinel.write_text(model_version + "\n")
     # Best-effort telemetry (see ensure_models): never fail a good lazy pull on a _dir_bytes walk.
@@ -1142,8 +1196,10 @@ def ensure_hub_repos(repos: tuple[str, ...], *, env: dict | None = None,
     hub.mkdir(parents=True, exist_ok=True)
     for repo in repos:
         log(f"models_mirror: hub-repo pull -> mirroring {repo} from R2...")
+        cmd = mirror_cmd(f"r2:{bucket}/models/hf-cache/hub/{repo}", hub / repo)
+        guard_pull(repo, cmd, renv, e, log)
         # _run_rclone, not subprocess.run, so a stalled pull is killed (#566) instead of holding the worker.
-        _run_rclone(mirror_cmd(f"r2:{bucket}/models/hf-cache/hub/{repo}", hub / repo), renv)
+        _run_rclone(cmd, renv)
     _reconstruct_symlinks(hf_home, log)
     log("models_mirror: hub-repo pull complete.")
     return True

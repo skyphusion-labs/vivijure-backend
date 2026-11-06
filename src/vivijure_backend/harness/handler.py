@@ -13,6 +13,7 @@ the per-shot clips plus a manifest for a separate CPU container to merge.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -892,6 +893,9 @@ def handler(job: dict) -> dict:
             from .models_mirror import start_i2v_prefetch
             start_i2v_prefetch()
 
+        # vivijure-backend#600: a disk below the floor fails here, by number, before the job writes anything.
+        from .disk import check_job_floor
+        check_job_floor(tempfile.gettempdir(), dict(os.environ))
         workdir = Path(tempfile.mkdtemp(prefix="vj-job-"))
         try:
             action = str(payload.get("action", "render"))
@@ -921,10 +925,30 @@ def handler(job: dict) -> dict:
         # _finish_deadline_degrade for why a raise here is worse than the hang it replaces.
         return _finish_deadline_degrade(expiry, project=project, job_id=job_id,
                                         store=store, on_progress=on_progress)
+    except Exception as exc:
+        from .disk import is_disk_failure
+        if not is_disk_failure(exc):
+            raise
+        return _disk_failure(exc, project=project, job_id=job_id, store=store, on_progress=on_progress)
     finally:
         quiesce = getattr(on_progress, "quiesce", None)
         if callable(quiesce):
             quiesce()
+
+
+def _disk_failure(exc: BaseException, *, project: str, job_id: str, store, on_progress) -> dict:
+    """The job's failure when the container disk is the cause (vivijure-backend#600): a pull that cannot fit, a disk
+    below the job floor, or an ENOSPC from anywhere in the job.
+
+    RETURNED, NOT RAISED, because that is the only way the RunPod SDK honours `refresh_worker`: its run_job pops
+    `error` and `refresh_worker` from a returned dict and sets `stopPod` (runpod 1.12.0 and 2.1.0,
+    serverless/modules/rp_job.py), while a raised exception takes its except branch, which never stops the pod. The
+    `error` key still fails the job, exactly as a raise does. Stopping the pod is the point: a full worker otherwise
+    fails every job it takes within seconds, and RunPod replaces a stopped worker with a fresh disk."""
+    from .disk import DiskSpaceError
+    reason = str(exc) if isinstance(exc, DiskSpaceError) else f"worker disk full: {exc}"
+    ProgressEmitter(store, project, job_id, on_progress=on_progress).error("disk", reason)
+    return {"error": f"{reason}; this worker is being replaced", "refresh_worker": True}
 
 
 def _runpod_progress_hook(job: dict):

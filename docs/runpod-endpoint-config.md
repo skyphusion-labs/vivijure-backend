@@ -22,7 +22,7 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 | Idle timeout | 60 s | 10 s |
 | Scaler | `QUEUE_DELAY` 4 | `QUEUE_DELAY` 4 |
 | FlashBoot | on | on |
-| Container disk | 80 GB | 40 GB |
+| Container disk | 300 GB (read 2026-11-06, see below) | 40 GB |
 | Mounts | none | none |
 | Execution timeout | 3600 s | 900 s |
 | Min CUDA | 12.8 | 12.0 |
@@ -32,8 +32,28 @@ Backend env: `HF_HOME=/opt/models/hf-cache`, `VJ_MODELS_ROOT=/opt/models`, `VJ_M
 still sets them, and nothing is mounted there, so the worker logs that the volume is not mounted and
 takes the R2 mirror.
 
-**Why 80 GB.** A stills job pulls 26.22 GB from R2 (`mirror_complete total_bytes`). Six jobs on two
-80 GB workers ran with no ENOSPC. Below 80 GB is untested.
+**Why the disk is 300 GB (vivijure-backend#600).** The backend container disk read 80 GB until 2026-11-06, when
+one worker filled it and failed every later job within seconds on ENOSPC. It was raised that day; `get-endpoint`
+on `xe5d1ivs40ohjo` read `disk: 300` on 2026-11-06. The arithmetic, in GiB (80 GB is 74.5 GiB):
+
+| What a worker may hold | GiB | Source |
+|---|---|---|
+| The image (stills weights base, #591) | about 29 | the image pull, see the 1.1.16 notes below |
+| The stills set, on an image that does not carry it | 24.0 | `stills_manifest.total_bytes()`, 25,750,958,201 bytes |
+| The Wan i2v set, pulled on the first i2v-capable job | about 114 | the `_wants_i2v_prefetch` record in `harness/handler.py` |
+| The job's own I/O floor | 4 | `harness/disk.py` `DEFAULT_MIN_FREE_GB` |
+
+The Wan set alone (114 GiB) does not fit in 80 GB (74.5 GiB), so on the old disk one i2v-capable job filled the
+worker. Everything together is about 171 GiB, which fits in 300 GB (279 GiB) with room to spare. The model cache
+persists across jobs on purpose, so a worker that has run every kind of job holds all of it.
+
+Since #600 a too-small disk fails loudly instead of silently: a pull that cannot fit fails its job by number
+before it writes, a disk below 4 GiB free fails a job before it starts (`VJ_MIN_FREE_GB` sets the floor), and
+either, or any ENOSPC, returns `refresh_worker` so RunPod replaces the worker. Every job's `started`, `complete`
+and `error` progress events carry `disk_free_gb`.
+
+**Before: why 80 GB.** A stills job pulls 26.22 GB from R2 (`mirror_complete total_bytes`). Six jobs on two
+80 GB workers ran with no ENOSPC. That held for stills-only workers and not for a worker that also took an i2v job.
 
 **Why 180 s idle (historical).** The live endpoint reads 60 s idle and max 12 workers on 2026-11-04;
 this section explains the earlier 180 s value. Measured on the same image: a cold keyframe cost $0.13 to $0.23 of worker time and
