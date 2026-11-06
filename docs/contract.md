@@ -49,6 +49,7 @@ uniformly to every scene's prompt. A storyboard with no scenes is rejected.
 | `duration_seconds` | float \| null | null | Optional total duration hint. |
 | `clip_seconds` | float \| null | null | Optional per-clip duration hint. |
 | `style_prefix` | str | `""` | Prepended to every scene's prompt. |
+| `setting` | str | `""` | vivijure-cf#1145. Where the film takes place. The keyframe prompt says it right after a shot's own prompt when neither that prompt nor `style_prefix` already contains it, and only if it still fits after the character descriptions. Empty means the shot prompt alone decides the place, as before. |
 | `style_category` | str | `"None"` | Normalized to the literal `"None"` when absent. |
 | `style_preset` | str | `"None"` | Normalized to the literal `"None"` when absent. |
 | `use_characters` | list[str] | `[]` | Slots in play (subset of A-D); drives LoRA planning. |

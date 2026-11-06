@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .contract import Cast, Scene, Storyboard
+from .prompt_chunks import CLIP_CHUNK_TOKENS, PROMPT_CHUNKS, encode_long_prompt
 
 # Anti-bleed defaults: a character LoRA pushed hard in a shared frame is exactly what bleeds, so
 # the per-slot scales are deliberately moderate and the identity comes mostly from the masked
@@ -132,12 +133,14 @@ def slot_trigger(cast: Cast, slot: str) -> str:
     return (char.name if char and char.name else slot)
 
 
-# SDXL's text encoders keep 77 tokens including start and end, so 75 are ours. The pipeline has no way
-# past that here, so anything over it is silently dropped from the end of the prompt.
-PROMPT_TOKEN_BUDGET = 75
+# SDXL's text encoders read 77 tokens including start and end, so 75 are ours per chunk. The prompt is
+# encoded in PROMPT_CHUNKS chunks (prompt_chunks.py, vivijure-cf#1143), so this is the whole budget.
+# Past it, the encoder drops the tail and says so in a keyframe.prompt_cut event.
+PROMPT_TOKEN_BUDGET = CLIP_CHUNK_TOKENS * PROMPT_CHUNKS
 # The estimate below is not the real tokenizer, which is not on this CPU path. This margin absorbs the
-# difference. Measured against CLIP on the vivijure-cf#1147 boards: it estimated low by at most 7.
-PROMPT_TOKEN_MARGIN = 8
+# difference. Measured against CLIP on the vivijure-cf#1147 boards: it estimated low by at most 7 in 75,
+# so the margin scales with the budget.
+PROMPT_TOKEN_MARGIN = 8 * PROMPT_CHUNKS
 
 
 def estimate_tokens(text: str) -> int:
@@ -181,21 +184,58 @@ _PLACE_GARMENT = re.compile(
 PLATE_SOLO = "solo"
 
 
+_COUNT_WORDS = {2: "two", 3: "three", 4: "four"}
+
+
+def adult_clause(names: list[str], *, named: bool) -> str:
+    """The shot's statement that every person in it is an adult (vivijure-cf#1143). It is the safety
+    clause, so it is said ONCE per shot for everyone, placed before anything the budget can cut, and never
+    fitted away. Stating it per shot instead of per description is also what frees the two-person budget.
+
+    `named` is the identity pass, which names each person (the names are its LoRA triggers). The plate has
+    no triggers, so it counts them. An empty shot has no clause."""
+    n = len(names)
+    if n == 0:
+        return ""
+    if not named:
+        return "an adult" if n == 1 else f"{_COUNT_WORDS.get(n, str(n))} adults"
+    if n == 1:
+        return f"{names[0]}, an adult"
+    listed = ", ".join(names[:-1]) + " and " + names[-1]
+    return f"{listed}, both adults" if n == 2 else f"{listed}, all adults"
+
+
+def setting_for(scene: Scene, storyboard: Storyboard) -> str:
+    """The film's setting for this shot, or "" when there is none, or the shot prompt or the style prefix
+    already says it (vivijure-cf#1145). A shot that names its own place keeps its own place."""
+    setting = (storyboard.setting or "").strip()
+    if not setting:
+        return ""
+    low = setting.lower()
+    if low in (scene.prompt or "").lower() or low in (storyboard.style_prefix or "").lower():
+        return ""
+    return setting
+
+
 def drop_place_from_garment(text: str) -> str:
     """"charcoal field jacket" -> "charcoal jacket". A place the prompt means to be in is untouched."""
     return _PLACE_GARMENT.sub(r"\1", text or "")
 
 
-def clause_rank(clause: str) -> int:
-    """0 is kept first. A clause naming a garment or hair outranks a mood word in the same clause."""
+def clause_rank(clause: str, *, adult_stated: bool = False) -> int:
+    """0 is kept first. A clause naming a garment or hair outranks a mood word in the same clause.
+
+    `adult_stated`: the shot already says everyone is an adult (adult_clause), so a description's own age
+    clause is a look detail, ranked after hair and clothes (vivijure-cf#1143)."""
     if _ADULT_CLAUSE.search(clause):
-        return 0
+        return 2 if adult_stated else 0
     if _LOOK_CLAUSE.search(clause):
         return 1
     return 3 if _MOOD_CLAUSE.search(clause) else 2
 
 
-def fit_description(text: str, budget: int, *, name: str = "", scene_prompt: str = "", max_rank: int = 3) -> str:
+def fit_description(text: str, budget: int, *, name: str = "", scene_prompt: str = "", max_rank: int = 3,
+                    adult_stated: bool = False) -> str:
     """The clauses of a description that fit `budget` estimated tokens, in their written order.
 
     The budget is spent by clause_rank, so a mood phrase can never cost a garment. A clause that
@@ -207,11 +247,11 @@ def fit_description(text: str, budget: int, *, name: str = "", scene_prompt: str
     usable = [
         (i, c) for i, c in enumerate(clauses)
         if c and c.lower() != name.lower() and c.lower() not in (scene_prompt or "").lower()
-        and not _DIRECTION_CLAUSE.search(c) and clause_rank(c) <= max_rank
+        and not _DIRECTION_CLAUSE.search(c) and clause_rank(c, adult_stated=adult_stated) <= max_rank
     ]
     kept: list[tuple[int, str]] = []
     used = 0
-    for i, clause in sorted(usable, key=lambda item: (clause_rank(item[1]), item[0])):
+    for i, clause in sorted(usable, key=lambda item: (clause_rank(item[1], adult_stated=adult_stated), item[0])):
         for form in (clause, clause.split(" over ")[0]):  # a jacket without what is under it still reads
             cost = estimate_tokens(form) + 1  # the joining comma
             if used + cost <= budget:
@@ -238,35 +278,68 @@ def build_prompt(scene: Scene, cast: Cast, storyboard: Storyboard, *,
     identity runs (vivijure-cf#1147, seen by rendering the plate alone at the same seed). It gets
     only the age, hair and garments, because the whole description makes a head-and-shoulders
     portrait, and the scene is said again after them, because a person described last poses for the
-    camera instead of doing the action. The repeat comes last, so the 77 token limit only ever cuts
-    the repeat. Pieces are comma-joined and de-duplicated of empty fragments so a missing style
-    or prompt never leaves a dangling comma.
+    camera instead of doing the action. The repeat comes last, so the budget only ever cuts the
+    repeat. Pieces are comma-joined and de-duplicated of empty fragments so a missing style or
+    prompt never leaves a dangling comma.
 
-    Descriptions come LAST and are FITTED to what is left of the token budget, split evenly across
-    the shot's slots. Everything before them outranks them, and the lock clause above all: it is
-    what keeps a person in the scene (vivijure-cf#1147). The even split is what stops the first
-    slot from taking the whole budget on a two-person shot."""
-    triggers = ", ".join(slot_trigger(cast, s) for s in scene.character_slots) if include_triggers else ""
-    parts = [storyboard.style_prefix, scene.prompt, triggers]
+    Every shot with people says once that they are all adults (adult_clause, vivijure-cf#1143). In
+    the identity pass that clause names them, and the names are the LoRA triggers, so it stands where
+    the triggers stood. It is never fitted away: if a long style and scene would push it past the
+    budget, it moves ahead of the scene.
+
+    Descriptions come LAST and are FITTED to what is left of the token budget (two 75-token chunks,
+    prompt_chunks.py), split evenly across the shot's slots. Everything before them outranks them,
+    and the lock clause above all: it is what keeps a person in the scene (vivijure-cf#1147). The even
+    split is what stops the first slot from taking the whole budget on a two-person shot. On a
+    two-person shot a description's own age clause ranks after hair and clothes, because the shot
+    already says both are adults.
+
+    The film's `setting` (vivijure-cf#1145) follows the shot's own prompt when the shot does not say
+    it. It is the lowest priority: said only if it still fits after the descriptions."""
+    names = [slot_trigger(cast, s) for s in scene.character_slots]
+    multi = len(names) >= 2
+    # The identity pass names each person once, in the clause that also says they are adults; the names are
+    # the LoRA triggers. The plate has no triggers, so its clause counts people instead.
+    adult = adult_clause(names, named=include_triggers)
+    # The clause sits where the triggers always sat, after the scene. If a long style and a long scene would
+    # push it past the budget, it moves ahead of the scene instead: the safety clause is never the part cut.
+    early = estimate_tokens(_join_prompt([storyboard.style_prefix, scene.prompt, adult])) > (
+        PROMPT_TOKEN_BUDGET - PROMPT_TOKEN_MARGIN)
+    tail = [] if early else [adult]
     if storyboard.style_preset and storyboard.style_preset != "None":
-        parts.append(storyboard.style_preset)
+        tail.append(storyboard.style_preset)
     if lock_clause:
-        parts.append(PASS_B_LOCK_CLAUSE)
+        tail.append(PASS_B_LOCK_CLAUSE)
     if not include_triggers and len(scene.character_slots) == 1:
-        parts.append(PLATE_SOLO)
-    prompt = drop_place_from_garment(_join_prompt(parts))
+        tail.append(PLATE_SOLO)
+    setting = setting_for(scene, storyboard)
+
+    def head(with_setting: bool) -> str:
+        parts = [storyboard.style_prefix, adult if early else "", scene.prompt, setting if with_setting else "", *tail]
+        return drop_place_from_garment(_join_prompt(parts))
+
+    prompt = head(False)
     wanted = [(s, drop_place_from_garment(slot_description(cast, s, scene.prompt))) for s in scene.character_slots]
     wanted = [(s, d) for s, d in wanted if d]
-    if not wanted:
-        return prompt
-    room = PROMPT_TOKEN_BUDGET - PROMPT_TOKEN_MARGIN - estimate_tokens(prompt)
-    share = room // len(wanted)
-    if share <= 0:
-        return prompt
-    max_rank = 3 if include_triggers else 1
-    fitted = [fit_description(d, share, name=slot_trigger(cast, s), scene_prompt=scene.prompt, max_rank=max_rank)
-              for s, d in wanted]
-    if not include_triggers:
+    fitted: list[str] = []
+    if wanted:
+        room = PROMPT_TOKEN_BUDGET - PROMPT_TOKEN_MARGIN - estimate_tokens(prompt)
+        share = room // len(wanted)
+        if share > 0:
+            # In a plate, rank 1 and above only (age, hair, garments). With the adult clause said once for
+            # the shot, a two-person plate drops the per-person age for hair and clothes.
+            max_rank = 3 if include_triggers else 1
+            fitted = [fit_description(d, share, name=slot_trigger(cast, s), scene_prompt=scene.prompt,
+                                      max_rank=max_rank, adult_stated=multi)
+                      for s, d in wanted]
+            fitted = [f for f in fitted if f]
+    # The setting is the lowest priority after the scene and the descriptions: it is said only if it
+    # still fits, so it can never cost a person their hair or clothes (vivijure-cf#1145).
+    if setting:
+        with_setting = head(True)
+        if estimate_tokens(_join_prompt([with_setting, *fitted])) <= PROMPT_TOKEN_BUDGET - PROMPT_TOKEN_MARGIN:
+            prompt = with_setting
+    if not include_triggers and scene.character_slots:
         return drop_place_from_garment(_join_prompt([prompt, *fitted, scene.prompt]))
     return _join_prompt([prompt, *fitted])
 
@@ -493,7 +566,7 @@ def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image):
         control = _blank_control(cfg.width, cfg.height)
         cn_scale = 0.0
     plate = pipe(
-        prompt=plate_spec.prompt, negative_prompt=plate_spec.negative_prompt,
+        **encode_long_prompt(pipe, plate_spec.prompt, plate_spec.negative_prompt, shot_id=scene.id or "shot"),
         num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
         height=cfg.height, width=cfg.width, generator=generator,
         image=control, controlnet_conditioning_scale=cn_scale,
@@ -539,7 +612,7 @@ def _pass_b_single(pipe, ident, scene, cfg, loras, generator, canny, scale, crop
         identity_path = single_identity_path(slot, has_ref_image=False,
                                              has_lora=bool(slot and slot in loras))
     image = pipe(
-        prompt=ident.prompt, negative_prompt=ident.negative_prompt,
+        **encode_long_prompt(pipe, ident.prompt, ident.negative_prompt, shot_id=scene.id or "shot"),
         num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
         height=cfg.height, width=cfg.width, generator=generator,
         image=canny, controlnet_conditioning_scale=cfg.canny_scale,
@@ -570,7 +643,7 @@ def _pass_b_regional(pipe, ident, scene, cfg, loras, generator, canny, scale, cr
         ip_kw = {}
         identity_path = "lora_only" if any(s in loras for s in slots) else "none"
     image = pipe(
-        prompt=ident.prompt, negative_prompt=ident.negative_prompt,
+        **encode_long_prompt(pipe, ident.prompt, ident.negative_prompt, shot_id=scene.id or "shot"),
         num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
         height=h, width=w, generator=generator,
         image=canny, controlnet_conditioning_scale=cfg.canny_scale,
@@ -641,7 +714,7 @@ def _render_single(pipe, prompt, scene, cast, cfg, loras, generator):
     identity_path = single_identity_path(slot, has_ref_image=bool(ip_images),
                                          has_lora=bool(slot and slot in loras))
     image = pipe(
-        prompt=prompt, negative_prompt=cfg.negative_prompt,
+        **encode_long_prompt(pipe, prompt, cfg.negative_prompt, shot_id=scene.id or "shot"),
         num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
         height=cfg.height, width=cfg.width, generator=generator,
         image=_blank_control(cfg.width, cfg.height),
@@ -688,7 +761,7 @@ def _render_regional(pipe, prompt, scene, cast, cfg, loras, generator, pose_imag
         control = _blank_control(w, h)
         cn_scale = 0.0
     image = pipe(
-        prompt=prompt, negative_prompt=cfg.negative_prompt,
+        **encode_long_prompt(pipe, prompt, cfg.negative_prompt, shot_id=scene.id or "shot"),
         num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
         height=h, width=w, generator=generator,
         ip_adapter_image=ip_images,
@@ -737,7 +810,7 @@ def _render_instantid(server, prompt, scene, cast, cfg, loras, slot):
         proc.id_embeds = id_embeds
     try:
         return pipe(
-            prompt=prompt, negative_prompt=cfg.negative_prompt,
+            **encode_long_prompt(pipe, prompt, cfg.negative_prompt, shot_id=scene.id or "shot"),
             num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
             height=cfg.height, width=cfg.width, generator=generator,
         ).images[0], "instantid"
