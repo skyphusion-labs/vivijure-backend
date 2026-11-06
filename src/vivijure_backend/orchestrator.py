@@ -33,7 +33,7 @@ KEYFRAME_ENGINE_VERSION = "kf-2026-11-06-chunked"
 # per-slot scales + pose conditioning that hold two identities apart).
 MULTI_CHAR_DEFAULTS: dict[str, object] = {
     "engine": "regional",
-    "pose_conditioning": True,
+    "pose_conditioning": None,  # per-path default: regional on, a guarded scene-lock plate off (#596)
     "lora_scale_per_slot": 0.35,
     "ip_adapter_scale_per_slot": 0.7,
     "max_slots": 2,
@@ -166,7 +166,9 @@ def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard
         "lora_scale": kc.lora_scale,
         "lora_scale_per_slot": mc.lora_scale_per_slot,
         "ip_scale": mc.ip_adapter_scale_per_slot,
-        "pose_cond": mc.pose_conditioning,
+        # Unset reads as on, its meaning before #596, so this key keeps every existing hash; where the new
+        # default changes a drawing, `plate_pose` below says so.
+        "pose_cond": mc.pose_conditioning is not False,
         "cn_scale": mc.controlnet_pose_scale,
         "gutter": mc.region_gutter,
         "max_slots": mc.max_slots,
@@ -189,6 +191,14 @@ def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard
     guarded = scene is None or 2 <= len(scene.character_slots) <= mc.max_slots
     if kc.plate_count_retries and guarded:
         payload["plate_count_retries"] = kc.plate_count_retries
+    # backend#596: a guarded scene-lock plate for two-plus people now draws without the pose skeleton when the
+    # job leaves pose_conditioning unset. Only those stills change, so only they get this key and redraw; the
+    # rule is keyframe.plate_pose_default_off, the same function the renderer reads.
+    from .keyframe import plate_pose_default_off
+    if kc.scene_lock and plate_pose_default_off(
+            None if scene is None else len(scene.character_slots), max_slots=mc.max_slots,
+            pose_conditioning=mc.pose_conditioning, plate_count_retries=kc.plate_count_retries):
+        payload["plate_pose"] = "off"
     if scene is not None and storyboard is not None:
         from .keyframe import DEFAULT_NEGATIVE, build_prompt, scene_lock_negative
 

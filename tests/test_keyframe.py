@@ -196,7 +196,7 @@ def test_anti_bleed_defaults():
     assert p.lora_scale == DEFAULT_LORA_SCALE == 0.3
     assert p.lora_scale_per_slot == DEFAULT_LORA_SCALE_PER_SLOT == 0.35
     assert p.ip_adapter_scale == DEFAULT_IP_ADAPTER_SCALE == 0.7
-    assert p.pose_conditioning is True
+    assert p.pose_conditioning is None  # per-path default (backend#596): see test_plate_pose_default_596
     assert p.max_slots == 2
     assert p.scene_lock is True
     assert p.canny_scale == DEFAULT_CANNY_SCALE == 0.70
@@ -496,8 +496,9 @@ def test_plan_two_passes_for_character_shot():
 
 
 def test_plan_regional_pass_a_is_pose_pass_b_is_canny_at_slot_scale():
+    # With the pose asked for explicitly; the default plate draws without it (backend#596).
     sc = Scene.from_dict({"id": "s", "prompt": "a diner", "character_slots": ["A", "B"]}, 0)
-    cfg = KeyframeParams()
+    cfg = KeyframeParams(pose_conditioning=True)
     plate, ident = plan_keyframe_passes(sc, CAST, _sb(), cfg)
     assert plate.controlnet == "pose"
     assert ident.controlnet == "canny"

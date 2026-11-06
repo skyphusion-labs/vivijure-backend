@@ -92,7 +92,7 @@ single-face by nature), so the regional path stays masked-IP-Adapter only.
 | Field | Type | Default | Range | Notes |
 |---|---|---|---|---|
 | `regional` | bool | true | -- | Use the regional no-bleed engine for multi-char shots. |
-| `pose_conditioning` | bool | true | -- | OpenPose ControlNet to separate bodies. |
+| `pose_conditioning` | bool or unset | unset | -- | OpenPose ControlNet to separate bodies. Unset means each path's default: the plain regional path (scene lock off) draws under the pose skeleton; a scene-lock plate for two-plus people draws WITHOUT it while the plate count guard runs, and with it when `plate_count_retries` is 0 (backend#596, measured on vivijure-cf#1281). `true` or `false` sets both paths. |
 | `lora_scale_per_slot` | float | 0.35 | 0-2 | Regional only. Was 0.7 live for both paths (the studio-portrait defect). |
 | `ip_adapter_scale_per_slot` | float | 0.7 | 0-1 | Per-region masked IP-Adapter identity pull. |
 | `max_slots` | int | 2 | 1-4 | Characters the no-bleed path supports at once. |

@@ -47,7 +47,7 @@ def test_multi_char_scene_gets_anti_bleed_defaults():
     assert single.multi_char == {}
     assert multi.is_multi_character
     assert multi.multi_char == MULTI_CHAR_DEFAULTS
-    assert multi.multi_char["pose_conditioning"] is True
+    assert multi.multi_char["pose_conditioning"] is None  # per-path default (backend#596)
 
 
 def test_i2v_tier_follows_quality():

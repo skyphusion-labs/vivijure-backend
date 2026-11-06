@@ -67,9 +67,9 @@ class _CountingServer(_Server):
         return self.analyzer
 
 
-def _run(tmp_path, name, *, retries, counts=(), slots=("A", "B"), save=False, seed=110501):
+def _run(tmp_path, name, *, retries, counts=(), slots=("A", "B"), save=False, seed=110501, pose=None):
     params = kf.KeyframeParams(width=SW, height=SH, identity_method="ip_adapter", seed=seed,
-                               plate_count_retries=retries)
+                               plate_count_retries=retries, pose_conditioning=pose)
     pipe = _DistinctPipe(SW, SH)
     server = _CountingServer(pipe, counts)
     res = kf.render_keyframe(_scene(slots), CAST, SB, server, tmp_path / name / "shot_03.png", params=params,
@@ -139,8 +139,10 @@ def test_one_person_is_never_counted(tmp_path):
 
 @pytest.mark.usefixtures("gpu_fakes")
 def test_a_clean_first_plate_draws_exactly_the_guard_off_still(tmp_path):
-    off, pipe_off, _ = _run(tmp_path, "off", retries=0)
-    on, pipe_on, server = _run(tmp_path, "on", retries=3, counts=[2])
+    # The pose is pinned on both sides: unset, turning the guard off also restores the plate's pose (backend#596),
+    # which is a different property, held by test_plate_pose_default_596.
+    off, pipe_off, _ = _run(tmp_path, "off", retries=0, pose=True)
+    on, pipe_on, server = _run(tmp_path, "on", retries=3, counts=[2], pose=True)
     assert [_call_fingerprint(c) for c in pipe_on.calls] == [_call_fingerprint(c) for c in pipe_off.calls]
     assert on.path.read_bytes() == off.path.read_bytes()
     assert on.plate_count == {"expected": 2, "faces": [2], "chosen": 0, "clean": True, "retries": 3}

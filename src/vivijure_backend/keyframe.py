@@ -94,7 +94,9 @@ class KeyframeParams:
     # Two-person shots ignore this and stay on the masked IP-Adapter regional path.
     identity_method: str = "instantid"
     instantid_ip_adapter_scale: float = 0.8  # InstantID face-embedding (image-proj) scale
-    pose_conditioning: bool = True   # ControlNet-OpenPose to separate bodies in multi-char shots
+    # ControlNet-OpenPose to separate bodies in multi-char shots. None = each path's default (backend#596):
+    # on for the plain regional path, off for a guarded scene-lock plate. See plate_pose_on / regional_pose_on.
+    pose_conditioning: bool | None = None
     controlnet_pose_scale: float = 0.55  # OpenPose ControlNet conditioning scale (regional path)
     region_gutter: int = 64          # px dead band between regional masks so they do not seam-blend
     pose_spread: float = 0.0         # 0 = figures at region centres; else centre-to-centre spacing (cf#1143)
@@ -147,6 +149,42 @@ def plate_count_retries_for(scene: Scene, cfg: KeyframeParams) -> int:
     if engine_for(scene, cfg) != "regional":
         return 0
     return max(0, min(3, int(cfg.plate_count_retries)))
+
+
+def plate_pose_default_off(people: int | None, *, max_slots: int, pose_conditioning: bool | None,
+                           plate_count_retries: int) -> bool:
+    """True iff the backend#596 default takes the pose skeleton OFF a scene-lock plate that drew under it before.
+
+    Measured on vivijure-cf#1281 (18 jobs, one board, 6 seeds): under the fixed standing skeleton the pair posed
+    for the camera instead of acting, 2 of 6 held the action with the right people; with no skeleton, 5 of 6,
+    and the plate count guard caught every third person. So the default holds only while the guard runs: with
+    the guard off and the pose unset, the plate keeps its skeleton, and "pose off, guard off" is never a default.
+    An explicit `pose_conditioning` is the job's own choice and never counts as the default.
+
+    `people` is the shot's character count, or None for a config-only reuse hash (then it applies whenever the
+    rest holds, as for plate_count_retries). Only 2..max_slots people draw a pose at all. Pure."""
+    if pose_conditioning is not None:
+        return False
+    if people is not None and not (2 <= people <= max_slots):
+        return False
+    return max(0, min(3, int(plate_count_retries))) > 0
+
+
+def plate_pose_on(scene: Scene, cfg: KeyframeParams) -> bool:
+    """Whether a scene-lock Pass A plate draws under the pose skeleton. Only a two-plus-person (regional) shot
+    ever does; an explicit `pose_conditioning` wins; unset follows `plate_pose_default_off`. Pure."""
+    if engine_for(scene, cfg) != "regional":
+        return False
+    if cfg.pose_conditioning is not None:
+        return bool(cfg.pose_conditioning)
+    return not plate_pose_default_off(len(scene.character_slots), max_slots=cfg.max_slots,
+                                      pose_conditioning=None, plate_count_retries=cfg.plate_count_retries)
+
+
+def regional_pose_on(cfg: KeyframeParams) -> bool:
+    """Whether the plain regional path (scene lock off) draws under the pose skeleton: on unless a job turns it
+    off. backend#596 changed only the scene-lock plate; this path was not measured. Pure."""
+    return cfg.pose_conditioning is not False
 
 
 def plate_retry_seed(seed: int, attempt: int) -> int:
@@ -467,7 +505,7 @@ def plan_keyframe_passes(scene: Scene, cast: Cast, storyboard: Storyboard,
     engine = engine_for(scene, cfg)
     negative = scene_lock_negative(scene, cfg.negative_prompt)
     plate_prompt = build_prompt(scene, cast, storyboard, include_triggers=False)
-    plate_cn = "pose" if (engine == "regional" and cfg.pose_conditioning) else "none"
+    plate_cn = "pose" if plate_pose_on(scene, cfg) else "none"
     plate = KeyframePass(
         name="plate", prompt=plate_prompt, negative_prompt=negative,
         bind_loras=False, lora_scale=0.0, use_ip_adapter=False, face_crop=False,
@@ -986,7 +1024,7 @@ def _render_regional(pipe, prompt, scene, cast, cfg, loras, generator, pose_imag
     # "older Aria" collapse). An explicit pose_image overrides the generated skeleton. With
     # pose_conditioning off, a blank control image at scale 0.0 makes the ControlNet inert and the
     # path degrades to masked-IP-Adapter only.
-    if cfg.pose_conditioning:
+    if regional_pose_on(cfg):
         if pose_image is not None:
             from PIL import Image
             control = Image.open(pose_image).convert("RGB").resize((w, h))
