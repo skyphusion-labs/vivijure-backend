@@ -82,6 +82,8 @@ class KeyframeParams:
     lora_scale: float = DEFAULT_LORA_SCALE          # single-char; regional uses lora_scale_per_slot
     lora_scale_per_slot: float = DEFAULT_LORA_SCALE_PER_SLOT
     ip_adapter_scale: float = DEFAULT_IP_ADAPTER_SCALE
+    # Two-person paths only: the per-region identity scale. None = ip_adapter_scale (vivijure-backend#599).
+    ip_adapter_scale_per_slot: float | None = None
     scene_lock: bool = True          # Pass A scene plate, Pass B canny + face-crop; off is a debug hatch
     canny_scale: float = DEFAULT_CANNY_SCALE
     face_crop_pad: float = DEFAULT_FACE_CROP_PAD  # Pass B identity crop padding (cf#1143)
@@ -524,6 +526,15 @@ def plan_keyframe_passes(scene: Scene, cast: Cast, storyboard: Storyboard,
     return [plate, identity]
 
 
+def regional_ip_adapter_scale(cfg: KeyframeParams) -> float:
+    """The masked IP-Adapter identity scale each region gets on a two-person draw (scene-lock Pass B and the plain
+    regional render): the per-slot value when a job sets it, else the keyframe ip_adapter_scale, which is what
+    both paths drew at before the per-slot field reached the renderer (vivijure-backend#599). Pure."""
+    if cfg.ip_adapter_scale_per_slot is None:
+        return cfg.ip_adapter_scale
+    return max(0.0, min(1.0, float(cfg.ip_adapter_scale_per_slot)))
+
+
 def plate_ip_adapter_scale_for(scene: Scene, cfg: KeyframeParams) -> float:
     """The scale at which Pass A takes each person's whole cast portrait, confined to their region, or 0.0 for off.
 
@@ -882,7 +893,7 @@ def _pass_b_regional(pipe, ident, scene, cfg, loras, generator, canny, scale, cr
     _bind_loras(pipe, {s: loras[s] for s in slots if s in loras}, scale, few_step=cfg.few_step)
     if any_face:
         _ensure_ip_adapter(pipe, n=len(slots))
-        scales = [cfg.ip_adapter_scale if c is not None else 0.0 for c in crops]
+        scales = [regional_ip_adapter_scale(cfg) if c is not None else 0.0 for c in crops]
         pipe.set_ip_adapter_scale(scales)
         from PIL import Image
         ip_images = [c if c is not None else Image.new("RGB", (64, 64), (0, 0, 0)) for c in crops]
@@ -1014,7 +1025,7 @@ def _render_regional(pipe, prompt, scene, cast, cfg, loras, generator, pose_imag
 
     # One IP-Adapter image per slot (its refs), each confined to its region's mask.
     _ensure_ip_adapter(pipe, n=len(slots))
-    pipe.set_ip_adapter_scale([cfg.ip_adapter_scale] * len(slots))
+    pipe.set_ip_adapter_scale([regional_ip_adapter_scale(cfg)] * len(slots))
     ip_images = [_ref_images(cast, s, count=1)[0] for s in slots]
     masks = IPAdapterMaskProcessor().preprocess(
         [_box_mask(w, h, b) for b in boxes], height=h, width=w)

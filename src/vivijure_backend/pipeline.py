@@ -59,7 +59,8 @@ def keyframe_params_from(config: RenderConfig) -> KeyframeParams:
         scheduler=kc.scheduler.value,              # ddim_trailing on the few-step path, a solver on final
         lora_scale=kc.lora_scale,                  # single-char only; must not read lora_scale_per_slot
         lora_scale_per_slot=mc.lora_scale_per_slot,
-        ip_adapter_scale=kc.ip_adapter_scale,      # single-char field; multi-char path uses mc.ip_adapter_scale_per_slot via region override
+        ip_adapter_scale=kc.ip_adapter_scale,      # single-char, and the two-person default (vivijure-backend#599)
+        ip_adapter_scale_per_slot=mc.ip_adapter_scale_per_slot,  # two-person override; None = ip_adapter_scale
         identity_method=kc.identity_method.value,  # one person: instantid (default) or ip_adapter
         instantid_ip_adapter_scale=kc.instantid_ip_adapter_scale,
         pose_conditioning=mc.pose_conditioning,

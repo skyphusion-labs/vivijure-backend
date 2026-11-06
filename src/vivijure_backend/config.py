@@ -48,6 +48,17 @@ def _clamp(value: Any, lo: float, hi: float, default: float) -> float:
     return max(lo, min(hi, v))
 
 
+def _clamp_opt(value: Any, lo: float, hi: float) -> float | None:
+    """As `_clamp`, for a knob whose absence means something: None (absent, null or junk) stays None."""
+    if value is None:
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(lo, min(hi, v))
+
+
 def _clamp_int(value: Any, lo: int, hi: int, default: int) -> int:
     return int(_clamp(value, lo, hi, default))
 
@@ -128,7 +139,7 @@ class MultiCharConfig:
     nature, so the regional path stays masked-IP-Adapter only.
 
     Defaults mirror `orchestrator.MULTI_CHAR_DEFAULTS` (engine=regional, pose_conditioning=None,
-    lora_scale_per_slot=0.35, ip_adapter_scale_per_slot=0.7, max_slots=2).
+    lora_scale_per_slot=0.35, ip_adapter_scale_per_slot=None, max_slots=2).
 
     `pose_conditioning` has THREE states (backend#596). None, the default, means each path's own default: the
     plain regional path draws under the pose skeleton, and a scene-lock plate for two-plus people draws without
@@ -136,7 +147,10 @@ class MultiCharConfig:
     paths, which is how a job turns the plate's pose back on."""
     pose_conditioning: bool | None = None     # OpenPose ControlNet to separate bodies; None = per-path default
     lora_scale_per_slot: float = 0.35         # 0..2; regional only (single-char reads KeyframeConfig.lora_scale)
-    ip_adapter_scale_per_slot: float = 0.7    # 0..1; per-region masked IP-Adapter identity pull
+    # 0..1; the per-region masked IP-Adapter identity pull on both two-person paths (scene-lock Pass B and the plain
+    # regional render). None, the default, means KeyframeConfig.ip_adapter_scale, which is what both paths drew at
+    # before this field reached the renderer (vivijure-backend#599), so an unset job draws and hashes as before.
+    ip_adapter_scale_per_slot: float | None = None
     max_slots: int = 2                        # 1..4; characters the no-bleed path supports at once
     controlnet_pose_scale: float = 0.55       # 0..1.5; OpenPose ControlNet conditioning scale
     region_gutter: int = 64                   # 0..256 px dead band between regional masks (anti seam-blend)
@@ -153,7 +167,8 @@ class MultiCharConfig:
             pose_conditioning=(base.pose_conditioning if d.get("pose_conditioning") is None
                                else bool(d.get("pose_conditioning"))),
             lora_scale_per_slot=_clamp(d.get("lora_scale_per_slot"), 0.0, 2.0, base.lora_scale_per_slot),
-            ip_adapter_scale_per_slot=_clamp(d.get("ip_adapter_scale_per_slot"), 0.0, 1.0, base.ip_adapter_scale_per_slot),
+            # Absent, null or junk leaves it unset (the keyframe scale); a number is clamped like every other knob.
+            ip_adapter_scale_per_slot=_clamp_opt(d.get("ip_adapter_scale_per_slot"), 0.0, 1.0),
             max_slots=_clamp_int(d.get("max_slots"), 1, 4, base.max_slots),
             controlnet_pose_scale=_clamp(d.get("controlnet_pose_scale"), 0.0, 1.5, base.controlnet_pose_scale),
             region_gutter=_clamp_int(d.get("region_gutter"), 0, 256, base.region_gutter),
