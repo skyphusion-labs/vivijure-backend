@@ -35,7 +35,7 @@ MULTI_CHAR_DEFAULTS: dict[str, object] = {
     "engine": "regional",
     "pose_conditioning": None,  # per-path default: regional on, a guarded scene-lock plate off (#596)
     "lora_scale_per_slot": 0.35,
-    "ip_adapter_scale_per_slot": 0.7,
+    "ip_adapter_scale_per_slot": None,  # unset: the keyframe ip_adapter_scale (vivijure-backend#599)
     "max_slots": 2,
     "region_gutter": 64,
 }
@@ -132,6 +132,11 @@ class RenderPlan:
         return "\n".join(lines)
 
 
+# The value kf_hash's `ip_scale` key has always carried (the per-slot field's old default, which never reached a draw).
+# Fixed, not derived: changing it would change every stored still's hash and redraw the fleet (vivijure-backend#599).
+LEGACY_IP_SCALE_HASH = 0.7
+
+
 def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard: Storyboard | None = None) -> str:
     """Short SHA-256 hash of what draws ONE shot's keyframe. Stored beside each keyframe so a re-run reuses a
     still only when nothing that draws it has changed.
@@ -165,7 +170,9 @@ def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard
         "height": kc.height,
         "lora_scale": kc.lora_scale,
         "lora_scale_per_slot": mc.lora_scale_per_slot,
-        "ip_scale": mc.ip_adapter_scale_per_slot,
+        # vivijure-backend#599: this key always read 0.7, the old field default, and the field never reached a draw.
+        # It stays 0.7 so every stored hash holds; a set per-slot value is a new key below, so it redraws.
+        "ip_scale": LEGACY_IP_SCALE_HASH,
         # Unset reads as on, its meaning before #596, so this key keeps every existing hash; where the new
         # default changes a drawing, `plate_pose` below says so.
         "pose_cond": mc.pose_conditioning is not False,
@@ -181,6 +188,9 @@ def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard
         "two_pass": "scene_lock_v1",
         "engine": KEYFRAME_ENGINE_VERSION,
     }
+    # vivijure-backend#599: a set per-slot identity scale now changes the drawing, so it says so; unset adds nothing.
+    if mc.ip_adapter_scale_per_slot is not None:
+        payload["ip_scale_per_slot"] = mc.ip_adapter_scale_per_slot
     # Only when set: at 0 the skeleton is byte-identical to the one drawn before this field existed, so a
     # still drawn then is still the same image and keeps its hash (no fleet-wide redraw for a no-op).
     if mc.pose_spread:
