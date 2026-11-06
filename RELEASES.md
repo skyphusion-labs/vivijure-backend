@@ -73,6 +73,12 @@ weight-digest miss). Superseded by the 2026-07-22 line above.
 next release tag is `backend-v0.4.8`, NOT `backend-v0.4.5` (0.4.5 / 0.4.6 / 0.4.7 are taken).
 (Historical; superseded by the 2026-07-15 line above.)
 
+**The 1.1.x line is GHCR tags only, with no git tag (2026-11-04 to 2026-11-06, 1.1.5 through 1.1.12).** These images are thin builds made
+on the Vultr bake box ([docs/bake-box.md](docs/bake-box.md)), because Actions does not start jobs on this account. Each pushes
+`vivijure-backend:<X.Y.Z>` from the box and is pinned by digest.
+
+**Do NOT push `backend-v<X.Y.Z>` for a semver the box already published.** That tag push triggers `release.yml`, which would build and push `:<X.Y.Z>` and `:latest` again, the collision this file forbids. The record of each 1.1.x image is in [docs/runpod-endpoint-config.md](docs/runpod-endpoint-config.md) (commit, digest, rollback). The GHCR check above still picks the next free semver.
+
 ## Release contract (#537: the seed -> runtime -> backend chain)
 
 Since #537 the backend image is the top of a three-image chain, so a release does NOT rebuild the

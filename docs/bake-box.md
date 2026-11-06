@@ -203,6 +203,11 @@ is acceptable because the disk holds only public inputs under the custody rule. 
 anything else ever reached the disk, destroy the box and tell the lead. Revoke the GHCR
 PAT in both cases.
 
+After the image is pushed, the endpoint repin is a separate step. Follow "Repinning the backend endpoint"
+in [runpod-endpoint-config.md](runpod-endpoint-config.md):
+- wait 65 s after the release;
+- every worker then starts cold and pulls about 24 GB from R2, so submit 2 or 3 jobs first and wait until they run before submitting the rest. On 2026-11-06, 15 cold workers at once slowed pulls to 2.6 MiB/s and stretched cold jobs to about 20 minutes each.
+
 ## Destroy
 
 ```
