@@ -33,6 +33,10 @@ DEFAULT_LORA_SCALE = 0.3
 DEFAULT_LORA_SCALE_PER_SLOT = 0.35
 DEFAULT_IP_ADAPTER_SCALE = 0.7
 DEFAULT_CANNY_SCALE = 0.70
+# Pass B identity crop padding, a fraction of the face box on each side. 0.35 is the face with little hair, which
+# is what lost Mara's curls in the two-shot (vivijure-cf#1143): the shared text cannot bind hair to one person,
+# and this crop does not carry it. Kept as the default so behaviour is unchanged until a live sweep picks one.
+DEFAULT_FACE_CROP_PAD = 0.35
 DEFAULT_NEGATIVE = (
     "lowres, bad anatomy, extra limbs, fused faces, two heads, deformed, blurry, watermark, text"
 )
@@ -80,6 +84,7 @@ class KeyframeParams:
     ip_adapter_scale: float = DEFAULT_IP_ADAPTER_SCALE
     scene_lock: bool = True          # Pass A scene plate, Pass B canny + face-crop; off is a debug hatch
     canny_scale: float = DEFAULT_CANNY_SCALE
+    face_crop_pad: float = DEFAULT_FACE_CROP_PAD  # Pass B identity crop padding (cf#1143)
     # Identity method for the SINGLE-character path. InstantID is the default: insightface
     # face-embed through InstantID's image projection. "ip_adapter" is the h94 fallback.
     # Two-person shots ignore this and stay on the masked IP-Adapter regional path.
@@ -583,12 +588,12 @@ def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image):
     scale = ident.lora_scale
     if engine == "regional":
         slots = scene.character_slots[:cfg.max_slots]
-        crops, any_face = _face_crops_for_slots(server, cast, slots)
+        crops, any_face = _face_crops_for_slots(server, cast, slots, pad_ratio=cfg.face_crop_pad)
         image, identity_path = _pass_b_regional(
             pipe, ident, scene, cfg, loras, generator, canny, scale, crops, any_face)
     else:
         slot = scene.character_slots[0] if scene.character_slots else None
-        crops, any_face = _face_crops_for_slots(server, cast, [slot] if slot else [])
+        crops, any_face = _face_crops_for_slots(server, cast, [slot] if slot else [], pad_ratio=cfg.face_crop_pad)
         image, identity_path = _pass_b_single(
             pipe, ident, scene, cfg, loras, generator, canny, scale, crops, any_face)
     # Next shot's Pass A expects pose on the shared pipe.
@@ -652,8 +657,9 @@ def _pass_b_regional(pipe, ident, scene, cfg, loras, generator, canny, scale, cr
     return image, identity_path
 
 
-def _face_crops_for_slots(server, cast, slots):
-    """Per-slot face crop (or None). No-face slots skip IP-Adapter (blank, scale 0)."""
+def _face_crops_for_slots(server, cast, slots, *, pad_ratio: float = DEFAULT_FACE_CROP_PAD):
+    """Per-slot identity crop (or None), padded by `pad_ratio` of the face box on each side. No-face slots skip
+    IP-Adapter (blank, scale 0)."""
     from . import instantid as _iid
     crops = []
     for slot in slots:
@@ -661,7 +667,7 @@ def _face_crops_for_slots(server, cast, slots):
         crop = None
         if refs:
             try:
-                crop = _iid.crop_face(server.face_analyzer(), refs[0])
+                crop = _iid.crop_face(server.face_analyzer(), refs[0], pad_ratio=pad_ratio)
             except Exception:  # noqa: BLE001 -- no-face / analyzer miss is a skip, not a crash
                 crop = None
         crops.append(crop)

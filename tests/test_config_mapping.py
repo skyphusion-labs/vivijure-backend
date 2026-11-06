@@ -100,6 +100,12 @@ def test_keyframe_single_char_lora_scale_reaches_params():
     assert p.lora_scale_per_slot == pytest.approx(0.7)
 
 
+def test_keyframe_face_crop_pad_reaches_params():
+    # vivijure-cf#1143: Pass B identity crop padding; the default is the crop shipped before it was a knob.
+    assert keyframe_params_from(_rcfg(kf={"face_crop_pad": 1.1})).face_crop_pad == pytest.approx(1.1)
+    assert keyframe_params_from(_rcfg()).face_crop_pad == pytest.approx(0.35)
+
+
 def test_keyframe_scene_lock_and_canny_scale_reach_params():
     p = keyframe_params_from(_rcfg(kf={"scene_lock": False, "canny_scale": 0.55}))
     assert p.scene_lock is False
@@ -251,6 +257,7 @@ KEYFRAME_ASSERTED = {
     "lora_scale",
     "scene_lock",
     "canny_scale",
+    "face_crop_pad",
     "multi_char",
 }
 

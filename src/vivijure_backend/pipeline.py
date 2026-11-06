@@ -68,6 +68,7 @@ def keyframe_params_from(config: RenderConfig) -> KeyframeParams:
         max_slots=mc.max_slots,
         scene_lock=kc.scene_lock,
         canny_scale=kc.canny_scale,
+        face_crop_pad=kc.face_crop_pad,
     )
 
 
