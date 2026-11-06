@@ -133,6 +133,8 @@ class GpuPipeline:
     config: RenderConfig
     pretrained_loras: dict[str, str] = field(default_factory=dict)
     server: Any = None  # models.ModelServer; created lazily on first GPU use
+    # The job's top-level `debug_intermediates` (vivijure-cf#1143): keep the scene-lock intermediates.
+    debug_intermediates: bool = False
 
     def _model_server(self):
         if self.server is None:
@@ -180,6 +182,7 @@ class GpuPipeline:
         return _keyframe.render_keyframe(
             scene, cast, storyboard, self._model_server(), out_path,
             params=keyframe_params_from(self.config), lora_paths=lora_paths,
+            save_intermediates=self.debug_intermediates,
         )
 
     def _onnx_provider_facts(self):
@@ -273,6 +276,8 @@ class GpuPipeline:
                     scene, cast, storyboard, workdir / "keyframes" / f"{sp.shot_id}.png", lora_paths)
                 kf_path = kf.path
                 out.keyframes[sp.shot_id] = kf_path
+                if kf.intermediates:
+                    out.intermediates[sp.shot_id] = dict(kf.intermediates)
                 # Write a param hash alongside the PNG so the next warm-worker run can skip
                 # regeneration when config is unchanged (_finish copies both into state.tar.gz).
                 try:
