@@ -183,6 +183,8 @@ def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard
     # still drawn then is still the same image and keeps its hash (no fleet-wide redraw for a no-op).
     if mc.pose_spread:
         payload["pose_spread"] = mc.pose_spread
+    if kc.plate_count_retries:  # same rule: off draws exactly what it drew before, so the hash stays
+        payload["plate_count_retries"] = kc.plate_count_retries
     if scene is not None and storyboard is not None:
         from .keyframe import DEFAULT_NEGATIVE, build_prompt, scene_lock_negative
 

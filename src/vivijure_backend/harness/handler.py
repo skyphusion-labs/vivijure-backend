@@ -50,6 +50,8 @@ class Outputs:
     keyframes: dict[str, Path] = field(default_factory=dict)    # shot_id -> png
     # shot_id -> {stage: png}; only a debug_intermediates job fills it (vivijure-cf#1143).
     intermediates: dict[str, dict[str, Path]] = field(default_factory=dict)
+    # shot_id -> the plate count guard's record, only for a still the guard ran on (vivijure-cf#1143).
+    plate_counts: dict[str, dict] = field(default_factory=dict)
     clips: list[tuple[str, Path]] = field(default_factory=list)  # (shot_id, mp4)
     final_video: Path | None = None
     audio: Path | None = None
@@ -282,7 +284,7 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
     for shot_id, path in outputs.keyframes.items():
         key = store.put_file(Path(path), keys.job_keyframe_key(project, job_id, shot_id),
                              content_type="image/png")
-        result.keyframes.append(Keyframe(shot_id=shot_id, key=key))
+        result.keyframes.append(Keyframe(shot_id=shot_id, key=key, plate_count=outputs.plate_counts.get(shot_id)))
         reported_shots.add(shot_id)
         hash_src = Path(path).with_suffix(".hash")
         param_hash = hash_src.read_text().strip() if hash_src.is_file() else None

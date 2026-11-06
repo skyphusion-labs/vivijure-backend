@@ -73,6 +73,7 @@ def keyframe_params_from(config: RenderConfig) -> KeyframeParams:
         plate_ip_adapter_scale=kc.plate_ip_adapter_scale,
         plate_regional_text=kc.plate_regional_text,
         plate_people_free_background=kc.plate_people_free_background,
+        plate_count_retries=kc.plate_count_retries,
     )
 
 
@@ -279,6 +280,8 @@ class GpuPipeline:
                 out.keyframes[sp.shot_id] = kf_path
                 if kf.intermediates:
                     out.intermediates[sp.shot_id] = dict(kf.intermediates)
+                if kf.plate_count is not None:
+                    out.plate_counts[sp.shot_id] = dict(kf.plate_count)
                 # Write a param hash alongside the PNG so the next warm-worker run can skip
                 # regeneration when config is unchanged (_finish copies both into state.tar.gz).
                 try:
@@ -295,6 +298,7 @@ class GpuPipeline:
                 self.progress.emit("keyframe_done", shot=sp.shot_id,
                                    identity_requested=kf.identity_requested,
                                    identity_path=kf.identity_path,
+                                   plate_count=kf.plate_count,
                                    onnx_providers=self._onnx_provider_facts())
             else:
                 kf_path = self._resolve_keyframe(sp, scene, bundle, workdir, required=sp.needs_i2v)

@@ -205,6 +205,10 @@ class KeyframeConfig:
     # text that names them, so it is not told to draw a third person (vivijure-cf#1143 option c). Off = it reads
     # the shared prompt, as before.
     plate_people_free_background: bool = False
+    # 0..3; on a two-person-plus shot, count the faces in the plate and redraw ONLY the plate, with a derived seed,
+    # while it holds more faces than the shot has people, up to this many times. Pass B never adds a person, so a
+    # clean plate gives a clean still. 0 = off: no count, the plate as before (vivijure-cf#1143).
+    plate_count_retries: int = 0
     multi_char: MultiCharConfig = field(default_factory=MultiCharConfig)
 
     @classmethod
@@ -259,6 +263,7 @@ class KeyframeConfig:
             plate_ip_adapter_scale=_clamp(d.get("plate_ip_adapter_scale"), 0.0, 1.0, base.plate_ip_adapter_scale),
             plate_regional_text=d.get("plate_regional_text") is True if "plate_regional_text" in d else base.plate_regional_text,
             plate_people_free_background=d.get("plate_people_free_background") is True if "plate_people_free_background" in d else base.plate_people_free_background,
+            plate_count_retries=_clamp_int(d.get("plate_count_retries"), 0, 3, base.plate_count_retries),
             multi_char=MultiCharConfig.from_dict(d.get("multi_char")),
         )
 
