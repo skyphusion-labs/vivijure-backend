@@ -16,7 +16,7 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 | | `vivijure-backend-hosted` | `vivijure-upscale-hosted` |
 |---|---|---|
 | id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
-| Image | `vivijure-backend:1.1.15@sha256:30c08660d643f2b7629b90ac92e686603c0d227aca257e11debed71820e20f18` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
+| Image | `vivijure-backend:1.1.16@sha256:5d7ef08c9391ccece589c28b492b8092b5b701905fcdb71011770b5d627c541c` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
 | Pools | `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141`, `BLACKWELL_180`, `BLACKWELL_288` | `BLACKWELL_96` |
 | `workers` min / max | 0 / 12 | 0 / 10 |
 | Idle timeout | 60 s | 10 s |
@@ -51,6 +51,28 @@ the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 1
 1. Drain the pool to 0, repin by digest, then restore max 12 and idle 60 s.
 2. Wait 65 s after the release before submitting anything. Renders through the studio got `keyframe /run -> 409` in that window after the 1.1.7 repin.
 3. On a thin image built on the bare toolchain, after a repin, every worker is cold and pulls about 24 GB from R2 (on a code image built on the stills weights base, a stills job pulls nothing: [stills-weights-base.md](stills-weights-base.md), #564), and a warm-up batch does not change that: each NEW worker pulls again. So keep the number of concurrent cold workers small, about 4 to 6, by submitting in small batches, and budget one cold pull per worker. On 2026-11-06, 15 cold workers at once slowed pulls to 2.6 MiB/s and stretched cold jobs to about 20 minutes each; 6 at once pulled normally (cold delay about 2 to 3 minutes). Submitting 2 first and the rest once they ran did NOT help after a new image: the second batch started on new workers, cold.
+
+**Backend 1.1.16, pinned 2026-11-06 (release v40, 13:45:37Z).** A code-only release on the existing stills base: no restage.
+
+- **Code:** main `6edad52`, adding #597. A two-person scene-lock plate draws without the pose skeleton by default while the plate count guard runs.
+  Built from `deploy/Dockerfile.thin` with
+  `TOOLCHAIN_REF=vivijure-backend:stills-t1-m1@sha256:6d0e19bd18bdba3318e510fcc0055d9d75c1a1353df918795dc92be0d70740b6`.
+  `deploy/` is unchanged since `82b2324`.
+- **Image:** `vivijure-backend:1.1.16@sha256:5d7ef08c9391ccece589c28b492b8092b5b701905fcdb71011770b5d627c541c`.
+  The push took 2 s (13:44:55Z to 13:44:57Z). It pushed 2 code layers (190 KB) and reused 26.
+  The base's 26 layers are an exact prefix of the image. All three weight layers (`76c9fde8193f`, `f953853e0b64`, `89cf0b497764`) were reused.
+  The push digest and the GHCR read-back match.
+- **Checks in the image:**
+  - `--check-stills` prints `complete` and exits 0;
+  - `.vj-stills-complete` reads `1`, and there is no `.vj-baked`;
+  - `plate_pose_default_off` is present, and returns True for a two-person shot and False for one person under the default config (`plate_count_retries` 3);
+  - `orchestrator.py`, `keyframe.py`, `pipeline.py`, `contract.py` and `config.py` hash the same as at `6edad52`, and the image holds 29 .py files. The CPU import smoke passed.
+- **Two-person scene-lock stills redraw once.** The reuse hash gains `plate_pose: off` for exactly those shots (`orchestrator.py`). One-person shots keep their hash.
+- **Repin check:** 65 s after the release the rollout read 100% on 1.1.16, with 0 unhealthy. No render job was submitted.
+
+**Backend rollback from 1.1.16:** image
+`vivijure-backend:1.1.15@sha256:30c08660d643f2b7629b90ac92e686603c0d227aca257e11debed71820e20f18` (same stills base, so a host that pulled
+1.1.16 keeps the weight layers), idle timeout 60 s, max 12, same disk. Follow the repinning procedure above.
 
 **Backend 1.1.15, pinned 2026-11-06 (release v39, 13:01:31Z). The first image on the stills weights base (#591, #564).**
 
