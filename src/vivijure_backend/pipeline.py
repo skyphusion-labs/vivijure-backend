@@ -272,7 +272,8 @@ class GpuPipeline:
                 # Write a param hash alongside the PNG so the next warm-worker run can skip
                 # regeneration when config is unchanged (_finish copies both into state.tar.gz).
                 try:
-                    kf_path.with_suffix(".hash").write_text(kf_hash(self.config.keyframe))
+                    kf_path.with_suffix(".hash").write_text(
+                        kf_hash(self.config.keyframe, scene=scene, cast=cast, storyboard=storyboard))
                 except Exception:
                     pass  # hash write is best-effort; a missing file = old-state reuse behavior
                 # Record WHICH identity path ran, and for the InstantID path the ONNX providers

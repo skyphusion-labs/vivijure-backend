@@ -121,6 +121,7 @@ def run_job(
             req, bundle.storyboard,
             trained_slots=set(trained_slots) | set(req.pretrained_loras),
             existing_keyframes=existing_keyframes,
+            cast=bundle.cast,
         )
         # Post-plan ref check: validate can't know which slots actually need training (that
         # depends on prior trained_slots from R2), so check refs here where the plan is settled.

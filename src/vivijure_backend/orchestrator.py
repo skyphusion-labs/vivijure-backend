@@ -23,6 +23,12 @@ from .routing import QualityTier, Stage, Tier, gpu_for
 import hashlib
 import json
 
+# Bump on ANY change to how a keyframe is drawn that leaves the prompts the same (the encoder, the passes, the
+# pipelines, the identity path). A change to prompt building needs no bump: the built prompts are in the hash
+# (vivijure-backend#573). Without this, a new image re-rendering the same board returned the old stills as
+# `reused` and the run read COMPLETED (film-0afa679b on 1.1.6).
+KEYFRAME_ENGINE_VERSION = "kf-2026-11-06-chunked"
+
 # Anti-bleed defaults for the multi-character keyframe path (the standard, not cranked,
 # per-slot scales + pose conditioning that hold two identities apart).
 MULTI_CHAR_DEFAULTS: dict[str, object] = {
@@ -126,16 +132,19 @@ class RenderPlan:
         return "\n".join(lines)
 
 
-def kf_hash(kc) -> str:
-    """Short SHA-256 hash of the keyframe render params (steps, guidance, scheduler, seed, models,
-    the distill flag, the identity scales, the multi-char anti-bleed knobs, and the scene-lock
-    two-pass knobs). Stored alongside each
-    keyframe in state so an incremental re-run with changed params forces regeneration instead
-    of silently reusing a stale image.
+def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard: Storyboard | None = None) -> str:
+    """Short SHA-256 hash of what draws ONE shot's keyframe. Stored beside each keyframe so a re-run reuses a
+    still only when nothing that draws it has changed.
 
-    Covers every input that changes the SDXL output but NOT the prompt or character refs -- those
-    are project-level inputs that change the bundle, not the config. If only prompt/refs changed,
-    the user supplies a new bundle and the state tar is naturally stale (different project slot).
+    It covers the render params (steps, guidance, scheduler, seed, models, the distill flag, the identity
+    scales, the multi-char anti-bleed knobs, the scene-lock two-pass knobs), the keyframe engine version, and,
+    given the shot, the prompts the engine would build for it: the plate, the identity pass and the plain
+    pass. So an edited shot, a changed cast description, a new setting, or new prompt-building code redraws
+    (vivijure-backend#573). Before, the prompt was left out on the theory that a changed board means a new
+    project; a board keeps its project when it is edited, so an edited shot reused its old still.
+
+    The writer (pipeline) and the reader (plan) must pass the same shot, cast and board. If they ever
+    differ, the hashes differ and the still is redrawn: the safe direction.
 
     Flipping `scene_lock` MUST change this hash so incremental preview does not reuse grey
     studio portraits. Accepts any object with the KeyframeConfig attribute shape to avoid a
@@ -164,7 +173,18 @@ def kf_hash(kc) -> str:
         "scene_lock": kc.scene_lock,
         "canny_scale": kc.canny_scale,
         "two_pass": "scene_lock_v1",
+        "engine": KEYFRAME_ENGINE_VERSION,
     }
+    if scene is not None and storyboard is not None:
+        from .keyframe import DEFAULT_NEGATIVE, build_prompt, scene_lock_negative
+
+        c = cast if cast is not None else Cast(characters={})
+        payload["prompts"] = [
+            build_prompt(scene, c, storyboard, include_triggers=False),
+            build_prompt(scene, c, storyboard, include_triggers=True, lock_clause=True),
+            build_prompt(scene, c, storyboard),
+            scene_lock_negative(scene, DEFAULT_NEGATIVE),
+        ]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -215,6 +235,7 @@ def plan(
     *,
     trained_slots: set[str] = frozenset(),       # slots whose LoRA already exists (prior state)
     existing_keyframes: dict[str, str | None] = {},  # shot_id -> stored hash (None = unproven, redrawn; old state, no hash)
+    cast: Cast | None = None,  # the bundle's cast: its descriptions are in each shot's keyframe hash (#573)
 ) -> RenderPlan:
     """Decide the whole render on the CPU. Nothing here touches a GPU."""
     action = Action.parse(request.action)
@@ -262,7 +283,7 @@ def plan(
     # the wasteful over-estimate this planner exists to prevent.
     scene_plans: list[ScenePlan] = []
     for sc in (scenes if (want_keyframe or want_i2v) else []):
-        cur_hash = kf_hash(request.config.keyframe)
+        cur_hash = kf_hash(request.config.keyframe, scene=sc, cast=cast, storyboard=storyboard)
         mode = _keyframe_mode(sc, action, existing_keyframes, want_keyframe, cur_hash)
         if mode is not KeyframeMode.GENERATE and want_keyframe:
             skips.append(f"{sc.id} keyframe: {mode.value} (no SDXL pass)")

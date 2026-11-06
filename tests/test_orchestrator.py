@@ -82,8 +82,15 @@ def test_injected_start_image_skips_keyframe_gen():
     assert any("inject" in s for s in p.skips)
 
 
+def _shot_hash(req, sb, shot_id="shot_01"):
+    """The hash the pipeline writes beside a drawn still (#573): the params AND that shot's own prompts."""
+    sc = next(s for s in sb.scenes if s.id == shot_id)
+    return kf_hash(req.config.keyframe, scene=sc, storyboard=sb)
+
+
 def test_existing_keyframe_is_reused():
-    p = plan(_req(), _sb(TWO_SCENES), existing_keyframes={"shot_01": kf_hash(_req().config.keyframe)})
+    sb = _sb(TWO_SCENES)
+    p = plan(_req(), sb, existing_keyframes={"shot_01": _shot_hash(_req(), sb)})
     modes = {s.shot_id: s.keyframe_mode for s in p.scenes}
     assert modes["shot_01"] is KeyframeMode.REUSE
     assert modes["shot_02"] is KeyframeMode.GENERATE
@@ -108,8 +115,9 @@ def test_hash_mismatch_forces_keyframe_regenerate():
 def test_hash_match_allows_keyframe_reuse():
     """A shot in existing_keyframes with a matching hash is reused."""
     req = _req()
-    cur = kf_hash(req.config.keyframe)
-    p = plan(req, _sb(TWO_SCENES), existing_keyframes={"shot_01": cur})
+    sb = _sb(TWO_SCENES)
+    cur = _shot_hash(req, sb)
+    p = plan(req, sb, existing_keyframes={"shot_01": cur})
     modes = {s.shot_id: s.keyframe_mode for s in p.scenes}
     assert modes["shot_01"] is KeyframeMode.REUSE
     assert modes["shot_02"] is KeyframeMode.GENERATE
