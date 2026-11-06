@@ -22,7 +22,8 @@ from typing import Protocol, runtime_checkable
 
 from ..assemble import ClipInput, assemble, build_manifest, order_for_storyboard, write_manifest
 from ..contract import Bundle, RenderRequest, RenderResult, Keyframe, Clip
-from ..finish import Deadline, FinishDeadlineExceeded, job_mirror_legs, max_job_mirror_seconds, max_mirror_seconds
+from ..finish import (Deadline, FinishDeadlineExceeded, MirrorStalled, job_mirror_legs, max_job_mirror_seconds,
+                      max_mirror_seconds)
 from ..orchestrator import (Action, KeyframeMode, RenderPlan, plan as make_plan,
                             resolve_lora_family, validate)
 from . import keys
@@ -851,10 +852,15 @@ def handler(job: dict) -> dict:
             # needs it: whether the volume must carry the Wan i2v corpus depends on whether an i2v
             # stage can run at all (models_mirror.i2v_stage_possible, backend#453).
             # A finish job pulls only the legs its step loads, and its budget ends the pull if it hangs.
+            # While a cold pull runs, each rclone stats line (about once a minute) becomes a
+            # `mirror_progress` event, so a pull is not a silent job (#564, #566). run_job's own emitter
+            # writes the same progress keys afterwards, from `started`, so these are live state only.
+            pulling = ProgressEmitter(store, project, job_id, on_progress=on_progress)
             mirrored = ensure_models(action=action_in,
                                      finish_legs=job_mirror_legs(payload) if is_finish else None,
-                                     deadline=mirror_deadline)
-        except FinishDeadlineExceeded:
+                                     deadline=mirror_deadline,
+                                     on_progress=lambda fields: pulling.emit("mirror_progress", **fields))
+        except FinishDeadlineExceeded as expiry:
             # Not an Exception (see its docstring), so it needs its own clause to keep this record.
             # The handler's one catch site below turns the expiry into the soft degrade.
             failed = ProgressEmitter(store, project, job_id, on_progress=on_progress)
@@ -862,7 +868,9 @@ def handler(job: dict) -> dict:
             if is_finish:
                 raise
             # A job that needs these weights has nothing to pass through, so it fails, and the worker goes free.
-            error = RuntimeError(f"model pull ran past its {mirror_deadline.budget_seconds:.0f} s budget")
+            # A stall (#566) says so by name; it is not a budget that ran out.
+            error = RuntimeError(expiry.reason if isinstance(expiry, MirrorStalled)
+                                 else f"model pull ran past its {mirror_deadline.budget_seconds:.0f} s budget")
             failed.error("mirror", error)
             raise error from None
         except Exception as e:
