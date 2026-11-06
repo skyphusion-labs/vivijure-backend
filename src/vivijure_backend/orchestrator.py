@@ -174,6 +174,7 @@ def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard
         "canny_scale": kc.canny_scale,
         "face_crop_pad": kc.face_crop_pad,
         "plate_ip_adapter_scale": kc.plate_ip_adapter_scale,
+        "plate_regional_text": kc.plate_regional_text,
         "two_pass": "scene_lock_v1",
         "engine": KEYFRAME_ENGINE_VERSION,
     }

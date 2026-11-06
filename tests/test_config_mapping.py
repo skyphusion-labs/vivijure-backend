@@ -100,6 +100,13 @@ def test_keyframe_single_char_lora_scale_reaches_params():
     assert p.lora_scale_per_slot == pytest.approx(0.7)
 
 
+def test_keyframe_plate_regional_text_reaches_params():
+    # vivijure-cf#1143 option a: off by default; only an exact true turns it on.
+    assert keyframe_params_from(_rcfg(kf={"plate_regional_text": True})).plate_regional_text is True
+    assert keyframe_params_from(_rcfg(kf={"plate_regional_text": "true"})).plate_regional_text is False
+    assert keyframe_params_from(_rcfg()).plate_regional_text is False
+
+
 def test_keyframe_plate_ip_adapter_scale_reaches_params():
     # vivijure-cf#1143 option b: off by default.
     assert keyframe_params_from(_rcfg(kf={"plate_ip_adapter_scale": 0.4})).plate_ip_adapter_scale == pytest.approx(0.4)
@@ -265,6 +272,7 @@ KEYFRAME_ASSERTED = {
     "canny_scale",
     "face_crop_pad",
     "plate_ip_adapter_scale",
+    "plate_regional_text",
     "multi_char",
 }
 
