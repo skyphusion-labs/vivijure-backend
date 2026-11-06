@@ -193,11 +193,40 @@ HASH_BEFORE = {QualityTier.DRAFT: "0922f3dc0cb2ccca", QualityTier.STANDARD: "23b
 
 @pytest.mark.parametrize("tier", list(HASH_BEFORE))
 def test_hash_unchanged_when_off(tier):
-    assert kf_hash(KeyframeConfig.for_tier(tier)) == HASH_BEFORE[tier]
+    kc = KeyframeConfig.for_tier(tier)
+    kc.plate_count_retries = 0
+    assert kf_hash(kc) == HASH_BEFORE[tier]
+
+
+def test_default_is_on_at_three():
+    # Ruled 2026-11-06 on the live 1.1.13 check (vivijure-cf#1143).
+    assert KeyframeConfig().plate_count_retries == 3
+    assert kf.KeyframeParams().plate_count_retries == 3
+    assert _req().config.keyframe.plate_count_retries == 3
+    assert _req(render_overrides={"keyframe": {"plate_count_retries": 0}}).config.keyframe.plate_count_retries == 0
+
+
+def _shot(slots):
+    from vivijure_backend.contract import Storyboard
+    sb = Storyboard.from_dict({"scenes": [{"id": "shot_01", "prompt": "x", "character_slots": list(slots)}]})
+    return sb.scenes[0], sb
+
+
+@pytest.mark.parametrize("slots,changes", [((), False), (("A",), False), (("A", "B"), True),
+                                           (("A", "B", "C"), False)])
+def test_default_on_redraws_only_the_shots_it_guards(slots, changes):
+    # The default flip redraws existing two-person stills once (accepted) and must NOT touch the others.
+    sc, sb = _shot(slots)
+    on = KeyframeConfig.for_tier(QualityTier.STANDARD)
+    off = KeyframeConfig.for_tier(QualityTier.STANDARD)
+    off.plate_count_retries = 0
+    same = kf_hash(on, scene=sc, storyboard=sb) == kf_hash(off, scene=sc, storyboard=sb)
+    assert same is (not changes)
 
 
 def test_hash_changes_when_set():
     kc = KeyframeConfig.for_tier(QualityTier.STANDARD)
+    kc.plate_count_retries = 0
     base = kf_hash(kc)
     kc.plate_count_retries = 2
     two = kf_hash(kc)
@@ -208,7 +237,7 @@ def test_hash_changes_when_set():
 def test_request_parses_and_clamps():
     assert _req(render_overrides={"keyframe": {"plate_count_retries": 2}}).config.keyframe.plate_count_retries == 2
     assert _req(render_overrides={"keyframe": {"plate_count_retries": 7}}).config.keyframe.plate_count_retries == 3
-    assert _req().config.keyframe.plate_count_retries == 0
+    assert _req().config.keyframe.plate_count_retries == 3
 
 
 def test_result_carries_the_record_only_when_the_guard_ran():

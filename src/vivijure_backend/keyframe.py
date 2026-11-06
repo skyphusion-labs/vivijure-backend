@@ -88,7 +88,7 @@ class KeyframeParams:
     plate_ip_adapter_scale: float = 0.0  # Pass A per-region portrait IP-Adapter on a two-person shot; 0 = off (cf#1143)
     plate_regional_text: bool = False  # Pass A per-region descriptions on a two-person shot; off = one prompt (cf#1143)
     plate_people_free_background: bool = False  # with regional text: the band names no one (cf#1143 option c)
-    plate_count_retries: int = 0     # 0..3 plate redraws while it has too many faces; 0 = off (cf#1143)
+    plate_count_retries: int = 3     # 0..3 plate redraws while it has too many faces; 0 = off (cf#1143)
     # Identity method for the SINGLE-character path. InstantID is the default: insightface
     # face-embed through InstantID's image projection. "ip_adapter" is the h94 fallback.
     # Two-person shots ignore this and stay on the masked IP-Adapter regional path.
