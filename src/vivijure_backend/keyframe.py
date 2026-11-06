@@ -85,6 +85,7 @@ class KeyframeParams:
     scene_lock: bool = True          # Pass A scene plate, Pass B canny + face-crop; off is a debug hatch
     canny_scale: float = DEFAULT_CANNY_SCALE
     face_crop_pad: float = DEFAULT_FACE_CROP_PAD  # Pass B identity crop padding (cf#1143)
+    plate_ip_adapter_scale: float = 0.0  # Pass A per-region portrait IP-Adapter on a two-person shot; 0 = off (cf#1143)
     # Identity method for the SINGLE-character path. InstantID is the default: insightface
     # face-embed through InstantID's image projection. "ip_adapter" is the h94 fallback.
     # Two-person shots ignore this and stay on the masked IP-Adapter regional path.
@@ -399,6 +400,19 @@ def plan_keyframe_passes(scene: Scene, cast: Cast, storyboard: Storyboard,
     return [plate, identity]
 
 
+def plate_ip_adapter_scale_for(scene: Scene, cfg: KeyframeParams) -> float:
+    """The scale at which Pass A takes each person's whole cast portrait, confined to their region, or 0.0 for off.
+
+    vivijure-cf#1143: on a two-person shot the plate draws hair from shared text that SDXL does not bind to a
+    person, and Pass B keeps the plate's outline (measured: the bun survived canny 0.4 and every identity-crop
+    padding). Only the no-plate path, which takes the whole portrait, restored the hair. This gives the plate the
+    portrait. Two-person shots only: a one-person plate holds its hair from its own description, and an empty shot
+    has no one to condition. Off unless set, so the plate is unchanged by default."""
+    if engine_for(scene, cfg) != "regional":
+        return 0.0
+    return max(0.0, min(1.0, float(cfg.plate_ip_adapter_scale)))
+
+
 def keyframe_render_path(engine: str, cfg: KeyframeParams, *, has_instantid_ref: bool) -> str:
     """Which GPU body `render_keyframe` takes.
 
@@ -552,7 +566,10 @@ def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image):
 
     # Distill adapter tracks the tier; character LoRAs stay off for Pass A.
     _bind_loras(pipe, {}, cfg.lora_scale, few_step=cfg.few_step)
-    _ensure_ip_adapter(pipe, 0)
+    plate_ip_scale = plate_ip_adapter_scale_for(scene, cfg)
+    plate_ip_kw = _plate_ip_kwargs(pipe, cast, scene, cfg, plate_ip_scale) if plate_ip_scale > 0 else {}
+    if not plate_ip_kw:
+        _ensure_ip_adapter(pipe, 0)
 
     plate_spec = passes[0]
     if plate_spec.controlnet == "pose":
@@ -575,9 +592,11 @@ def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image):
         num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
         height=cfg.height, width=cfg.width, generator=generator,
         image=control, controlnet_conditioning_scale=cn_scale,
+        **plate_ip_kw,
     ).images[0]
     print("@event keyframe.scene_plate " + json.dumps(
-        {"shot_id": scene.id or "shot", "seed": cfg.seed}, sort_keys=True), flush=True)
+        {"shot_id": scene.id or "shot", "seed": cfg.seed, "plate_ip_adapter_scale": plate_ip_scale if plate_ip_kw else 0.0},
+        sort_keys=True), flush=True)
 
     if len(passes) == 1:
         return plate, "none", plate_spec.prompt
@@ -655,6 +674,27 @@ def _pass_b_regional(pipe, ident, scene, cfg, loras, generator, canny, scale, cr
         **ip_kw,
     ).images[0]
     return image, identity_path
+
+
+def _plate_ip_kwargs(pipe, cast, scene, cfg, scale):
+    """Pass A keyword arguments for the per-region portrait IP-Adapter (vivijure-cf#1143 option b): one whole cast
+    portrait per person, each confined to the same region box the pose skeleton and Pass B use. A person with no
+    portrait gets a blank image at scale 0. Returns {} when no one in the shot has a portrait, so the caller draws
+    the plate as before. GPU path: validated on a pod."""
+    from diffusers.image_processor import IPAdapterMaskProcessor
+    from PIL import Image
+
+    slots = scene.character_slots[:cfg.max_slots]
+    w, h = cfg.width, cfg.height
+    boxes = region_boxes(w, h, len(slots), orientation="vertical", gutter=cfg.region_gutter)
+    refs = [_ref_images(cast, s, count=1) for s in slots]
+    if not any(refs):
+        return {}
+    images = [r[0] if r else Image.new("RGB", (64, 64), (0, 0, 0)) for r in refs]
+    _ensure_ip_adapter(pipe, n=len(slots))
+    pipe.set_ip_adapter_scale([scale if r else 0.0 for r in refs])
+    masks = IPAdapterMaskProcessor().preprocess([_box_mask(w, h, b) for b in boxes], height=h, width=w)
+    return {"ip_adapter_image": images, "cross_attention_kwargs": {"ip_adapter_masks": masks}}
 
 
 def _face_crops_for_slots(server, cast, slots, *, pad_ratio: float = DEFAULT_FACE_CROP_PAD):
