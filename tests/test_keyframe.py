@@ -56,13 +56,14 @@ def test_slot_trigger_is_the_character_name():
 def test_prompt_combines_style_scene_and_triggers():
     sc = Scene.from_dict({"id": "shot_01", "prompt": "rooftop standoff", "character_slots": ["A", "B"]}, 0)
     p = build_prompt(sc, CAST, _sb())
-    assert p == "cyberpunk anime, rooftop standoff, Vesper, Rhode, teal-haired netrunner, bearded fixer"
+    # vivijure-cf#1143: the triggers are said once, in the clause that says everyone is an adult.
+    assert p == "cyberpunk anime, rooftop standoff, Vesper and Rhode, both adults, teal-haired netrunner, bearded fixer"
 
 
 def test_pass_a_prompt_omits_triggers():
     sc = Scene.from_dict({"id": "shot_01", "prompt": "diner booth", "character_slots": ["A"]}, 0)
     p = build_prompt(sc, CAST, _sb(), include_triggers=False)
-    assert p == "cyberpunk anime, diner booth, solo, teal-haired netrunner, diner booth"
+    assert p == "cyberpunk anime, diner booth, an adult, solo, teal-haired netrunner, diner booth"
     assert "Vesper" not in p
 
 
@@ -595,7 +596,8 @@ def test_two_people_share_the_budget():
 
 
 def test_a_prompt_with_no_room_is_left_alone():
-    sc = Scene.from_dict({"id": "s", "prompt": " ".join(["word"] * 90), "character_slots": ["A"]}, 0)
+    # The budget is two 75-token chunks since vivijure-cf#1143, so "no room" takes a scene past 150.
+    sc = Scene.from_dict({"id": "s", "prompt": " ".join(["word"] * 160), "character_slots": ["A"]}, 0)
     assert "charcoal" not in build_prompt(sc, LONG, _sb())
 
 

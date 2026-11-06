@@ -146,6 +146,8 @@ class Storyboard:
     duration_seconds: float | None = None
     clip_seconds: float | None = None
     style_prefix: str = ""
+    # vivijure-cf#1145: where the film takes place, said on a shot whose prompt does not say it.
+    setting: str = ""
     style_category: str = "None"
     style_preset: str = "None"
     use_characters: list[str] = field(default_factory=list)
@@ -176,6 +178,7 @@ class Storyboard:
             duration_seconds=_num(d.get("duration_seconds")),
             clip_seconds=_num(d.get("clip_seconds")),
             style_prefix=_str(d.get("style_prefix")),
+            setting=_str(d.get("setting")).strip(),
             style_category=cat,
             style_preset=preset,
             use_characters=use_chars,
