@@ -69,6 +69,7 @@ def keyframe_params_from(config: RenderConfig) -> KeyframeParams:
         scene_lock=kc.scene_lock,
         canny_scale=kc.canny_scale,
         face_crop_pad=kc.face_crop_pad,
+        plate_ip_adapter_scale=kc.plate_ip_adapter_scale,
     )
 
 

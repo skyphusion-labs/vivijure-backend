@@ -190,6 +190,9 @@ class KeyframeConfig:
     # 0..2; Pass B identity crop padding, as a fraction of the face box on each side. 0.35 is a face with little
     # hair. Larger keeps the hair and shoulders for the masked IP-Adapter (vivijure-cf#1143).
     face_crop_pad: float = 0.35
+    # 0..1; Pass A (the plate) on a two-person shot: each person's whole cast portrait through the masked IP-Adapter,
+    # confined to their region, at this scale. 0 is off, the plate as before (vivijure-cf#1143 option b).
+    plate_ip_adapter_scale: float = 0.0
     multi_char: MultiCharConfig = field(default_factory=MultiCharConfig)
 
     @classmethod
@@ -241,6 +244,7 @@ class KeyframeConfig:
             scene_lock=bool(d.get("scene_lock", base.scene_lock)),
             canny_scale=_clamp(d.get("canny_scale"), 0.0, 1.5, base.canny_scale),
             face_crop_pad=_clamp(d.get("face_crop_pad"), 0.0, 2.0, base.face_crop_pad),
+            plate_ip_adapter_scale=_clamp(d.get("plate_ip_adapter_scale"), 0.0, 1.0, base.plate_ip_adapter_scale),
             multi_char=MultiCharConfig.from_dict(d.get("multi_char")),
         )
 
