@@ -16,7 +16,7 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 | | `vivijure-backend-hosted` | `vivijure-upscale-hosted` |
 |---|---|---|
 | id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
-| Image | `vivijure-backend:1.1.7@sha256:d9da0b5a2d4276bb4de149169b513444ace7bf21f10009656cc45105e5596e6c` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
+| Image | `vivijure-backend:1.1.8@sha256:a7f9885f245a6db2fa1e4c749cf27da9c8b3d1e5e22494d141f68517b42231f6` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
 | Pools | `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141`, `BLACKWELL_180`, `BLACKWELL_288` | `BLACKWELL_96` |
 | `workers` min / max | 0 / 12 | 0 / 10 |
 | Idle timeout | 60 s | 10 s |
@@ -46,6 +46,19 @@ settings the same. 1.1.3 honours `target_height`, which 1.0.4 ignores and runs 2
 v1.42.0 sends `target_height` by default, so rolling back under one delivers 2x against a budget priced at
 the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 11.5 s, and 720x1280 to
 1080x1920 in 6.0 s. The presigned path has not run on this image yet.
+
+**Backend 1.1.8, pinned 2026-11-06.** A thin image (`deploy/Dockerfile.thin`) at main `957e4ce`, built on
+the Vultr bake box from the same `toolchain-t1@sha256:456b417bffc7d80cef7e2f93d400beda9ebbea38dcb5e4efc7676460eee4d45d`
+(no `deploy/` change since `1ac386e`). It adds #578, `KeyframeConfig.plate_ip_adapter_scale`: a two-person plate can take each person's cast portrait. The default is 0, which is OFF, so nothing changes until a render sets it.
+
+In the image, `orchestrator.py`, `keyframe.py`, `pipeline.py` and `contract.py` hash the same as at `957e4ce`, and the image holds 28 .py files, as the tree does. The CPU import smoke passed.
+
+Repin check: the pool was drained to 0, then restored to max 12 with a 60 s idle timeout. Nothing was submitted for 60 s after the release, which avoids the window in which renders through the studio got `keyframe /run -> 409` after the 1.1.7 repin. A fresh-draw keyframes-only render through the studio, `film-ece55b2a-80a4-4cbc-ad7d-63266d13c24c` (seed 110804), drew all four stills on 1.1.8 workers. RunPod jobs `5392d53a-...-u2` and `4ca8b3fc-...-u1` report no `reused`, and the applied config shows `plate_ip_adapter_scale: 0`.
+
+**Backend rollback from 1.1.8:** image
+`vivijure-backend:1.1.7@sha256:d9da0b5a2d4276bb4de149169b513444ace7bf21f10009656cc45105e5596e6c`, idle
+timeout 60 s, max 12, same disk. Drain the pool to 0 and restore it after the repin, then wait 60 s before
+submitting.
 
 **Backend 1.1.7, pinned 2026-11-06.** A thin image (`deploy/Dockerfile.thin`) at main `7f66faa`, built on
 the Vultr bake box from the same `toolchain-t1@sha256:456b417bffc7d80cef7e2f93d400beda9ebbea38dcb5e4efc7676460eee4d45d`
