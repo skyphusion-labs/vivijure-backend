@@ -48,6 +48,8 @@ class Outputs:
     loras: dict[str, Path] = field(default_factory=dict)        # slot -> SDXL adapter file
     wan_loras: dict[str, tuple[Path, Path]] = field(default_factory=dict)  # slot -> (high, low) Wan experts
     keyframes: dict[str, Path] = field(default_factory=dict)    # shot_id -> png
+    # shot_id -> {stage: png}; only a debug_intermediates job fills it (vivijure-cf#1143).
+    intermediates: dict[str, dict[str, Path]] = field(default_factory=dict)
     clips: list[tuple[str, Path]] = field(default_factory=list)  # (shot_id, mp4)
     final_video: Path | None = None
     audio: Path | None = None
@@ -287,6 +289,18 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
         store.put_bytes(json.dumps({"key": key, "hash": param_hash or None}).encode("utf-8"),
                         keys.keyframe_latest_key(project, shot_id),
                         content_type="application/json")
+
+    # Diagnostic intermediates (vivijure-cf#1143), only when the JOB asked for them: the request flag
+    # gates the upload as well as the draw, so a pipeline that kept files cannot publish them unasked.
+    # Each lands beside its still under this job's own segment and is listed in the result.
+    if req.debug_intermediates:
+        for shot_id, stages in outputs.intermediates.items():
+            for stage, path in stages.items():
+                key = store.put_file(Path(path), keys.job_keyframe_intermediate_key(project, job_id, shot_id, stage),
+                                     content_type="image/png")
+                result.debug_intermediates.append({"shot_id": shot_id, "stage": stage, "key": key})
+        if result.debug_intermediates:
+            progress.emit("debug_intermediates", items=list(result.debug_intermediates))
 
     # Reused and injected keyframes are not drawn, but the caller needs a key to animate. Copy each
     # to this job's own key: the pointer's target belongs to the render that drew it, and deleting

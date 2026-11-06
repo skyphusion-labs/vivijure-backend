@@ -321,6 +321,13 @@ class RenderRequest:
     # orchestrator resolves: train_lora on the train image -> wan; render inline train -> sdxl).
     # Unknown non-empty values fall back to "sdxl".
     model_family: str = ""
+    # Diagnostic only (vivijure-cf#1143): save the scene-lock intermediates (the Pass A plate, its pose
+    # control, the Pass B canny map) beside each drawn keyframe and list them in the result. A TOP-LEVEL
+    # job field, never under render_overrides, so it is not a generation knob: it is not in RenderConfig,
+    # not in the keyframe reuse hash, and the studio's keyframe module never forwards it (that module
+    # builds the job from a fixed list of keyframe_config fields). Only a direct /run caller sets it.
+    # Only a real JSON `true` turns it on; any other value is off.
+    debug_intermediates: bool = False
     # NOTE: there is deliberately NO submitter-identity field. The control plane completed the
     # anti-SaaS identity strip (vivijure #292): the studio is single-operator, sends no user_email,
     # and serves /api/artifact by key with no per-row ownership check. A legacy/hostile job body that
@@ -344,6 +351,7 @@ class RenderRequest:
             audio_key=_str(d.get("audio_key")) or None,
             keyframes_only=_bool(d.get("keyframes_only")),
             model_family=_str(d["model_family"], "sdxl") if "model_family" in d else "",
+            debug_intermediates=d.get("debug_intermediates") is True,
         )
 
 
@@ -383,6 +391,8 @@ class RenderResult:
     clips: list[Clip] = field(default_factory=list)
     lora: dict[str, Any] = field(default_factory=dict)  # slot -> {lora_id}
     state_key: str | None = None
+    # Only on a `debug_intermediates` job: [{shot_id, stage, key}] for every intermediate uploaded.
+    debug_intermediates: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -396,6 +406,8 @@ class RenderResult:
             "lora": self.lora,
             "state_key": self.state_key,
         }
+        if self.debug_intermediates:
+            out["debug_intermediates"] = [dict(d) for d in self.debug_intermediates]
         if self.clips:
             out["clips"] = [
                 {"shot_id": c.shot_id, "key": c.key, **({"target_seconds": c.target_seconds} if c.target_seconds else {})}

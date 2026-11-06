@@ -119,6 +119,38 @@ class KeyframeResult:
     engine: str                      # "single" | "regional"
     identity_requested: str = ""     # what the config ASKED for: "instantid" | "ip_adapter"
     identity_path: str = ""          # what actually RAN: see IDENTITY_PATHS
+    # stage -> PNG beside `path`, only when the render was asked to save intermediates. See
+    # INTERMEDIATE_STAGES. Empty on every path that has no such stage (no plate, no Pass B).
+    intermediates: dict[str, Path] = field(default_factory=dict)
+
+
+# The diagnostic intermediates a scene-lock keyframe can save (vivijure-cf#1143), in draw order:
+# the Pass A pose control (only when the plate draws under pose), the Pass A plate, and the Pass B
+# canny map of that plate (only when Pass B runs). The names are the file and key suffixes.
+INTERMEDIATE_STAGES: tuple[str, ...] = ("pose", "plate", "canny")
+
+
+def intermediate_path(out_path: Path, stage: str) -> Path:
+    """Where one intermediate lands: beside the keyframe, `<shot>.<stage>.png`."""
+    if stage not in INTERMEDIATE_STAGES:
+        raise ValueError(f"unknown keyframe intermediate stage {stage!r}")
+    return Path(out_path).with_name(f"{Path(out_path).stem}.{stage}.png")
+
+
+def write_intermediates(images: dict, out_path: Path) -> dict[str, Path]:
+    """Write each collected intermediate image beside the keyframe and return stage -> path, in
+    INTERMEDIATE_STAGES order. An unknown stage is a programming error and raises before anything
+    is written."""
+    unknown = set(images) - set(INTERMEDIATE_STAGES)
+    if unknown:
+        raise ValueError(f"unknown keyframe intermediate stage(s) {sorted(unknown)!r}")
+    saved: dict[str, Path] = {}
+    for stage in INTERMEDIATE_STAGES:
+        if stage in images:
+            p = intermediate_path(out_path, stage)
+            images[stage].save(p)
+            saved[stage] = p
+    return saved
 
 
 # The identity paths a keyframe render can actually take. Named here so the render record, the
@@ -544,6 +576,7 @@ def render_keyframe(
     params: KeyframeParams | None = None,
     lora_paths: dict[str, Path] | None = None,
     pose_image: "Path | None" = None,
+    save_intermediates: bool = False,
 ) -> KeyframeResult:
     """Render one scene's keyframe to `out_path`.
 
@@ -551,6 +584,10 @@ def render_keyframe(
     `lora_paths` maps slot -> trained adapter file. Single-character shots take the ordinary
     identity path; two-character shots take the regional anti-bleed path. Heavy imports are
     deferred; the body is validated on a pod.
+
+    `save_intermediates` (diagnostic, vivijure-cf#1143) also writes the scene-lock path's pose
+    control, plate and canny map beside `out_path` and lists them in `KeyframeResult.intermediates`.
+    It changes nothing that is drawn. Other paths have no plate and save nothing.
     """
     cfg = params or KeyframeParams()
     out_path = Path(out_path)
@@ -568,9 +605,11 @@ def render_keyframe(
     # One person with an InstantID ref takes InstantID even when scene_lock is on.
     # Two people stay on the regional body. scene_lock is plate then canny + face-crop
     # IP-Adapter for every other shot.
+    collected: dict = {}
     if path == "scene_lock":
         image, identity_path, prompt = _render_scene_lock(
-            server, scene, cast, storyboard, cfg, loras, pose_image)
+            server, scene, cast, storyboard, cfg, loras, pose_image,
+            sink=collected if save_intermediates else None)
     elif path == "instantid":
         prompt = build_prompt(scene, cast, storyboard)
         image, identity_path = _render_instantid(server, prompt, scene, cast, cfg, loras, single_slot)
@@ -587,16 +626,20 @@ def render_keyframe(
 
     refuse_lora_only_still(identity_path)
     image.save(out_path)
+    intermediates = write_intermediates(collected, out_path) if collected else {}
     return KeyframeResult(shot_id=scene.id or "shot", path=out_path, slots=slots,
                           multi_char=(engine == "regional"), prompt=prompt, seed=cfg.seed,
                           engine=engine, identity_requested=cfg.identity_method,
-                          identity_path=identity_path)
+                          identity_path=identity_path, intermediates=intermediates)
 
 
-def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image):
+def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image, sink=None):
     """Pass A: scene plate (no LoRA, no IP-Adapter). Pass B: canny of that plate + face-crop
     IP-Adapter + split LoRA. No-character shots skip Pass B. Few-step tiers still run Pass B
-    (t2i). InstantID is not this path. Returns `(image, identity_path, prompt)`."""
+    (t2i). InstantID is not this path. Returns `(image, identity_path, prompt)`.
+
+    `sink`, when a dict, collects the intermediates by INTERMEDIATE_STAGES name. Collecting only
+    keeps a reference; it changes no input to any pass."""
     import json
     import torch
     from .models import ModelRole
@@ -626,6 +669,8 @@ def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image):
         else:
             control = _pose_skeleton(cfg.width, cfg.height, boxes)
         cn_scale = cfg.controlnet_pose_scale
+        if sink is not None:
+            sink["pose"] = control
     else:
         server.set_keyframe_controlnet(ModelRole.CONTROLNET_POSE)
         control = _blank_control(cfg.width, cfg.height)
@@ -657,6 +702,8 @@ def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image):
         {"shot_id": scene.id or "shot", "seed": cfg.seed, "plate_ip_adapter_scale": plate_ip_scale if plate_ip_kw else 0.0,
          "plate_regional_text": bool(regions), "plate_people_free_background": background is not None},
         sort_keys=True), flush=True)
+    if sink is not None:
+        sink["plate"] = plate
 
     if len(passes) == 1:
         return plate, "none", plate_spec.prompt
@@ -664,6 +711,8 @@ def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image):
     ident = passes[1]
     server.set_keyframe_controlnet(ModelRole.CONTROLNET_CANNY)
     canny = _canny_preprocess(plate)
+    if sink is not None:
+        sink["canny"] = canny
     scale = ident.lora_scale
     if engine == "regional":
         slots = scene.character_slots[:cfg.max_slots]
