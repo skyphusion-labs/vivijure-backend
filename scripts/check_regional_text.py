@@ -62,6 +62,21 @@ with torch.no_grad():
     p.regions = [(person_a, boxes[0]), (person_b, boxes[1])]
     compare(p(attn, hs, ehs), p.regions, "plain")
 
+    # Option (c): with a people-free background, every cell outside both regions reads ONLY the background prompt,
+    # and each region still reads its own person.
+    background = torch.randn(1, L + 1, D)
+    p.background = background
+    out_bg = p(attn, hs, ehs)
+    a, b = cells(boxes[0]), cells(boxes[1])
+    bg_cells = ~(a | b)
+    ref_bg = inner(attn, hs[1:], background)
+    check("background: the band reads only the people-free prompt", bool(bg_cells.any()) and torch.allclose(out_bg[1:, bg_cells], ref_bg[:, bg_cells], atol=1e-5))
+    check("background: the band no longer reads the shared prompt", not torch.allclose(out_bg[1:, bg_cells], inner(attn, hs[1:], shared)[:, bg_cells], atol=1e-5))
+    check("background: region A still reads A", torch.allclose(out_bg[1:, a], inner(attn, hs[1:], person_a)[:, a], atol=1e-5))
+    check("background: region B still reads B", torch.allclose(out_bg[1:, b], inner(attn, hs[1:], person_b)[:, b], atol=1e-5))
+    check("background: the unconditioned half is untouched", torch.allclose(out_bg[:1], inner(attn, hs[:1], neg), atol=1e-5))
+    p.background = None
+
     # 4. CONTROL: swapped masks must fail the same comparison.
     p.regions = [(person_a, boxes[1]), (person_b, boxes[0])]
     swapped = p(attn, hs, ehs)

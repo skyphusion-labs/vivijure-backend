@@ -1,0 +1,3 @@
+**Feat: with per-region text, the band between two people can read a people-free prompt, `keyframe.plate_people_free_background`.**
+
+Off by default. With `plate_regional_text` on, the cells outside both people's regions read only the style and the setting, never the shot text that names them, while each person's region keeps the shot's action and the adult clause. Measured on 1.1.9 (vivijure-cf#1143): under per-region text the band read "Mara and Dev stand ..." and a third person appeared there at 2 of 2 seeds. The pooled text embedding stays the shared prompt's, so the plate is still told to draw the two people.
