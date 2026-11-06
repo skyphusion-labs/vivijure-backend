@@ -196,6 +196,10 @@ class KeyframeConfig:
     # Pass A on a two-person shot: each person's description reaches only their own region of the plate, while the
     # scene, style, setting and adult clause stay global. Off, the plate as before (vivijure-cf#1143 option a).
     plate_regional_text: bool = False
+    # With plate_regional_text: the band outside both people reads only the style and the setting, never the shot
+    # text that names them, so it is not told to draw a third person (vivijure-cf#1143 option c). Off = it reads
+    # the shared prompt, as before.
+    plate_people_free_background: bool = False
     multi_char: MultiCharConfig = field(default_factory=MultiCharConfig)
 
     @classmethod
@@ -249,6 +253,7 @@ class KeyframeConfig:
             face_crop_pad=_clamp(d.get("face_crop_pad"), 0.0, 2.0, base.face_crop_pad),
             plate_ip_adapter_scale=_clamp(d.get("plate_ip_adapter_scale"), 0.0, 1.0, base.plate_ip_adapter_scale),
             plate_regional_text=d.get("plate_regional_text") is True if "plate_regional_text" in d else base.plate_regional_text,
+            plate_people_free_background=d.get("plate_people_free_background") is True if "plate_people_free_background" in d else base.plate_people_free_background,
             multi_char=MultiCharConfig.from_dict(d.get("multi_char")),
         )
 

@@ -87,6 +87,7 @@ class KeyframeParams:
     face_crop_pad: float = DEFAULT_FACE_CROP_PAD  # Pass B identity crop padding (cf#1143)
     plate_ip_adapter_scale: float = 0.0  # Pass A per-region portrait IP-Adapter on a two-person shot; 0 = off (cf#1143)
     plate_regional_text: bool = False  # Pass A per-region descriptions on a two-person shot; off = one prompt (cf#1143)
+    plate_people_free_background: bool = False  # with regional text: the band names no one (cf#1143 option c)
     # Identity method for the SINGLE-character path. InstantID is the default: insightface
     # face-embed through InstantID's image projection. "ip_adapter" is the h94 fallback.
     # Two-person shots ignore this and stay on the masked IP-Adapter regional path.
@@ -439,6 +440,22 @@ def plate_region_prompts(scene: Scene, cast: Cast, storyboard: Storyboard) -> tu
     return shared, out
 
 
+def plate_people_free_background_on(scene: Scene, cfg: KeyframeParams) -> bool:
+    """Whether the band outside both people reads a people-free prompt (vivijure-cf#1143 option c). Only with
+    per-region text on, which is what gives the band a prompt of its own."""
+    return plate_regional_text_on(scene, cfg) and bool(cfg.plate_people_free_background)
+
+
+def plate_background_prompt(storyboard: Storyboard) -> str:
+    """The prompt the band outside both people reads under option (c): the style and the setting, and nothing else.
+
+    Measured on 1.1.9 (vivijure-cf#1143): with per-region text on, the band read the shot text "Mara and Dev
+    stand ...", and drew a third person there at 2 of 2 seeds. So it gets no shot text, no name, no description and
+    no people count. It draws no person, so it carries no adult clause; every region that draws a person still
+    does (plate_region_prompts). With no style and no setting it is empty, which is a valid prompt."""
+    return _join_prompt([storyboard.style_prefix, (storyboard.setting or "").strip()])
+
+
 def keyframe_render_path(engine: str, cfg: KeyframeParams, *, has_instantid_ref: bool) -> str:
     """Which GPU body `render_keyframe` takes.
 
@@ -623,7 +640,12 @@ def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image):
         boxes = region_boxes(cfg.width, cfg.height, len(slots), orientation="vertical", gutter=cfg.region_gutter)
         regions = [(encode_long_prompt(pipe, p, plate_spec.negative_prompt, shot_id=scene.id or "shot")["prompt_embeds"], b)
                    for p, b in zip(persons, boxes)]
-    with regional_text.applied(pipe, regions, width=cfg.width, height=cfg.height, cfg_batch=_guidance(cfg) > 1.0):
+    background = None
+    if regions and plate_people_free_background_on(scene, cfg):
+        background = encode_long_prompt(pipe, plate_background_prompt(storyboard), plate_spec.negative_prompt,
+                                        shot_id=scene.id or "shot")["prompt_embeds"]
+    with regional_text.applied(pipe, regions, width=cfg.width, height=cfg.height, cfg_batch=_guidance(cfg) > 1.0,
+                               background=background):
         plate = pipe(
             **encode_long_prompt(pipe, plate_prompt, plate_spec.negative_prompt, shot_id=scene.id or "shot"),
             num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
@@ -633,7 +655,7 @@ def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image):
         ).images[0]
     print("@event keyframe.scene_plate " + json.dumps(
         {"shot_id": scene.id or "shot", "seed": cfg.seed, "plate_ip_adapter_scale": plate_ip_scale if plate_ip_kw else 0.0,
-         "plate_regional_text": bool(regions)},
+         "plate_regional_text": bool(regions), "plate_people_free_background": background is not None},
         sort_keys=True), flush=True)
 
     if len(passes) == 1:

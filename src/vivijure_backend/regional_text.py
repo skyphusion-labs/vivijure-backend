@@ -52,6 +52,8 @@ class RegionalTextProcessor:
         self.vae_scale_factor = vae_scale_factor  # SDXL is 8; read from the pipe at install, never assumed
         self.cfg_batch = cfg_batch
         self.regions: list = []
+        # Option (c): what the cells outside every region read instead of the shared prompt. None = the shared one.
+        self.background = None
 
     def __call__(self, attn, hidden_states, encoder_hidden_states=None, *args, **kwargs):
         out = self.inner(attn, hidden_states, encoder_hidden_states, *args, **kwargs)
@@ -69,6 +71,16 @@ class RegionalTextProcessor:
         f = self.vae_scale_factor
         h, w = layer_hw(hs.shape[1], self.height // f, self.width // f)
         result = out.clone()
+        if self.background is not None:
+            # The band and the background: every cell in no region reads the people-free prompt (option c).
+            bg = self.background.to(device=text.device, dtype=text.dtype).expand(hs.shape[0], -1, -1)
+            bg_out = self.inner(attn, hs, (bg, [t[start:] for t in ip]) if ip is not None else bg, *args, **kwargs)
+            inside = None
+            for _, box in self.regions:
+                g = torch.tensor(box_to_grid(box, self.width, self.height, h, w), device=out.device).reshape(1, h * w, 1)
+                inside = g if inside is None else (inside | g)
+            outside = ~inside if inside is not None else torch.ones(1, h * w, 1, dtype=torch.bool, device=out.device)
+            result[start:] = torch.where(outside, bg_out, result[start:])
         for embeds, box in self.regions:
             emb = embeds.to(device=text.device, dtype=text.dtype).expand(hs.shape[0], -1, -1)
             ehs = (emb, [t[start:] for t in ip]) if ip is not None else emb
@@ -79,7 +91,7 @@ class RegionalTextProcessor:
         return result
 
 
-def install(pipe, regions, *, width: int, height: int, cfg_batch: bool) -> dict:
+def install(pipe, regions, *, width: int, height: int, cfg_batch: bool, background=None) -> dict:
     """Wrap every cross-attention processor of `pipe.unet` with the regions set. Returns the original processors for
     `restore`. Self-attention ("attn1") processors are left as they are."""
     originals = dict(pipe.unet.attn_processors)
@@ -89,6 +101,7 @@ def install(pipe, regions, *, width: int, height: int, cfg_batch: bool) -> dict:
             p = RegionalTextProcessor(proc, width=width, height=height, cfg_batch=cfg_batch,
                                       vae_scale_factor=int(getattr(pipe, "vae_scale_factor", 8)))
             p.regions = regions
+            p.background = background
             wrapped[name] = p
         else:
             wrapped[name] = proc
@@ -101,14 +114,14 @@ def restore(pipe, originals: dict) -> None:
 
 
 @contextmanager
-def applied(pipe, regions, *, width: int, height: int, cfg_batch: bool):
+def applied(pipe, regions, *, width: int, height: int, cfg_batch: bool, background=None):
     """Install the regions for one pipe call and ALWAYS put the original processors back, even if the call raises.
     The pipe is shared across shots, so a processor left installed would make every later shot regional. With no
     regions this does nothing."""
     if not regions:
         yield
         return
-    originals = install(pipe, regions, width=width, height=height, cfg_batch=cfg_batch)
+    originals = install(pipe, regions, width=width, height=height, cfg_batch=cfg_batch, background=background)
     try:
         yield
     finally:

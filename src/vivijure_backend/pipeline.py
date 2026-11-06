@@ -71,6 +71,7 @@ def keyframe_params_from(config: RenderConfig) -> KeyframeParams:
         face_crop_pad=kc.face_crop_pad,
         plate_ip_adapter_scale=kc.plate_ip_adapter_scale,
         plate_regional_text=kc.plate_regional_text,
+        plate_people_free_background=kc.plate_people_free_background,
     )
 
 
