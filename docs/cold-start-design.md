@@ -6,8 +6,12 @@ fan-out, and which structural fix to take. This is the decision doc the 0.2.20 t
 weighs **preloaded network volumes** vs **bake-into-image** vs **pre-warm pool** vs **staged
 cold-starts** with numbers instead of vibes.
 
-> **Status: SUPERSEDED for keyframes (2026-10-30, #530).** The keyframe path is a thin image
-> plus a global volume. No bake. No cold pull. See [global-volume.md](global-volume.md).
+> **Status: SUPERSEDED for keyframes (2026-11-06, #564).** The keyframe path is a thin code image
+> on a **stills weights base**: the stills set and the finish legs as image layers below the code
+> layer, so a cold keyframe worker pulls nothing from R2 and a code-only release reuses the weight
+> layers. See [stills-weights-base.md](stills-weights-base.md). The 2026-10-30 plan (#530, a global
+> volume, [global-volume.md](global-volume.md)) was never mounted on the endpoint, so until the base
+> ships a cold worker pulls the stills set from R2 on the GPU clock.
 > The bake decision below is the legacy film image record.
 
 > **Prior status (revised 2026-06-29) -- BAKE THE WEIGHTS INTO THE IMAGE (Option A), at

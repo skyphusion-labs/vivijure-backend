@@ -9,6 +9,11 @@ and for job I/O; the worker holds no other credential.
 
 The sentinel is written only after the pull fully succeeds, so a worker killed mid-pull leaves
 no marker and re-runs (rclone copy is idempotent) rather than rendering against a half-mirror.
+
+The STILLS set is the exception (#564). A keyframe job's ~26 GB pulled on the GPU clock after every
+release, while RunPod pulls image layers before a worker starts, unbilled. So that set is staged by
+`stage_stills` (this same pull), packed into a weights base image under the code layer, and found warm
+by the stills sentinel; see docs/stills-weights-base.md. Everything else still pulls here.
 The rclone command is built by a pure helper so it tests without spawning anything.
 """
 from __future__ import annotations
@@ -863,9 +868,17 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     stills_only = wants_stills_only(action, e)
     stills_sentinel = models_root / STILLS_SENTINEL
     if stills_only and stills_sentinel.exists() and stills_sentinel.read_text().strip() == model_version:
-        log("models_mirror: warm worker (stills set present); skipping R2 pull.")
-        log(_skip_event("warm_stills"))
-        return False
+        # The sentinel can come from the IMAGE (the stills weights base, #564), not only from a pull on
+        # this worker, so it is checked before it is trusted: a stat of each listed file at its size. A
+        # sentinel whose files are not all there pulls again, rather than failing at load.
+        try:
+            stills_manifest.verify(hf_home)
+        except stills_manifest.StillsIncomplete as exc:
+            log(f"models_mirror: stills sentinel present but the set is not ({exc}); pulling it again.")
+        else:
+            log("models_mirror: warm worker (stills set present); skipping R2 pull.")
+            log(_skip_event("warm_stills"))
+            return False
     if not e.get("R2_ACCESS_KEY_ID"):
         hub = hf_home / "hub"
         if not hub.is_dir() or not any(hub.iterdir()):
@@ -1230,6 +1243,66 @@ def flatten_symlinks(root: Path, log: Callable[[str], None] = print) -> int:
     return n
 
 
+def check_stills(env: dict | None = None) -> list[str]:
+    """What is wrong with a stills tree, as a list of problems; empty means it is complete (#564).
+
+    The stills weights base image is trusted only if this is empty, at stage time and again on the built
+    image. Complete means: the stills sentinel at this model version, every stills file at its size
+    (`stills_manifest.verify`), every finish leg's sentinel at this version, a non-empty `antelopev2`,
+    and NO `.vj-baked`. That marker would short-circuit every pull for every action, and this tree
+    holds only the stills set and the finish legs, so a job needing anything else must still pull it.
+    Pure apart from stat and small reads."""
+    e = env if env is not None else os.environ
+    root = Path(e.get("VJ_MODELS_ROOT", "/opt/models"))
+    version = e.get("VJ_MODEL_VERSION") or _DEFAULT_MODEL_VERSION
+    problems: list[str] = []
+    if (root / BAKED_SENTINEL).exists():
+        problems.append(f"{BAKED_SENTINEL} present: a stills tree must not claim the full set")
+    sentinel = root / STILLS_SENTINEL
+    if not sentinel.is_file() or sentinel.read_text().strip() != version:
+        problems.append(f"{STILLS_SENTINEL} missing or not at model version {version!r}")
+    try:
+        stills_manifest.verify(_hf_home(env))
+    except stills_manifest.StillsIncomplete as exc:
+        problems.append(str(exc))
+    for leg in FINISH_LEGS:
+        if not _finish_leg_current(root, leg, version):
+            problems.append(f"finish leg {leg} sentinel missing or not at model version {version!r}")
+    antelope = root / "antelopev2"
+    if not antelope.is_dir() or not any(antelope.iterdir()):
+        problems.append("antelopev2 missing or empty")
+    return problems
+
+
+def stage_stills(env: dict | None = None, log: Callable[[str], None] = print) -> list[str]:
+    """Fill an empty `VJ_MODELS_ROOT` with the stills set and the finish legs, through the SAME pull a
+    cold worker runs, then check it (#564). Returns `check_stills`' problems; empty means staged.
+
+    The weights base image is built from this tree, so a baked stills job sees exactly the files a cold
+    one would have pulled from R2: same bytes, same symlinks, same `.no_exist` stubs, same sentinels.
+    A volume is refused rather than read, since this writes the tree that becomes the image."""
+    e = dict(env if env is not None else os.environ)
+    e.pop("VJ_VOLUME_ROOT", None)
+    if Path(DEFAULT_VOLUME_ROOT).is_dir():
+        return [f"{DEFAULT_VOLUME_ROOT} is mounted here; stage on a host without a volume"]
+    ensure_models(env=e, log=log, action="preview")
+    ensure_models(env=e, log=log, action="finish_clip", finish_legs=FINISH_LEGS)
+    return check_stills(e)
+
+
+def _stills_main(argv: list[str]) -> int:
+    """`--stage-stills` fills and checks; `--check-stills` only checks. Exit 0 iff the tree is complete."""
+    if "--stage-stills" in argv:
+        problems = stage_stills()
+    else:
+        problems = check_stills()
+    for line in problems:
+        print(f"models_mirror: stills tree problem: {line}", flush=True)
+    root = os.environ.get("VJ_MODELS_ROOT", "/opt/models")
+    print(f"models_mirror: stills tree at {root} is {'INCOMPLETE' if problems else 'complete'}", flush=True)
+    return 1 if problems else 0
+
+
 def _preload_main(argv: list[str] | None = None) -> int:
     """Stage weights onto a mounted volume from R2.
 
@@ -1270,6 +1343,9 @@ if __name__ == "__main__":
     import sys
     if "--preload" in sys.argv:
         _preload_main()
+    elif "--stage-stills" in sys.argv or "--check-stills" in sys.argv:
+        sys.exit(_stills_main(sys.argv[1:]))
     else:
         print("usage: python -m vivijure_backend.harness.models_mirror "
-              "--preload [--stills] [--flatten]", flush=True)
+              "--preload [--stills] [--flatten] | --stage-stills | --check-stills", flush=True)
+        sys.exit(2)
