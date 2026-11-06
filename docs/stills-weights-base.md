@@ -42,7 +42,14 @@ Run on the bake box ([bake-box.md](bake-box.md)). It needs two credentials, both
 
 ### 1. Stage, with the worker's own pull
 
-Use the image the endpoint runs now. It holds the code that will read this tree.
+Use an image whose code has `--stage-stills` (#591 or later), at the commit that will ship on this base. That code reads
+the tree. An older image does not know the flag. On the first bake, 1.1.14 printed the usage line and exited 0 with
+nothing staged. So on a first bake, build a local thin image at the target commit on the bare toolchain, and stage
+with it. Do not push that image.
+
+Pass the R2 credential on the SSH stdin, and source it in a shell that runs in the FOREGROUND. Background only
+the `docker run`. A backgrounded `bash -c` has its stdin set to `/dev/null`, so the credential never arrives,
+and the stage reports `no_creds_empty_cache`.
 
 ```
 mkdir -p ~/stills/stage
@@ -121,6 +128,22 @@ The first job on a new worker must show, in its log and progress:
 - `mirror_skipped {"reason": "warm_stills"}`, not `mirror_complete`;
 - `mirror_done` with `pulled: false`;
 - an `executionTime` near a warm job's, plus the model load.
+
+**First bake, 2026-11-06 (`stills-t1-m1@sha256:6d0e19bd18bdba3318e510fcc0055d9d75c1a1353df918795dc92be0d70740b6`, on
+`toolchain-t1@sha256:456b417b...`).**
+- **Stage:** 26,180,415,017 bytes of stills set in 72.5 s (361 MB/s), plus 555,648,645 bytes of finish legs in 8.4 s.
+  It was run in a local thin image at `9de17db`, for the reason above.
+- **Gates:** `assert-no-tree-cache` OK; `assert-finish-shas` OK (2 facexlib weights).
+- **Bins:** `bin` packed 62 files and 33 symlinks into 4 bins, 24.9 GB in total, with the largest at 9.49 GB. The fourth bin is empty.
+- **Build:** 12:44:34Z to 12:57:39Z. `verify-image`: OK, all layers under the 10 GB ceiling.
+- **Layers added over the toolchain, compressed:**
+  - `76c9fde8193f`, 4,601,336,414 bytes (4.29 GiB);
+  - `f953853e0b64`, 7,802,787,740 bytes (7.27 GiB);
+  - `89cf0b497764`, 5,400,004,930 bytes (5.03 GiB);
+  - the empty bin, which is the shared empty layer `4f4fb700ef54` (32 bytes).
+  - In total 16.58 GiB.
+- **Push:** 12:57:39Z to 12:58:36Z (57 s). The 23 toolchain layers already existed on GHCR.
+- **Credential:** read-only, scoped to `models/`, 4 h TTL. It was minted from a dedicated read-only parent token, and the parent was deleted after the stage.
 
 Record for the first bake: each layer's compressed size, the push time, how long a new worker stays
 `INITIALIZING`, and the cold job's `executionTime`. Those are the after numbers for #564.
