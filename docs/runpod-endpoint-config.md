@@ -16,7 +16,7 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 | | `vivijure-backend-hosted` | `vivijure-upscale-hosted` |
 |---|---|---|
 | id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
-| Image | `vivijure-backend:1.1.16@sha256:5d7ef08c9391ccece589c28b492b8092b5b701905fcdb71011770b5d627c541c` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
+| Image | `vivijure-backend:1.1.17@sha256:2269c849c72f4f293ee6954765c8c6a98cc44a5f9aa27dd37be9b7c551332393` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
 | Pools | `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141`, `BLACKWELL_180`, `BLACKWELL_288` | `BLACKWELL_96` |
 | `workers` min / max | 0 / 12 | 0 / 10 |
 | Idle timeout | 60 s | 10 s |
@@ -33,8 +33,13 @@ still sets them, and nothing is mounted there, so the worker logs that the volum
 takes the R2 mirror.
 
 **Why the disk is 300 GB (vivijure-backend#600).** The backend container disk read 80 GB until 2026-11-06, when
-one worker filled it and failed every later job within seconds on ENOSPC. It was raised that day; `get-endpoint`
-on `xe5d1ivs40ohjo` read `disk: 300` on 2026-11-06. The arithmetic, in GiB (80 GB is 74.5 GiB):
+one worker filled it and failed every later job within seconds on ENOSPC. It was raised that day in two steps, as
+the endpoint's release history records (`list-endpoint-releases`, field `template.containerDiskInGb`):
+
+- v41, 2026-11-06T15:01:44Z: from 80 to 200, after the full-disk worker;
+- v42, 2026-11-06T15:20:17Z: from 200 to 300, to hold the whole set below with room to spare rather than only the Wan set.
+
+`get-endpoint` on `xe5d1ivs40ohjo` read `disk: 300` on 2026-11-06, and the 1.1.17 repin (v43) kept it at 300. A repin changes only the image and the workers, so it leaves the disk alone. The arithmetic, in GiB (80 GB is 74.5 GiB):
 
 | What a worker may hold | GiB | Source |
 |---|---|---|
@@ -71,6 +76,33 @@ the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 1
 1. Drain the pool to 0, repin by digest, then restore max 12 and idle 60 s.
 2. Wait 65 s after the release before submitting anything. Renders through the studio got `keyframe /run -> 409` in that window after the 1.1.7 repin.
 3. On a thin image built on the bare toolchain, after a repin, every worker is cold and pulls about 24 GB from R2 (on a code image built on the stills weights base, a stills job pulls nothing: [stills-weights-base.md](stills-weights-base.md), #564), and a warm-up batch does not change that: each NEW worker pulls again. So keep the number of concurrent cold workers small, about 4 to 6, by submitting in small batches, and budget one cold pull per worker. On 2026-11-06, 15 cold workers at once slowed pulls to 2.6 MiB/s and stretched cold jobs to about 20 minutes each; 6 at once pulled normally (cold delay about 2 to 3 minutes). Submitting 2 first and the rest once they ran did NOT help after a new image: the second batch started on new workers, cold.
+
+**Backend 1.1.17, pinned 2026-11-06 (release v43, 16:05:16Z).** A code-only release on the existing stills base: no restage.
+
+- **Code:** main `eed4b57`. It adds #601 (`ip_adapter_scale_per_slot` reaches the two-person draw) and #602 (disk guards):
+  - a pull-size guard (`check_pull_fits`);
+  - a 4 GiB job floor (`check_job_floor`, `DEFAULT_MIN_FREE_GB`);
+  - `refresh_worker` on a disk failure;
+  - `disk_free_gb` on events.
+  The image is built from `deploy/Dockerfile.thin` with `TOOLCHAIN_REF=vivijure-backend:stills-t1-m1@sha256:6d0e19bd18bdba3318e510fcc0055d9d75c1a1353df918795dc92be0d70740b6`.
+  Since `1ac386e`, `deploy/` changed only in #591 (`stills-weights.Dockerfile`, and a comment in `Dockerfile.thin`).
+- **Image:** `vivijure-backend:1.1.17@sha256:2269c849c72f4f293ee6954765c8c6a98cc44a5f9aa27dd37be9b7c551332393`.
+  The push took 3 s. It pushed 2 code layers and reused 26. The base is an exact prefix, and all three weight layers were reused.
+  The push digest and the GHCR read-back match.
+- **Checks in the image:**
+  - `--check-stills` prints `complete` and exits 0;
+  - `harness/disk.py` is present, with `DEFAULT_MIN_FREE_GB` 4.0, `check_job_floor` and `check_pull_fits`;
+  - `refresh_worker` is in `harness/handler.py`, and `disk_free_gb` is in `harness/progress.py`;
+  - `ip_adapter_scale_per_slot` is a `MultiCharConfig` field;
+  - the code files hash the same as at `eed4b57`, and the image holds 30 .py files (#602 adds `harness/disk.py`);
+  - `.vj-stills-complete` reads `1`, there is no `.vj-baked`, and the CPU import smoke passed.
+- **Repin:** held until a live film finished at 16:02:40Z. Before the drain, 0 jobs were in progress and 0 queued.
+  The pool was drained to 0, then restored to max 12 with a 60 s idle timeout, and the disk was kept at 300 GB.
+  65 s after the release the rollout read 100% on 1.1.17, with 0 unhealthy. No render job was submitted.
+
+**Backend rollback from 1.1.17:** image
+`vivijure-backend:1.1.16@sha256:5d7ef08c9391ccece589c28b492b8092b5b701905fcdb71011770b5d627c541c` (same stills base), idle timeout 60 s,
+max 12, disk 300 GB. Follow the repinning procedure above. 1.1.16 has no disk guards, so a full worker fails silently again.
 
 **Backend 1.1.16, pinned 2026-11-06 (release v40, 13:45:37Z).** A code-only release on the existing stills base: no restage.
 
