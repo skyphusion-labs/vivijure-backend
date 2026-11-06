@@ -203,23 +203,57 @@ def count_faces(analyzer, image) -> int:
     return len(analyzer.get(arr) or [])
 
 
-def choose_plate(counts: list[int], expected: int) -> int:
+def plate_face_floor_on(scene: Scene, cfg: KeyframeParams) -> bool:
+    """Whether the plate count guard also redraws a plate with FEWER faces than people (vivijure-cf#1281).
+
+    Measured on vivijure-cf#1281 (hand board, 6 seeds): with per-region text on, the plate drew ONE person on
+    4 of 6, and the guard, which counts extras only, passed each of them, so the still lost a person. Without
+    per-region text the same board drew one face on 1 of 6. So the floor rides with per-region text and nothing
+    else: a person facing away is still a legitimate one-face plate on every other path, which is why the guard
+    accepts it there. Needs the guard itself to run (plate_count_retries). Pure."""
+    return plate_regional_text_on(scene, cfg) and plate_count_retries_for(scene, cfg) > 0
+
+
+def plate_needs_redraw(faces: int, expected: int, *, floor: bool = False) -> bool:
+    """Whether the guard redraws a plate with `faces` faces: always for an extra person, and for a missing one
+    only under the floor (plate_face_floor_on). Pure."""
+    return faces > expected or (floor and faces < expected)
+
+
+def choose_plate(counts: list[int], expected: int, *, floor: bool = False) -> int:
     """The draw Pass B gets: the first that holds at most `expected` faces, else the one with the fewest (the
-    earliest on a tie). Fewer faces than people is accepted: a person can face away, and the guard is for extras."""
+    earliest on a tie). Fewer faces than people is accepted: a person can face away, and the guard is for extras.
+
+    Under the floor (vivijure-cf#1281) the first draw with exactly `expected` faces wins. With none, the draw
+    closest from below (the most faces not over `expected`, the earliest on a tie), and only with no draw at or
+    under it, the fewest: a missing person is still preferred to an extra one."""
     if not counts:
         raise ValueError("choose_plate needs at least one draw")
+    if floor:
+        for i, n in enumerate(counts):
+            if n == expected:
+                return i
+        under = [i for i, n in enumerate(counts) if n <= expected]
+        if under:
+            return max(under, key=lambda i: (counts[i], -i))
+        return min(range(len(counts)), key=lambda i: (counts[i], i))
     for i, n in enumerate(counts):
         if n <= expected:
             return i
     return min(range(len(counts)), key=lambda i: (counts[i], i))
 
 
-def plate_count_record(counts: list[int], expected: int, retries: int) -> dict:
+def plate_count_record(counts: list[int], expected: int, retries: int, *, floor: bool = False) -> dict:
     """The guard's honest record, for the result and the event. `clean` false means the still was made from a
-    plate that still has too many faces, and says so."""
-    chosen = choose_plate(counts, expected)
-    return {"expected": expected, "faces": list(counts), "chosen": chosen,
-            "clean": counts[chosen] <= expected, "retries": retries}
+    plate that still has too many faces, and says so. Under the floor, `floor` is true and `clean` also needs
+    the count to be exact: a plate that is still short of a person is not clean."""
+    chosen = choose_plate(counts, expected, floor=floor)
+    n = counts[chosen]
+    rec = {"expected": expected, "faces": list(counts), "chosen": chosen,
+           "clean": (n == expected) if floor else (n <= expected), "retries": retries}
+    if floor:
+        rec["floor"] = True
+    return rec
 
 
 def intermediate_path(out_path: Path, stage: str) -> Path:
@@ -745,7 +779,8 @@ def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image, 
     keeps a reference; it changes no input to any pass.
 
     The plate count guard (`plate_count_retries`, two-person-plus shots): after the first plate, count its faces and
-    redraw ONLY the plate with plate_retry_seed while it has more faces than people, up to the limit. Pass B then
+    redraw ONLY the plate with plate_retry_seed while it has more faces than people (or, under per-region text,
+    fewer: plate_face_floor_on), up to the limit. Pass B then
     runs once, on the chosen plate, with the original generator, so a first plate that is clean gives exactly the
     still the guard-off path draws. `report["plate_count"]` gets the record whenever the guard ran."""
     import json
@@ -812,14 +847,15 @@ def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image, 
     retries = plate_count_retries_for(scene, cfg)
     if retries:
         expected = len(scene.character_slots[:cfg.max_slots])
+        floor = plate_face_floor_on(scene, cfg)
         analyzer = server.face_analyzer()
         draws = [plate]
         counts = [count_faces(analyzer, plate)]
-        while counts[-1] > expected and len(draws) <= retries:
+        while plate_needs_redraw(counts[-1], expected, floor=floor) and len(draws) <= retries:
             retry_gen = torch.Generator(device="cuda").manual_seed(plate_retry_seed(cfg.seed, len(draws)))
             draws.append(draw_plate(retry_gen))
             counts.append(count_faces(analyzer, draws[-1]))
-        record = plate_count_record(counts, expected, retries)
+        record = plate_count_record(counts, expected, retries, floor=floor)
         plate = draws[record["chosen"]]
         if report is not None:
             report["plate_count"] = record

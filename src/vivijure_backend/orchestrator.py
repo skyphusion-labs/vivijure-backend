@@ -201,6 +201,10 @@ def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard
     guarded = scene is None or 2 <= len(scene.character_slots) <= mc.max_slots
     if kc.plate_count_retries and guarded:
         payload["plate_count_retries"] = kc.plate_count_retries
+        # vivijure-cf#1281: under per-region text the guard also redraws a plate short of a person, so only those
+        # stills change and only they get this key; every other still keeps its hash (keyframe.plate_face_floor_on).
+        if kc.plate_regional_text:
+            payload["plate_face_floor"] = 1
     # backend#596: a guarded scene-lock plate for two-plus people now draws without the pose skeleton when the
     # job leaves pose_conditioning unset. Only those stills change, so only they get this key and redraw; the
     # rule is keyframe.plate_pose_default_off, the same function the renderer reads.
