@@ -42,10 +42,14 @@ def _scene(prompt=SHOT, slots=("A", "B")):
 
 # --------------------------------------------------------------------------- the knob
 
-def test_off_by_default_everywhere():
-    assert KeyframeConfig().plate_regional_text is False
-    assert KeyframeParams().plate_regional_text is False
-    assert plate_regional_text_on(_scene(), KeyframeParams()) is False
+def test_unset_by_default_and_off_where_the_default_does_not_reach():
+    # Three-state since vivijure-cf#1281: unset by default. The default turns it on only for a guarded two-person
+    # scene-lock plate with the pose left unset (tests/test_plate_regional_text_default_1281.py); explicit off wins.
+    assert KeyframeConfig().plate_regional_text is None
+    assert KeyframeParams().plate_regional_text is None
+    assert plate_regional_text_on(_scene(), KeyframeParams(plate_regional_text=False)) is False
+    assert plate_regional_text_on(_scene(), KeyframeParams(plate_count_retries=0)) is False
+    assert plate_regional_text_on(_scene(), KeyframeParams(pose_conditioning=True)) is False
 
 
 @pytest.mark.parametrize("slots,want", [(("A", "B"), True), (("A",), False), ((), False), (("A", "B", "C"), False)])

@@ -176,7 +176,9 @@ def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard
         "canny_scale": kc.canny_scale,
         "face_crop_pad": kc.face_crop_pad,
         "plate_ip_adapter_scale": kc.plate_ip_adapter_scale,
-        "plate_regional_text": kc.plate_regional_text,
+        # Unset reads as off, its meaning before vivijure-cf#1281, so this key keeps every existing hash; where the
+        # new default changes a drawing, `plate_text` below says so.
+        "plate_regional_text": kc.plate_regional_text is True,
         "plate_people_free_background": kc.plate_people_free_background,
         "two_pass": "scene_lock_v1",
         "engine": KEYFRAME_ENGINE_VERSION,
@@ -199,6 +201,14 @@ def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard
             None if scene is None else len(scene.character_slots), max_slots=mc.max_slots,
             pose_conditioning=mc.pose_conditioning, plate_count_retries=kc.plate_count_retries):
         payload["plate_pose"] = "off"
+    # vivijure-cf#1281: the same stills, when per-region text is also left unset, now draw with it. Only they get this
+    # key and redraw; the rule is keyframe.plate_regional_text_default_on, the function the renderer reads.
+    from .keyframe import plate_regional_text_default_on
+    if kc.scene_lock and plate_regional_text_default_on(
+            None if scene is None else len(scene.character_slots), max_slots=mc.max_slots,
+            plate_regional_text=kc.plate_regional_text, pose_conditioning=mc.pose_conditioning,
+            plate_count_retries=kc.plate_count_retries):
+        payload["plate_text"] = "regional"
     if scene is not None and storyboard is not None:
         from .keyframe import DEFAULT_NEGATIVE, build_prompt, scene_lock_negative
 

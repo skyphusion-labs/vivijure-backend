@@ -104,17 +104,37 @@ class _Gen:
         return self
 
 
+class _Unet:
+    """The attention-processor surface of the real UNet, which per-region plate text (regional_text.install) wraps.
+    vivijure-cf#1281 turned that text on by default for a two-person scene-lock plate, so the default plate touches it."""
+    def __init__(self):
+        self.procs = {"down.attn1.processor": "self", "down.attn2.processor": "cross"}
+
+    @property
+    def attn_processors(self):
+        return dict(self.procs)
+
+    def set_attn_processor(self, d):
+        self.procs = dict(d)
+
+
 class _Pipe:
     """Records every sampling call and returns a distinct solid image for each."""
     COLORS = ((200, 10, 10), (10, 200, 10), (10, 10, 200))
+    vae_scale_factor = 8
 
     def __init__(self, w, h):
         self.calls: list[dict] = []
         self.outputs: list[Image.Image] = []
         self.w, self.h = w, h
+        self.unet = _Unet()
+        # The cross-attention processors installed during each call, so a test can see whether the plate drew
+        # with per-region text (a RegionalTextProcessor) or without (the original processor).
+        self.cross_procs: list = []
 
     def __call__(self, **kw):
         self.calls.append(kw)
+        self.cross_procs.append(self.unet.procs["down.attn2.processor"])
         img = Image.new("RGB", (self.w, self.h), self.COLORS[len(self.outputs) % 3])
         # A plate with structure, so its canny map is not empty.
         img.paste((255, 255, 255), (self.w // 4, self.h // 4, self.w // 2, self.h // 2))

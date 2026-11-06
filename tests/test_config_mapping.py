@@ -116,10 +116,12 @@ def test_keyframe_plate_people_free_background_reaches_params():
 
 
 def test_keyframe_plate_regional_text_reaches_params():
-    # vivijure-cf#1143 option a: off by default; only an exact true turns it on.
+    # vivijure-cf#1143 option a, three-state since vivijure-cf#1281: only a real bool is a choice, and it reaches the
+    # params as given; anything else, and absent, is unset (None), the per-shot default.
     assert keyframe_params_from(_rcfg(kf={"plate_regional_text": True})).plate_regional_text is True
-    assert keyframe_params_from(_rcfg(kf={"plate_regional_text": "true"})).plate_regional_text is False
-    assert keyframe_params_from(_rcfg()).plate_regional_text is False
+    assert keyframe_params_from(_rcfg(kf={"plate_regional_text": False})).plate_regional_text is False
+    assert keyframe_params_from(_rcfg(kf={"plate_regional_text": "true"})).plate_regional_text is None
+    assert keyframe_params_from(_rcfg()).plate_regional_text is None
 
 
 def test_keyframe_plate_ip_adapter_scale_reaches_params():

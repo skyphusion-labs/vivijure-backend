@@ -86,7 +86,9 @@ class KeyframeParams:
     canny_scale: float = DEFAULT_CANNY_SCALE
     face_crop_pad: float = DEFAULT_FACE_CROP_PAD  # Pass B identity crop padding (cf#1143)
     plate_ip_adapter_scale: float = 0.0  # Pass A per-region portrait IP-Adapter on a two-person shot; 0 = off (cf#1143)
-    plate_regional_text: bool = False  # Pass A per-region descriptions on a two-person shot; off = one prompt (cf#1143)
+    # Pass A per-region descriptions on a two-person shot (cf#1143). None = the per-shot default (cf#1281), see
+    # plate_regional_text_default_on; True or False sets it.
+    plate_regional_text: bool | None = None
     plate_people_free_background: bool = False  # with regional text: the band names no one (cf#1143 option c)
     plate_count_retries: int = 3     # 0..3 plate redraws while it has too many faces; 0 = off (cf#1143)
     # Identity method for the SINGLE-character path. InstantID is the default: insightface
@@ -168,6 +170,25 @@ def plate_pose_default_off(people: int | None, *, max_slots: int, pose_condition
     if people is not None and not (2 <= people <= max_slots):
         return False
     return max(0, min(3, int(plate_count_retries))) > 0
+
+
+def plate_regional_text_default_on(people: int | None, *, max_slots: int, plate_regional_text: bool | None,
+                                   pose_conditioning: bool | None, plate_count_retries: int) -> bool:
+    """True iff the vivijure-cf#1281 default turns per-region text ON for a scene-lock plate that drew without it.
+
+    Measured on vivijure-cf#1281, board 2 (6 seeds, keyframes-only through the studio): with the backend#596
+    default (no pose skeleton, the plate count guard on) the plate drew each person's look from the whole shot
+    text, and Dev came out as a woman or long-haired on 3 of 6; with per-region text on top, 6 of 6 held the
+    action with the right people and no third person. With the skeleton back on, 5 of 6. So the default is
+    coupled to the measured cell: it applies only where the pose is ALSO left to its default and that default
+    takes the skeleton off, which already requires the guard (plate_pose_default_off). An explicit
+    `plate_regional_text`, or an explicit `pose_conditioning`, is the job's own choice and never the default.
+
+    `people` is the shot's character count, or None for a config-only reuse hash. Pure."""
+    if plate_regional_text is not None:
+        return False
+    return plate_pose_default_off(people, max_slots=max_slots, pose_conditioning=pose_conditioning,
+                                  plate_count_retries=plate_count_retries)
 
 
 def plate_pose_on(scene: Scene, cfg: KeyframeParams) -> bool:
@@ -539,8 +560,14 @@ def plate_ip_adapter_scale_for(scene: Scene, cfg: KeyframeParams) -> float:
 
 def plate_regional_text_on(scene: Scene, cfg: KeyframeParams) -> bool:
     """Whether Pass A gives each person's description to their own region (vivijure-cf#1143 option a). Two-person
-    shots within the regional slot cap only, and only when set."""
-    return bool(cfg.plate_regional_text) and engine_for(scene, cfg) == "regional"
+    shots within the regional slot cap only: when set, or when unset and plate_regional_text_default_on holds."""
+    if engine_for(scene, cfg) != "regional":
+        return False
+    if cfg.plate_regional_text is not None:
+        return bool(cfg.plate_regional_text)
+    return plate_regional_text_default_on(len(scene.character_slots), max_slots=cfg.max_slots,
+                                          plate_regional_text=None, pose_conditioning=cfg.pose_conditioning,
+                                          plate_count_retries=cfg.plate_count_retries)
 
 
 def plate_region_prompts(scene: Scene, cast: Cast, storyboard: Storyboard) -> tuple[str, list[str]]:

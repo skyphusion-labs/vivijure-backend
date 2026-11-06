@@ -33,7 +33,9 @@ def _scene(prompt="Mara and Dev stand side by side at a workbench, looking at a 
 def test_off_by_default_and_only_with_regional_text():
     assert KeyframeConfig().plate_people_free_background is False
     assert KeyframeParams().plate_people_free_background is False
-    assert plate_people_free_background_on(_scene(), KeyframeParams(plate_people_free_background=True)) is False
+    assert plate_people_free_background_on(_scene(), KeyframeParams(plate_regional_text=False, plate_people_free_background=True)) is False
+    # vivijure-cf#1281: per-region text is on by default for this shot, so the band follows it when asked for.
+    assert plate_people_free_background_on(_scene(), KeyframeParams(plate_people_free_background=True)) is True
     assert plate_people_free_background_on(_scene(), KeyframeParams(plate_regional_text=True, plate_people_free_background=True)) is True
     assert plate_people_free_background_on(_scene(slots=("A",)), KeyframeParams(plate_regional_text=True, plate_people_free_background=True)) is False
 
