@@ -173,7 +173,8 @@ def gpu_fakes(monkeypatch):
 
 
 def _render(tmp_path, slots, save, name):
-    params = kf.KeyframeParams(width=64, height=48, identity_method="ip_adapter")
+    # The plate count guard (default on) has its own tests; these pin the guard off to test the flag alone.
+    params = kf.KeyframeParams(width=64, height=48, identity_method="ip_adapter", plate_count_retries=0)
     pipe = _Pipe(params.width, params.height)
     out = tmp_path / name / "shot_03.png"
     res = kf.render_keyframe(_scene(slots), CAST, SB, _Server(pipe), out, params=params,

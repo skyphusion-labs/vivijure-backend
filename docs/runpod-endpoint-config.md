@@ -50,7 +50,7 @@ the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 1
 **Repinning the backend endpoint (standing procedure).**
 1. Drain the pool to 0, repin by digest, then restore max 12 and idle 60 s.
 2. Wait 65 s after the release before submitting anything. Renders through the studio got `keyframe /run -> 409` in that window after the 1.1.7 repin.
-3. After a repin, every worker is cold and pulls about 24 GB from R2. Submit 2 or 3 jobs first, and wait until they run before submitting the rest. On 2026-11-06, 15 cold workers at once slowed pulls to 2.6 MiB/s and stretched cold jobs to about 20 minutes each.
+3. After a repin, every worker is cold and pulls about 24 GB from R2, and a warm-up batch does not change that: each NEW worker pulls again. So keep the number of concurrent cold workers small, about 4 to 6, by submitting in small batches, and budget one cold pull per worker. On 2026-11-06, 15 cold workers at once slowed pulls to 2.6 MiB/s and stretched cold jobs to about 20 minutes each; 6 at once pulled normally (cold delay about 2 to 3 minutes). Submitting 2 first and the rest once they ran did NOT help after a new image: the second batch started on new workers, cold.
 
 **Backend 1.1.13, pinned 2026-11-06 (release v37, 10:38:35Z).** A thin image (`deploy/Dockerfile.thin`) at main `a3d48a6`, built on the
 Vultr bake box from the same `toolchain-t1@sha256:456b417bffc7d80cef7e2f93d400beda9ebbea38dcb5e4efc7676460eee4d45d`

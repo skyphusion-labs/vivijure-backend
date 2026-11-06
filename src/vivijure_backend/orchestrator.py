@@ -183,7 +183,11 @@ def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard
     # still drawn then is still the same image and keeps its hash (no fleet-wide redraw for a no-op).
     if mc.pose_spread:
         payload["pose_spread"] = mc.pose_spread
-    if kc.plate_count_retries:  # same rule: off draws exactly what it drew before, so the hash stays
+    # Same rule: off draws exactly what it drew before, so the hash stays. And only on a shot the guard can run on
+    # (2..max_slots people, keyframe.engine_for): a one-person or empty shot draws the same with it on, so turning
+    # the default on must not redraw those stills. With no scene (a config-only hash) it is included when set.
+    guarded = scene is None or 2 <= len(scene.character_slots) <= mc.max_slots
+    if kc.plate_count_retries and guarded:
         payload["plate_count_retries"] = kc.plate_count_retries
     if scene is not None and storyboard is not None:
         from .keyframe import DEFAULT_NEGATIVE, build_prompt, scene_lock_negative

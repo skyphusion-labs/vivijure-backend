@@ -101,10 +101,11 @@ def test_keyframe_single_char_lora_scale_reaches_params():
 
 
 def test_keyframe_plate_count_retries_reaches_params():
-    # vivijure-cf#1143: the plate count guard. Off by default, clamped to 0..3.
+    # vivijure-cf#1143: the plate count guard. On at 3 by default (2026-11-06), clamped to 0..3.
     assert keyframe_params_from(_rcfg(kf={"plate_count_retries": 2})).plate_count_retries == 2
     assert keyframe_params_from(_rcfg(kf={"plate_count_retries": 9})).plate_count_retries == 3
-    assert keyframe_params_from(_rcfg()).plate_count_retries == 0
+    assert keyframe_params_from(_rcfg()).plate_count_retries == 3
+    assert keyframe_params_from(_rcfg(kf={"plate_count_retries": 0})).plate_count_retries == 0
 
 
 def test_keyframe_plate_people_free_background_reaches_params():

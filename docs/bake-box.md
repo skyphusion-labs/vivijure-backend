@@ -206,7 +206,7 @@ PAT in both cases.
 After the image is pushed, the endpoint repin is a separate step. Follow "Repinning the backend endpoint"
 in [runpod-endpoint-config.md](runpod-endpoint-config.md):
 - wait 65 s after the release;
-- every worker then starts cold and pulls about 24 GB from R2, so submit 2 or 3 jobs first and wait until they run before submitting the rest. On 2026-11-06, 15 cold workers at once slowed pulls to 2.6 MiB/s and stretched cold jobs to about 20 minutes each.
+- every worker then starts cold and pulls about 24 GB from R2, and a warm-up batch does not change that: each new worker pulls again. Keep the number of concurrent cold workers small, about 4 to 6, by submitting in small batches, and budget one cold pull per worker. On 2026-11-06, 15 cold workers at once slowed pulls to 2.6 MiB/s and stretched cold jobs to about 20 minutes each; 6 at once pulled normally. Submitting 2 first did not help after a new image: the next batch also started cold.
 
 ## Destroy
 

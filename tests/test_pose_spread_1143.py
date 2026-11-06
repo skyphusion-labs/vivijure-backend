@@ -103,11 +103,14 @@ HASH_BEFORE_POSE_SPREAD = {QualityTier.DRAFT: "0922f3dc0cb2ccca", QualityTier.ST
 
 @pytest.mark.parametrize("tier", list(HASH_BEFORE_POSE_SPREAD))
 def test_hash_off_equals_the_hash_from_before_the_knob(tier):
-    assert kf_hash(KeyframeConfig.for_tier(tier)) == HASH_BEFORE_POSE_SPREAD[tier]
+    kc = KeyframeConfig.for_tier(tier)
+    kc.plate_count_retries = 0  # the plate guard is its own knob, now default on; pin pose_spread alone
+    assert kf_hash(kc) == HASH_BEFORE_POSE_SPREAD[tier]
 
 
 def test_hash_unchanged_when_off_and_changes_when_set():
     kc = KeyframeConfig.for_tier(QualityTier.STANDARD)
+    kc.plate_count_retries = 0
     base = kf_hash(kc)
     kc.multi_char.pose_spread = 0.0
     assert kf_hash(kc) == base
@@ -142,7 +145,8 @@ def test_the_no_plate_regional_path_carries_it_too(tmp_path, gpu_fakes, monkeypa
 
 def _spread_render(tmp_path, spread):
     from test_debug_intermediates_1143 import CAST, SB, _Pipe, _scene, _Server
-    params = kf.KeyframeParams(width=SW, height=SH, identity_method="ip_adapter", pose_spread=spread)
+    params = kf.KeyframeParams(width=SW, height=SH, identity_method="ip_adapter", pose_spread=spread,
+                               plate_count_retries=0)  # the guard has its own tests
     pipe = _Pipe(params.width, params.height)
     out = tmp_path / f"spread{spread}" / "shot_03.png"
     res = kf.render_keyframe(_scene(("A", "B")), CAST, SB, _Server(pipe), out, params=params,

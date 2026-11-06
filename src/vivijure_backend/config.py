@@ -208,7 +208,9 @@ class KeyframeConfig:
     # 0..3; on a two-person-plus shot, count the faces in the plate and redraw ONLY the plate, with a derived seed,
     # while it holds more faces than the shot has people, up to this many times. Pass B never adds a person, so a
     # clean plate gives a clean still. 0 = off: no count, the plate as before (vivijure-cf#1143).
-    plate_count_retries: int = 0
+    # Default 3 (ruled 2026-11-06 on the live 1.1.13 check: clean two-person stills 2 of 6 -> 5 of 6, no false
+    # clean, about +23 s per two-person keyframe on average, at most 3 extra plates).
+    plate_count_retries: int = 3
     multi_char: MultiCharConfig = field(default_factory=MultiCharConfig)
 
     @classmethod
