@@ -363,6 +363,10 @@ class Keyframe:
     # True when this job drew nothing and reports a still already in the store. The studio stamps its
     # config provenance only on a still drawn this run, or the record claims a match it does not have.
     reused: bool = False
+    # Only when the plate count guard ran (keyframe.plate_count_retries > 0 on a two-person-plus shot):
+    # {expected, faces: [per draw], chosen, clean, retries}. `clean: false` means no draw held at most the
+    # expected number of faces and the still was made from the draw with the fewest (vivijure-cf#1143).
+    plate_count: dict[str, Any] | None = None
 
 
 @dataclass
@@ -401,7 +405,8 @@ class RenderResult:
             "seconds": self.seconds,
             "has_audio": self.has_audio,
             "audio_missing": self.audio_missing,
-            "keyframes": [{"shot_id": k.shot_id, "key": k.key, **({"reused": True} if k.reused else {})}
+            "keyframes": [{"shot_id": k.shot_id, "key": k.key, **({"reused": True} if k.reused else {}),
+                           **({"plate_count": dict(k.plate_count)} if k.plate_count is not None else {})}
                           for k in self.keyframes],
             "lora": self.lora,
             "state_key": self.state_key,

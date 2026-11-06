@@ -68,6 +68,11 @@ The SDXL keyframe stage. Fields map to diffusers SDXL parameters.
 | `lora_scale` | float | 0.30 | 0-2 | Single-char LoRA. The mapper must not read `lora_scale_per_slot` for this path. |
 | `scene_lock` | bool | true | -- | Two-pass plate then canny. Default true only on the canny-bearing image. Off is a debug hatch. Do not tag `backend-v*` until seed+runtime contain `CONTROLNET_CANNY`. |
 | `canny_scale` | float | 0.70 | 0-1.5 | Pass B ControlNet conditioning. |
+| `face_crop_pad` | float | 0.35 | 0-2 | Pass B identity crop: the face box padded by this fraction on each side (vivijure-cf#1143). |
+| `plate_ip_adapter_scale` | float | 0 | 0-1 | Two-person plate: each person's whole portrait through the masked IP-Adapter at this scale. 0 is off (cf#1143 option b). |
+| `plate_regional_text` | bool | false | -- | Two-person plate: each person's description reaches only their own region (cf#1143 option a). |
+| `plate_people_free_background` | bool | false | -- | With `plate_regional_text`: the band outside both people reads no shot text (cf#1143 option c). |
+| `plate_count_retries` | int | 0 | 0-3 | Two-person-plus plate count guard. After Pass A, count faces in the plate with the loaded insightface analyser; while there are more faces than people, redraw only the plate with a derived seed, up to this many times. Pass B runs once, on the first draw with at most that many faces, else on the draw with the fewest. Each still the guard ran on reports `plate_count` in the result and a `keyframe.plate_count` event; `clean: false` says no draw passed. 0 is off: no count, nothing changes. Misses a person facing away from the camera (vivijure-cf#1143). In the reuse hash only when set. |
 | `multi_char` | MultiCharConfig | see below | -- | Regional multi-character anti-bleed block. |
 
 `from_dict` also accepts a `resolution` string `"WIDTHxHEIGHT"` (the control plane's shape) in

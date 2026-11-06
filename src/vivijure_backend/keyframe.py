@@ -88,6 +88,7 @@ class KeyframeParams:
     plate_ip_adapter_scale: float = 0.0  # Pass A per-region portrait IP-Adapter on a two-person shot; 0 = off (cf#1143)
     plate_regional_text: bool = False  # Pass A per-region descriptions on a two-person shot; off = one prompt (cf#1143)
     plate_people_free_background: bool = False  # with regional text: the band names no one (cf#1143 option c)
+    plate_count_retries: int = 0     # 0..3 plate redraws while it has too many faces; 0 = off (cf#1143)
     # Identity method for the SINGLE-character path. InstantID is the default: insightface
     # face-embed through InstantID's image projection. "ip_adapter" is the h94 fallback.
     # Two-person shots ignore this and stay on the masked IP-Adapter regional path.
@@ -123,12 +124,62 @@ class KeyframeResult:
     # stage -> PNG beside `path`, only when the render was asked to save intermediates. See
     # INTERMEDIATE_STAGES. Empty on every path that has no such stage (no plate, no Pass B).
     intermediates: dict[str, Path] = field(default_factory=dict)
+    # The plate count guard's record when it ran, else None. See plate_count_record.
+    plate_count: dict | None = None
 
 
 # The diagnostic intermediates a scene-lock keyframe can save (vivijure-cf#1143), in draw order:
 # the Pass A pose control (only when the plate draws under pose), the Pass A plate, and the Pass B
 # canny map of that plate (only when Pass B runs). The names are the file and key suffixes.
-INTERMEDIATE_STAGES: tuple[str, ...] = ("pose", "plate", "canny")
+# With the plate count guard on, every plate draw is also kept as plate_try0.. (try0 is the first draw); "plate"
+# is always the one Pass B was given.
+INTERMEDIATE_STAGES: tuple[str, ...] = ("pose", "plate", "plate_try0", "plate_try1", "plate_try2", "plate_try3",
+                                        "canny")
+
+
+# Plate redraw seeds: far from the base seed so a retry never repeats a neighbouring shot's or seed's draw.
+PLATE_RETRY_SEED_STRIDE = 1_000_003
+
+
+def plate_count_retries_for(scene: Scene, cfg: KeyframeParams) -> int:
+    """How many plate redraws the count guard may make for this shot (vivijure-cf#1143). Two-person-plus shots
+    only: a one-person or empty shot's plate has no third person to catch. Clamped to 0..3; 0 = off."""
+    if engine_for(scene, cfg) != "regional":
+        return 0
+    return max(0, min(3, int(cfg.plate_count_retries)))
+
+
+def plate_retry_seed(seed: int, attempt: int) -> int:
+    """The seed of plate redraw `attempt` (1-based). Deterministic, so a rerun reproduces the same redraws."""
+    return (int(seed) + attempt * PLATE_RETRY_SEED_STRIDE) % 2**31
+
+
+def count_faces(analyzer, image) -> int:
+    """Faces insightface finds in a PIL image (the analyser the scene-lock path already loads for face crops).
+    Measured offline on 19 saved plates: it caught 11 of 12 plates with a third person and read every clean plate
+    as 2. It misses a person facing away from the camera; that is the guard's known limit."""
+    import numpy as np
+    arr = np.array(image.convert("RGB"))[:, :, ::-1]  # insightface wants BGR
+    return len(analyzer.get(arr) or [])
+
+
+def choose_plate(counts: list[int], expected: int) -> int:
+    """The draw Pass B gets: the first that holds at most `expected` faces, else the one with the fewest (the
+    earliest on a tie). Fewer faces than people is accepted: a person can face away, and the guard is for extras."""
+    if not counts:
+        raise ValueError("choose_plate needs at least one draw")
+    for i, n in enumerate(counts):
+        if n <= expected:
+            return i
+    return min(range(len(counts)), key=lambda i: (counts[i], i))
+
+
+def plate_count_record(counts: list[int], expected: int, retries: int) -> dict:
+    """The guard's honest record, for the result and the event. `clean` false means the still was made from a
+    plate that still has too many faces, and says so."""
+    chosen = choose_plate(counts, expected)
+    return {"expected": expected, "faces": list(counts), "chosen": chosen,
+            "clean": counts[chosen] <= expected, "retries": retries}
 
 
 def intermediate_path(out_path: Path, stage: str) -> Path:
@@ -607,10 +658,11 @@ def render_keyframe(
     # Two people stay on the regional body. scene_lock is plate then canny + face-crop
     # IP-Adapter for every other shot.
     collected: dict = {}
+    report: dict = {}
     if path == "scene_lock":
         image, identity_path, prompt = _render_scene_lock(
             server, scene, cast, storyboard, cfg, loras, pose_image,
-            sink=collected if save_intermediates else None)
+            sink=collected if save_intermediates else None, report=report)
     elif path == "instantid":
         prompt = build_prompt(scene, cast, storyboard)
         image, identity_path = _render_instantid(server, prompt, scene, cast, cfg, loras, single_slot)
@@ -631,16 +683,22 @@ def render_keyframe(
     return KeyframeResult(shot_id=scene.id or "shot", path=out_path, slots=slots,
                           multi_char=(engine == "regional"), prompt=prompt, seed=cfg.seed,
                           engine=engine, identity_requested=cfg.identity_method,
-                          identity_path=identity_path, intermediates=intermediates)
+                          identity_path=identity_path, intermediates=intermediates,
+                          plate_count=report.get("plate_count"))
 
 
-def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image, sink=None):
+def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image, sink=None, report=None):
     """Pass A: scene plate (no LoRA, no IP-Adapter). Pass B: canny of that plate + face-crop
     IP-Adapter + split LoRA. No-character shots skip Pass B. Few-step tiers still run Pass B
     (t2i). InstantID is not this path. Returns `(image, identity_path, prompt)`.
 
     `sink`, when a dict, collects the intermediates by INTERMEDIATE_STAGES name. Collecting only
-    keeps a reference; it changes no input to any pass."""
+    keeps a reference; it changes no input to any pass.
+
+    The plate count guard (`plate_count_retries`, two-person-plus shots): after the first plate, count its faces and
+    redraw ONLY the plate with plate_retry_seed while it has more faces than people, up to the limit. Pass B then
+    runs once, on the chosen plate, with the original generator, so a first plate that is clean gives exactly the
+    still the guard-off path draws. `report["plate_count"]` gets the record whenever the guard ran."""
     import json
     import torch
     from .models import ModelRole
@@ -690,15 +748,37 @@ def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image, 
     if regions and plate_people_free_background_on(scene, cfg):
         background = encode_long_prompt(pipe, plate_background_prompt(storyboard), plate_spec.negative_prompt,
                                         shot_id=scene.id or "shot")["prompt_embeds"]
-    with regional_text.applied(pipe, regions, width=cfg.width, height=cfg.height, cfg_batch=_guidance(cfg) > 1.0,
-                               background=background):
-        plate = pipe(
-            **encode_long_prompt(pipe, plate_prompt, plate_spec.negative_prompt, shot_id=scene.id or "shot"),
-            num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
-            height=cfg.height, width=cfg.width, generator=generator,
-            image=control, controlnet_conditioning_scale=cn_scale,
-            **plate_ip_kw,
-        ).images[0]
+    def draw_plate(gen):
+        with regional_text.applied(pipe, regions, width=cfg.width, height=cfg.height,
+                                   cfg_batch=_guidance(cfg) > 1.0, background=background):
+            return pipe(
+                **encode_long_prompt(pipe, plate_prompt, plate_spec.negative_prompt, shot_id=scene.id or "shot"),
+                num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
+                height=cfg.height, width=cfg.width, generator=gen,
+                image=control, controlnet_conditioning_scale=cn_scale,
+                **plate_ip_kw,
+            ).images[0]
+
+    plate = draw_plate(generator)
+    retries = plate_count_retries_for(scene, cfg)
+    if retries:
+        expected = len(scene.character_slots[:cfg.max_slots])
+        analyzer = server.face_analyzer()
+        draws = [plate]
+        counts = [count_faces(analyzer, plate)]
+        while counts[-1] > expected and len(draws) <= retries:
+            retry_gen = torch.Generator(device="cuda").manual_seed(plate_retry_seed(cfg.seed, len(draws)))
+            draws.append(draw_plate(retry_gen))
+            counts.append(count_faces(analyzer, draws[-1]))
+        record = plate_count_record(counts, expected, retries)
+        plate = draws[record["chosen"]]
+        if report is not None:
+            report["plate_count"] = record
+        if sink is not None:
+            for i, d in enumerate(draws):
+                sink[f"plate_try{i}"] = d
+        print("@event keyframe.plate_count " + json.dumps(
+            {"shot_id": scene.id or "shot", "seed": cfg.seed, **record}, sort_keys=True), flush=True)
     print("@event keyframe.scene_plate " + json.dumps(
         {"shot_id": scene.id or "shot", "seed": cfg.seed, "plate_ip_adapter_scale": plate_ip_scale if plate_ip_kw else 0.0,
          "plate_regional_text": bool(regions), "plate_people_free_background": background is not None},

@@ -100,6 +100,13 @@ def test_keyframe_single_char_lora_scale_reaches_params():
     assert p.lora_scale_per_slot == pytest.approx(0.7)
 
 
+def test_keyframe_plate_count_retries_reaches_params():
+    # vivijure-cf#1143: the plate count guard. Off by default, clamped to 0..3.
+    assert keyframe_params_from(_rcfg(kf={"plate_count_retries": 2})).plate_count_retries == 2
+    assert keyframe_params_from(_rcfg(kf={"plate_count_retries": 9})).plate_count_retries == 3
+    assert keyframe_params_from(_rcfg()).plate_count_retries == 0
+
+
 def test_keyframe_plate_people_free_background_reaches_params():
     # vivijure-cf#1143 option c: off by default; only an exact true turns it on.
     assert keyframe_params_from(_rcfg(kf={"plate_people_free_background": True})).plate_people_free_background is True
@@ -281,6 +288,7 @@ KEYFRAME_ASSERTED = {
     "plate_ip_adapter_scale",
     "plate_regional_text",
     "plate_people_free_background",
+    "plate_count_retries",
     "multi_char",
 }
 
