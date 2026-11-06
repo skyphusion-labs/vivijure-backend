@@ -16,7 +16,7 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 | | `vivijure-backend-hosted` | `vivijure-upscale-hosted` |
 |---|---|---|
 | id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
-| Image | `vivijure-backend:1.1.9@sha256:ed7bbcc42904908f908f88a4b34babbabac11fc46b76b7854000876bbb25dd95` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
+| Image | `vivijure-backend:1.1.10@sha256:6bdbe03ad7653597768d55f7acbf1e01e698a21181a3d46dfb4cdd673e4da052` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
 | Pools | `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141`, `BLACKWELL_180`, `BLACKWELL_288` | `BLACKWELL_96` |
 | `workers` min / max | 0 / 12 | 0 / 10 |
 | Idle timeout | 60 s | 10 s |
@@ -46,6 +46,19 @@ settings the same. 1.1.3 honours `target_height`, which 1.0.4 ignores and runs 2
 v1.42.0 sends `target_height` by default, so rolling back under one delivers 2x against a budget priced at
 the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 11.5 s, and 720x1280 to
 1080x1920 in 6.0 s. The presigned path has not run on this image yet.
+
+**Backend 1.1.10, pinned 2026-11-06.** A thin image (`deploy/Dockerfile.thin`) at main `1d78182`, built on
+the Vultr bake box from the same `toolchain-t1@sha256:456b417bffc7d80cef7e2f93d400beda9ebbea38dcb5e4efc7676460eee4d45d`
+(no `deploy/` change since `1ac386e`). It adds #582, `plate_people_free_background`: a people-free band between two people under regional text. The default is OFF, so nothing changes until a render sets it.
+
+In the image, `orchestrator.py`, `keyframe.py`, `pipeline.py` and `contract.py` hash the same as at `1d78182`, and the image holds 29 .py files, as the tree does. The CPU import smoke passed. The digest pinned is the one read back from GHCR.
+
+Repin check: the pool was drained to 0, then restored to max 12 with a 60 s idle timeout. Nothing was submitted for 65 s after the release. A fresh-draw keyframes-only render through the studio, `film-2072dd45-98c7-4eb1-bfa2-a391ba7b481f` (seed 111006), drew all four stills on 1.1.10 worker `iizcpgx1m3hkn3`. RunPod jobs `78278008-...-u1` and `d9466de1-...-u1` report no `reused`. The applied config shows `plate_ip_adapter_scale: 0`, `plate_regional_text: false` and `plate_people_free_background: false`. Its two-person still shows TWO people (Mara and Dev), but Mara wears a black hoodie over a grey top rather than her reference outfit (vivijure-cf#1143).
+
+**Backend rollback from 1.1.10:** image
+`vivijure-backend:1.1.9@sha256:ed7bbcc42904908f908f88a4b34babbabac11fc46b76b7854000876bbb25dd95`, idle
+timeout 60 s, max 12, same disk. Drain the pool to 0 and restore it after the repin, then wait 65 s before
+submitting.
 
 **Backend 1.1.9, pinned 2026-11-06.** A thin image (`deploy/Dockerfile.thin`) at main `c63b76c`, built on
 the Vultr bake box from the same `toolchain-t1@sha256:456b417bffc7d80cef7e2f93d400beda9ebbea38dcb5e4efc7676460eee4d45d`
