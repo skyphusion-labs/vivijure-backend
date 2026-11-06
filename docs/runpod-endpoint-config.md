@@ -16,7 +16,7 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 | | `vivijure-backend-hosted` | `vivijure-upscale-hosted` |
 |---|---|---|
 | id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
-| Image | `vivijure-backend:1.1.14@sha256:fe34935b797d4582d3e9f838dca3337fcd8410bb9130a33a210476c36e3f7e85` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
+| Image | `vivijure-backend:1.1.15@sha256:30c08660d643f2b7629b90ac92e686603c0d227aca257e11debed71820e20f18` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
 | Pools | `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141`, `BLACKWELL_180`, `BLACKWELL_288` | `BLACKWELL_96` |
 | `workers` min / max | 0 / 12 | 0 / 10 |
 | Idle timeout | 60 s | 10 s |
@@ -51,6 +51,27 @@ the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 1
 1. Drain the pool to 0, repin by digest, then restore max 12 and idle 60 s.
 2. Wait 65 s after the release before submitting anything. Renders through the studio got `keyframe /run -> 409` in that window after the 1.1.7 repin.
 3. On a thin image built on the bare toolchain, after a repin, every worker is cold and pulls about 24 GB from R2 (on a code image built on the stills weights base, a stills job pulls nothing: [stills-weights-base.md](stills-weights-base.md), #564), and a warm-up batch does not change that: each NEW worker pulls again. So keep the number of concurrent cold workers small, about 4 to 6, by submitting in small batches, and budget one cold pull per worker. On 2026-11-06, 15 cold workers at once slowed pulls to 2.6 MiB/s and stretched cold jobs to about 20 minutes each; 6 at once pulled normally (cold delay about 2 to 3 minutes). Submitting 2 first and the rest once they ran did NOT help after a new image: the second batch started on new workers, cold.
+
+**Backend 1.1.15, pinned 2026-11-06 (release v39, 13:01:31Z). The first image on the stills weights base (#591, #564).**
+
+- **Code:** main `82b2324` (#591, #592 stall kill with `mirror_progress`, #594 verify temp dir). Built from `deploy/Dockerfile.thin`
+  with `TOOLCHAIN_REF=vivijure-backend:stills-t1-m1@sha256:6d0e19bd18bdba3318e510fcc0055d9d75c1a1353df918795dc92be0d70740b6`.
+  `Dockerfile.thin` changed only in comments since `1ac386e`, and `requirements.txt` is unchanged.
+- **Image:** `vivijure-backend:1.1.15@sha256:30c08660d643f2b7629b90ac92e686603c0d227aca257e11debed71820e20f18`, 29.08 GiB
+  compressed. The base's 26 layers are a prefix of it, and its two code layers are 190 KB. The push took 8 s
+  (13:00:26Z to 13:00:34Z). The push digest and the GHCR read-back match.
+- **Checks in the image:**
+  - `--check-stills` prints `stills tree at /opt/models is complete` and exits 0;
+  - `.vj-stills-complete` reads `1`, and there is no `.vj-baked`;
+  - `orchestrator.py`, `keyframe.py`, `pipeline.py`, `contract.py`, `config.py`, `verify.py` and `harness/models_mirror.py` hash the same as at `82b2324`;
+  - the image holds 29 .py files, and the CPU import smoke passed.
+- **Repin check:** 65 s after the release the rollout read 100% on 1.1.15, with 0 unhealthy. No render job was submitted.
+  The first worker started at 13:01:39Z and was still `INITIALIZING` at 13:02:46Z, because it pulls the 29 GB image. That pull is not billed.
+  The time to ready and the cold job's `executionTime` are for the live check ([stills-weights-base.md](stills-weights-base.md)).
+
+**Backend rollback from 1.1.15:** image
+`vivijure-backend:1.1.14@sha256:fe34935b797d4582d3e9f838dca3337fcd8410bb9130a33a210476c36e3f7e85` (no stills base: workers pull the
+stills set from R2 again), idle timeout 60 s, max 12, same disk. Follow the repinning procedure above.
 
 **Backend 1.1.14, pinned 2026-11-06 (release v38, 11:09:01Z).** A thin image (`deploy/Dockerfile.thin`) at main `a2f3b18`, built on the
 Vultr bake box from the same `toolchain-t1@sha256:456b417bffc7d80cef7e2f93d400beda9ebbea38dcb5e4efc7676460eee4d45d`
