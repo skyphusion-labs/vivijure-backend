@@ -1,8 +1,9 @@
 """Container disk guards (vivijure-backend#600).
 
 A worker's model cache persists across jobs on purpose, so a warm worker reuses its weights. On a small disk one
-large pull (the Wan i2v set is about 114 GiB, the stills image itself about 29 GiB) can fill it, and then every later
-job on that worker fails within seconds on ENOSPC: one full worker eats the queue. Three guards stop that:
+large pull (the i2v set; the stills image itself is about 29 GiB) can fill it, and then every later
+job on that worker fails within seconds on ENOSPC: one full worker eats the queue. Measured on 1.1.17: the i2v set
+(Wan 2.2 I2V plus Lightning) is 156.8 GiB on disk, see docs/runpod-endpoint-config.md. Three guards stop that:
 
 1. Before a model pull, its size is compared with the free space at its destination. A pull that cannot fit fails the
    job with the numbers instead of writing until the disk is full (`check_pull_fits`, called from models_mirror).
