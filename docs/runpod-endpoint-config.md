@@ -16,7 +16,7 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 | | `vivijure-backend-hosted` | `vivijure-upscale-hosted` |
 |---|---|---|
 | id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
-| Image | `vivijure-backend:1.1.5@sha256:5b3e7140ac6b7ddcd8ebf0d65c034cf6501aa5049b1a7c47db56b8b62b887ec6` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
+| Image | `vivijure-backend:1.1.6@sha256:cc4111358aea3d318ddd98330e5606b18d3184f42fd05fb68696837bb3702edd` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
 | Pools | `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141`, `BLACKWELL_180`, `BLACKWELL_288` | `BLACKWELL_96` |
 | `workers` min / max | 0 / 12 | 0 / 10 |
 | Idle timeout | 60 s | 10 s |
@@ -46,6 +46,29 @@ settings the same. 1.1.3 honours `target_height`, which 1.0.4 ignores and runs 2
 v1.42.0 sends `target_height` by default, so rolling back under one delivers 2x against a budget priced at
 the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 11.5 s, and 720x1280 to
 1080x1920 in 6.0 s. The presigned path has not run on this image yet.
+
+**Backend 1.1.6, pinned 2026-11-06.** A thin image (`deploy/Dockerfile.thin`) at main `67e883e`, built on
+the Vultr bake box ([bake-box.md](bake-box.md)) from the same `toolchain-t1@sha256:456b417bffc7d80cef7e2f93d400beda9ebbea38dcb5e4efc7676460eee4d45d`
+(no `deploy/` change since `1ac386e`). It adds #572:
+- the keyframe prompt is encoded in up to two 75-token chunks;
+- one adult clause per shot;
+- the film `setting` from the board.
+
+In the image, `keyframe.py`, `prompt_chunks.py` and `contract.py` hash the same as at `67e883e`, and the image holds 28 .py files, as the tree does. The CPU import smoke passed.
+
+**It is a PARTIAL fix for vivijure-cf#1143.** Proof: `film-1d0dad23-c650-4319-877d-04e9ea7076cc` (the film-076828c5 board under a new project, seed 110501, every still drawn fresh):
+- in the two-shot, Mara's top is now black (it was maroon on 1.1.5);
+- her hair is still pinned up rather than curls, and her jacket shows a grey hood;
+- the single shots did not regress.
+
+#1143 stays open. A re-render under the OLD project returned the 1.1.5 stills marked `reused` (film-0afa679b), because the reuse hash ignores prompt building (#573). To see a prompt change, use a new project or a new seed.
+
+Repin check: the pool was drained to 0 and then restored to max 12 with a 60 s idle timeout. A fresh-draw run, `film-08fd6115-265d-4387-8046-add8d88d9650` (seed 110502, so the reuse hash misses), drew all four stills on 1.1.6 workers. RunPod jobs `3a37166d-...-u1` and `2fcb954b-...-u1` completed, and neither reports `reused`.
+
+**Backend rollback from 1.1.6:** image
+`vivijure-backend:1.1.5@sha256:5b3e7140ac6b7ddcd8ebf0d65c034cf6501aa5049b1a7c47db56b8b62b887ec6`, idle
+timeout 60 s, max 12, same disk. Drain the pool to 0 and restore it after the repin, or old workers keep
+serving.
 
 **Backend 1.1.5, pinned 2026-11-04.** A thin image (`deploy/Dockerfile.thin`) at main `1ac386e`, built on
 the Vultr bake box ([bake-box.md](bake-box.md)) from `toolchain-t1@sha256:456b417bffc7d80cef7e2f93d400beda9ebbea38dcb5e4efc7676460eee4d45d`,
