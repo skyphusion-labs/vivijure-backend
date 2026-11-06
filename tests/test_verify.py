@@ -302,6 +302,49 @@ def test_pod_draft_render_registers_pipeline_before_handling(monkeypatch):
     assert outcome.clip_bytes == len(b"clip-bytes")            # measured from the pulled clip
 
 
+def _drive_pod_render(monkeypatch, tmp_path, get_file):
+    """_pod_draft_render with every GPU and R2 seam stubbed, and mkdtemp kept under tmp_path so the
+    test can see exactly the directories it made."""
+    import tempfile
+
+    from vivijure_backend import worker as wmod
+    from vivijure_backend.harness import handler as hmod
+    from vivijure_backend.harness import pipeline_registry
+    from vivijure_backend.harness import r2 as r2mod
+
+    monkeypatch.setattr(pipeline_registry, "_PIPELINE", None)
+    monkeypatch.setattr(wmod, "build_pipeline", lambda req: object())
+    monkeypatch.setattr(hmod, "handler", lambda job: {"output_key": "renders/verify/full.mp4"})
+    monkeypatch.setattr(r2mod, "R2", type("R", (), {"__init__": lambda self, *a, **k: None,
+                                                    "get_file": lambda self, key, dest: get_file(dest)}))
+    monkeypatch.setattr(r2mod, "R2Config", type("C", (), {"from_env": staticmethod(lambda e: object())}))
+    monkeypatch.setattr(verify, "_first_frame_array", lambda p: "frame")
+    monkeypatch.setattr(verify, "_first_frame_seconds", lambda store, project, job_id: 3.0)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    em = verify.VerifyEmitter(None, "run-x", clock=_clock())
+    return verify._pod_draft_render(em, {"VJ_VERIFY_BUNDLE_KEY": "bundles/x.tgz"})
+
+
+def test_pod_draft_render_leaves_no_temp_directory(monkeypatch, tmp_path):
+    def get_file(dest):
+        Path(dest).write_bytes(b"clip-bytes")
+        return dest
+
+    outcome = _drive_pod_render(monkeypatch, tmp_path, get_file)
+    assert outcome.clip_bytes == len(b"clip-bytes") and outcome.first_frame_array == "frame"
+    assert list(tmp_path.glob("vj-verify-*")) == []
+
+
+def test_pod_draft_render_leaves_no_temp_directory_when_the_download_fails(monkeypatch, tmp_path):
+    def get_file(dest):
+        Path(dest).write_bytes(b"partial")
+        raise OSError("connection reset")
+
+    with pytest.raises(OSError, match="connection reset"):
+        _drive_pod_render(monkeypatch, tmp_path, get_file)
+    assert list(tmp_path.glob("vj-verify-*")) == []
+
+
 def test_pod_draft_render_requires_bundle_key():
     em = verify.VerifyEmitter(None, "run-x", clock=_clock())
     with pytest.raises(RuntimeError, match="VJ_VERIFY_BUNDLE_KEY"):
