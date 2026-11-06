@@ -127,9 +127,14 @@ class MultiCharConfig:
     pose knobs that separate two bodies. InstantID is deliberately absent: it is single-face by
     nature, so the regional path stays masked-IP-Adapter only.
 
-    Defaults mirror `orchestrator.MULTI_CHAR_DEFAULTS` (engine=regional, pose_conditioning=True,
-    lora_scale_per_slot=0.35, ip_adapter_scale_per_slot=0.7, max_slots=2)."""
-    pose_conditioning: bool = True            # OpenPose ControlNet to separate bodies
+    Defaults mirror `orchestrator.MULTI_CHAR_DEFAULTS` (engine=regional, pose_conditioning=None,
+    lora_scale_per_slot=0.35, ip_adapter_scale_per_slot=0.7, max_slots=2).
+
+    `pose_conditioning` has THREE states (backend#596). None, the default, means each path's own default: the
+    plain regional path draws under the pose skeleton, and a scene-lock plate for two-plus people draws without
+    it while the plate count guard runs (`keyframe.plate_pose_on`). An explicit True or False sets it on both
+    paths, which is how a job turns the plate's pose back on."""
+    pose_conditioning: bool | None = None     # OpenPose ControlNet to separate bodies; None = per-path default
     lora_scale_per_slot: float = 0.35         # 0..2; regional only (single-char reads KeyframeConfig.lora_scale)
     ip_adapter_scale_per_slot: float = 0.7    # 0..1; per-region masked IP-Adapter identity pull
     max_slots: int = 2                        # 1..4; characters the no-bleed path supports at once
@@ -145,7 +150,8 @@ class MultiCharConfig:
         d = d if isinstance(d, dict) else {}
         base = cls()
         return cls(
-            pose_conditioning=bool(d.get("pose_conditioning", base.pose_conditioning)),
+            pose_conditioning=(base.pose_conditioning if d.get("pose_conditioning") is None
+                               else bool(d.get("pose_conditioning"))),
             lora_scale_per_slot=_clamp(d.get("lora_scale_per_slot"), 0.0, 2.0, base.lora_scale_per_slot),
             ip_adapter_scale_per_slot=_clamp(d.get("ip_adapter_scale_per_slot"), 0.0, 1.0, base.ip_adapter_scale_per_slot),
             max_slots=_clamp_int(d.get("max_slots"), 1, 4, base.max_slots),
