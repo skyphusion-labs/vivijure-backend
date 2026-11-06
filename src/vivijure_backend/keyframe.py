@@ -86,6 +86,7 @@ class KeyframeParams:
     canny_scale: float = DEFAULT_CANNY_SCALE
     face_crop_pad: float = DEFAULT_FACE_CROP_PAD  # Pass B identity crop padding (cf#1143)
     plate_ip_adapter_scale: float = 0.0  # Pass A per-region portrait IP-Adapter on a two-person shot; 0 = off (cf#1143)
+    plate_regional_text: bool = False  # Pass A per-region descriptions on a two-person shot; off = one prompt (cf#1143)
     # Identity method for the SINGLE-character path. InstantID is the default: insightface
     # face-embed through InstantID's image projection. "ip_adapter" is the h94 fallback.
     # Two-person shots ignore this and stay on the masked IP-Adapter regional path.
@@ -413,6 +414,31 @@ def plate_ip_adapter_scale_for(scene: Scene, cfg: KeyframeParams) -> float:
     return max(0.0, min(1.0, float(cfg.plate_ip_adapter_scale)))
 
 
+def plate_regional_text_on(scene: Scene, cfg: KeyframeParams) -> bool:
+    """Whether Pass A gives each person's description to their own region (vivijure-cf#1143 option a). Two-person
+    shots within the regional slot cap only, and only when set."""
+    return bool(cfg.plate_regional_text) and engine_for(scene, cfg) == "regional"
+
+
+def plate_region_prompts(scene: Scene, cast: Cast, storyboard: Storyboard) -> tuple[str, list[str]]:
+    """The two-person plate's prompts for per-region text: (shared, [one per person, in slot order]).
+
+    `shared` is the plate prompt with NO person's description: the style, the scene and its action, the setting,
+    the adult clause and the scene repeat. The background keeps it, and it opens every person's prompt, so none of
+    it can be masked away. Each person's prompt is `shared` plus that person's own description, fitted to what is
+    left of the budget for one person (not split, since each prompt holds one), with hair and clothes ahead of age.
+    No other person's description is in it: that is the whole point."""
+    shared = build_prompt(scene, Cast(characters={}), storyboard, include_triggers=False)
+    out = []
+    for s in scene.character_slots:
+        desc = drop_place_from_garment(slot_description(cast, s, scene.prompt))
+        room = PROMPT_TOKEN_BUDGET - PROMPT_TOKEN_MARGIN - estimate_tokens(shared)
+        fitted = fit_description(desc, room, name=slot_trigger(cast, s), scene_prompt=scene.prompt, max_rank=1,
+                                 adult_stated=True) if desc and room > 0 else ""
+        out.append(_join_prompt([shared, fitted]))
+    return shared, out
+
+
 def keyframe_render_path(engine: str, cfg: KeyframeParams, *, has_instantid_ref: bool) -> str:
     """Which GPU body `render_keyframe` takes.
 
@@ -587,15 +613,27 @@ def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image):
         server.set_keyframe_controlnet(ModelRole.CONTROLNET_POSE)
         control = _blank_control(cfg.width, cfg.height)
         cn_scale = 0.0
-    plate = pipe(
-        **encode_long_prompt(pipe, plate_spec.prompt, plate_spec.negative_prompt, shot_id=scene.id or "shot"),
-        num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
-        height=cfg.height, width=cfg.width, generator=generator,
-        image=control, controlnet_conditioning_scale=cn_scale,
-        **plate_ip_kw,
-    ).images[0]
+    from . import regional_text
+    plate_prompt = plate_spec.prompt
+    regions: list = []
+    if plate_regional_text_on(scene, cfg):
+        shared, persons = plate_region_prompts(scene, cast, storyboard)
+        plate_prompt = shared  # the background's prompt; each person's region gets its own below
+        slots = scene.character_slots[:cfg.max_slots]
+        boxes = region_boxes(cfg.width, cfg.height, len(slots), orientation="vertical", gutter=cfg.region_gutter)
+        regions = [(encode_long_prompt(pipe, p, plate_spec.negative_prompt, shot_id=scene.id or "shot")["prompt_embeds"], b)
+                   for p, b in zip(persons, boxes)]
+    with regional_text.applied(pipe, regions, width=cfg.width, height=cfg.height, cfg_batch=_guidance(cfg) > 1.0):
+        plate = pipe(
+            **encode_long_prompt(pipe, plate_prompt, plate_spec.negative_prompt, shot_id=scene.id or "shot"),
+            num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
+            height=cfg.height, width=cfg.width, generator=generator,
+            image=control, controlnet_conditioning_scale=cn_scale,
+            **plate_ip_kw,
+        ).images[0]
     print("@event keyframe.scene_plate " + json.dumps(
-        {"shot_id": scene.id or "shot", "seed": cfg.seed, "plate_ip_adapter_scale": plate_ip_scale if plate_ip_kw else 0.0},
+        {"shot_id": scene.id or "shot", "seed": cfg.seed, "plate_ip_adapter_scale": plate_ip_scale if plate_ip_kw else 0.0,
+         "plate_regional_text": bool(regions)},
         sort_keys=True), flush=True)
 
     if len(passes) == 1:

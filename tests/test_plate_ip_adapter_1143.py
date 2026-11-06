@@ -50,10 +50,11 @@ def test_it_is_in_the_reuse_hash():
 
 
 def test_the_plate_call_spreads_the_portrait_arguments():
-    """Read from the syntax tree: the Pass A pipe call (the one fed the plate prompt) spreads **plate_ip_kw."""
+    """Read from the syntax tree: the Pass A pipe call spreads **plate_ip_kw."""
     src = Path(kf.__file__).read_text()
     fn = next(n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef) and n.name == "_render_scene_lock")
-    plate_calls = [c for c in ast.walk(fn) if isinstance(c, ast.Call) and "plate_spec.prompt" in ast.unparse(c)
+    # _render_scene_lock makes exactly one sampling call itself (Pass A); Pass B runs in its own functions.
+    plate_calls = [c for c in ast.walk(fn) if isinstance(c, ast.Call)
                    and any(k.arg == "num_inference_steps" for k in c.keywords)]
     assert len(plate_calls) == 1
     assert any(k.arg is None and ast.unparse(k.value) == "plate_ip_kw" for k in plate_calls[0].keywords)

@@ -70,6 +70,7 @@ def keyframe_params_from(config: RenderConfig) -> KeyframeParams:
         canny_scale=kc.canny_scale,
         face_crop_pad=kc.face_crop_pad,
         plate_ip_adapter_scale=kc.plate_ip_adapter_scale,
+        plate_regional_text=kc.plate_regional_text,
     )
 
 

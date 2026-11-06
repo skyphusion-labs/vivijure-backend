@@ -193,6 +193,9 @@ class KeyframeConfig:
     # 0..1; Pass A (the plate) on a two-person shot: each person's whole cast portrait through the masked IP-Adapter,
     # confined to their region, at this scale. 0 is off, the plate as before (vivijure-cf#1143 option b).
     plate_ip_adapter_scale: float = 0.0
+    # Pass A on a two-person shot: each person's description reaches only their own region of the plate, while the
+    # scene, style, setting and adult clause stay global. Off, the plate as before (vivijure-cf#1143 option a).
+    plate_regional_text: bool = False
     multi_char: MultiCharConfig = field(default_factory=MultiCharConfig)
 
     @classmethod
@@ -245,6 +248,7 @@ class KeyframeConfig:
             canny_scale=_clamp(d.get("canny_scale"), 0.0, 1.5, base.canny_scale),
             face_crop_pad=_clamp(d.get("face_crop_pad"), 0.0, 2.0, base.face_crop_pad),
             plate_ip_adapter_scale=_clamp(d.get("plate_ip_adapter_scale"), 0.0, 1.0, base.plate_ip_adapter_scale),
+            plate_regional_text=d.get("plate_regional_text") is True if "plate_regional_text" in d else base.plate_regional_text,
             multi_char=MultiCharConfig.from_dict(d.get("multi_char")),
         )
 
