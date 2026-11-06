@@ -16,7 +16,7 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 | | `vivijure-backend-hosted` | `vivijure-upscale-hosted` |
 |---|---|---|
 | id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
-| Image | `vivijure-backend:1.1.13@sha256:7bd7293457c4e69c24c387072a9e3456a0a0ff528843c6eda562b6bfacda8911` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
+| Image | `vivijure-backend:1.1.14@sha256:fe34935b797d4582d3e9f838dca3337fcd8410bb9130a33a210476c36e3f7e85` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
 | Pools | `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141`, `BLACKWELL_180`, `BLACKWELL_288` | `BLACKWELL_96` |
 | `workers` min / max | 0 / 12 | 0 / 10 |
 | Idle timeout | 60 s | 10 s |
@@ -51,6 +51,22 @@ the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 1
 1. Drain the pool to 0, repin by digest, then restore max 12 and idle 60 s.
 2. Wait 65 s after the release before submitting anything. Renders through the studio got `keyframe /run -> 409` in that window after the 1.1.7 repin.
 3. After a repin, every worker is cold and pulls about 24 GB from R2, and a warm-up batch does not change that: each NEW worker pulls again. So keep the number of concurrent cold workers small, about 4 to 6, by submitting in small batches, and budget one cold pull per worker. On 2026-11-06, 15 cold workers at once slowed pulls to 2.6 MiB/s and stretched cold jobs to about 20 minutes each; 6 at once pulled normally (cold delay about 2 to 3 minutes). Submitting 2 first and the rest once they ran did NOT help after a new image: the second batch started on new workers, cold.
+
+**Backend 1.1.14, pinned 2026-11-06 (release v38, 11:09:01Z).** A thin image (`deploy/Dockerfile.thin`) at main `a2f3b18`, built on the
+Vultr bake box from the same `toolchain-t1@sha256:456b417bffc7d80cef7e2f93d400beda9ebbea38dcb5e4efc7676460eee4d45d`
+(no change to `deploy/` or `requirements.txt` since `1ac386e`). It adds #589: `plate_count_retries` defaults to 3 for two-person-plus shots. The guard is on by default, and the cold-start doc is corrected.
+
+In the image, `KeyframeConfig().plate_count_retries` and `KeyframeParams().plate_count_retries` both read 3.
+
+**Two-person stills redraw once.** The reuse hash includes `plate_count_retries` when it is set on a shot the guard can run on (2 or more people, `orchestrator.py`). So the first re-render of each stored two-person still draws it again. One-person and empty shots keep their hash.
+
+Image `vivijure-backend:1.1.14@sha256:fe34935b797d4582d3e9f838dca3337fcd8410bb9130a33a210476c36e3f7e85`. The push digest and the GHCR read-back match.
+In the image, `orchestrator.py`, `keyframe.py`, `pipeline.py`, `contract.py` and `config.py` hash the same as at `a2f3b18`, and the image holds 29 .py files. The CPU import smoke passed.
+Repin check: the rollout read 100% on 1.1.14, with 0 unhealthy, 65 s after the release. No render job was submitted.
+
+**Backend rollback from 1.1.14:** image
+`vivijure-backend:1.1.13@sha256:7bd7293457c4e69c24c387072a9e3456a0a0ff528843c6eda562b6bfacda8911`, idle timeout 60 s,
+max 12, same disk. Follow the repinning procedure above. On 1.1.13 the guard is off by default.
 
 **Backend 1.1.13, pinned 2026-11-06 (release v37, 10:38:35Z).** A thin image (`deploy/Dockerfile.thin`) at main `a3d48a6`, built on the
 Vultr bake box from the same `toolchain-t1@sha256:456b417bffc7d80cef7e2f93d400beda9ebbea38dcb5e4efc7676460eee4d45d`
