@@ -16,7 +16,7 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 | | `vivijure-backend-hosted` | `vivijure-upscale-hosted` |
 |---|---|---|
 | id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
-| Image | `vivijure-backend:1.1.6@sha256:cc4111358aea3d318ddd98330e5606b18d3184f42fd05fb68696837bb3702edd` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
+| Image | `vivijure-backend:1.1.7@sha256:d9da0b5a2d4276bb4de149169b513444ace7bf21f10009656cc45105e5596e6c` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
 | Pools | `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141`, `BLACKWELL_180`, `BLACKWELL_288` | `BLACKWELL_96` |
 | `workers` min / max | 0 / 12 | 0 / 10 |
 | Idle timeout | 60 s | 10 s |
@@ -46,6 +46,23 @@ settings the same. 1.1.3 honours `target_height`, which 1.0.4 ignores and runs 2
 v1.42.0 sends `target_height` by default, so rolling back under one delivers 2x against a budget priced at
 the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 11.5 s, and 720x1280 to
 1080x1920 in 6.0 s. The presigned path has not run on this image yet.
+
+**Backend 1.1.7, pinned 2026-11-06.** A thin image (`deploy/Dockerfile.thin`) at main `7f66faa`, built on
+the Vultr bake box from the same `toolchain-t1@sha256:456b417bffc7d80cef7e2f93d400beda9ebbea38dcb5e4efc7676460eee4d45d`
+(no `deploy/` change since `1ac386e`). It adds:
+- #575: the keyframe reuse hash covers the built prompts and `KEYFRAME_ENGINE_VERSION` (`kf-2026-11-06-chunked`). This closes #573.
+- #576: `KeyframeConfig.face_crop_pad`, default 0.35, which is today's crop.
+
+In the image, `orchestrator.py`, `keyframe.py`, `pipeline.py` and `prompt_chunks.py` hash the same as at `7f66faa`, and the image holds 28 .py files, as the tree does. The CPU import smoke passed.
+
+**#575 makes every stored still redraw once.** Every hash stored before 1.1.7 lacks the engine version, so the first re-render of any existing project draws all its stills again at full GPU cost.
+
+Repin check: the pool was drained to 0, then restored to max 12 with a 60 s idle timeout. A `preview` job on the verify bundle (`c33e4fb1-81e7-487b-beeb-bbcd411bffb6-u1`) ran on a fresh 1.1.7 worker and drew its still; it reports no `reused`. The same job reused its still on 1.1.6 (`ecd05663-...-u1`).
+
+**Backend rollback from 1.1.7:** image
+`vivijure-backend:1.1.6@sha256:cc4111358aea3d318ddd98330e5606b18d3184f42fd05fb68696837bb3702edd`, idle
+timeout 60 s, max 12, same disk. Drain the pool to 0 and restore it after the repin. A rollback does NOT
+restore reuse of stills drawn on 1.1.7, because their stored hashes carry the engine version.
 
 **Backend 1.1.6, pinned 2026-11-06.** A thin image (`deploy/Dockerfile.thin`) at main `67e883e`, built on
 the Vultr bake box ([bake-box.md](bake-box.md)) from the same `toolchain-t1@sha256:456b417bffc7d80cef7e2f93d400beda9ebbea38dcb5e4efc7676460eee4d45d`
