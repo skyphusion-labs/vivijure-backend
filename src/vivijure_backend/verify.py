@@ -489,6 +489,7 @@ def _pod_draft_render(emitter: "VerifyEmitter", env: dict) -> RenderOutcome:
       VJ_VERIFY_BUNDLE_KEY  -- the draft project bundle the harness staged in R2 (bundles/...).
       VJ_VERIFY_PROJECT     -- the project name for the job/keys (default 'verify')."""
     from pathlib import Path
+    import shutil
     import tempfile
 
     from . import worker as _worker
@@ -514,12 +515,17 @@ def _pod_draft_render(emitter: "VerifyEmitter", env: dict) -> RenderOutcome:
     store = R2(R2Config.from_env(env))
     emitter.first_frame(_first_frame_seconds(store, project, job_id))
 
-    # Pull the finished clip back and measure the first frame for the sharpness gate.
+    # Pull the finished clip back and measure the first frame for the sharpness gate. The outcome
+    # keeps the size and the decoded frame, never the path, so the directory goes on every exit (#593):
+    # each run used to leave its clip on container disk, and each test run left one in $TMPDIR.
     workdir = Path(tempfile.mkdtemp(prefix="vj-verify-"))
-    clip_path = workdir / "verify-out.mp4"
-    store.get_file(output_key, clip_path)
-    clip_bytes = clip_path.stat().st_size
-    frame = _first_frame_array(clip_path)
+    try:
+        clip_path = workdir / "verify-out.mp4"
+        store.get_file(output_key, clip_path)
+        clip_bytes = clip_path.stat().st_size
+        frame = _first_frame_array(clip_path)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
     return RenderOutcome(output_key=output_key, clip_bytes=clip_bytes, first_frame_array=frame)
 
 

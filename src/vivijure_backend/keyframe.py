@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .contract import Cast, Scene, Storyboard
+from .prompt_chunks import CLIP_CHUNK_TOKENS, PROMPT_CHUNKS, encode_long_prompt
 
 # Anti-bleed defaults: a character LoRA pushed hard in a shared frame is exactly what bleeds, so
 # the per-slot scales are deliberately moderate and the identity comes mostly from the masked
@@ -32,6 +33,10 @@ DEFAULT_LORA_SCALE = 0.3
 DEFAULT_LORA_SCALE_PER_SLOT = 0.35
 DEFAULT_IP_ADAPTER_SCALE = 0.7
 DEFAULT_CANNY_SCALE = 0.70
+# Pass B identity crop padding, a fraction of the face box on each side. 0.35 is the face with little hair, which
+# is what lost Mara's curls in the two-shot (vivijure-cf#1143): the shared text cannot bind hair to one person,
+# and this crop does not carry it. Kept as the default so behaviour is unchanged until a live sweep picks one.
+DEFAULT_FACE_CROP_PAD = 0.35
 DEFAULT_NEGATIVE = (
     "lowres, bad anatomy, extra limbs, fused faces, two heads, deformed, blurry, watermark, text"
 )
@@ -77,16 +82,26 @@ class KeyframeParams:
     lora_scale: float = DEFAULT_LORA_SCALE          # single-char; regional uses lora_scale_per_slot
     lora_scale_per_slot: float = DEFAULT_LORA_SCALE_PER_SLOT
     ip_adapter_scale: float = DEFAULT_IP_ADAPTER_SCALE
+    # Two-person paths only: the per-region identity scale. None = ip_adapter_scale (vivijure-backend#599).
+    ip_adapter_scale_per_slot: float | None = None
     scene_lock: bool = True          # Pass A scene plate, Pass B canny + face-crop; off is a debug hatch
     canny_scale: float = DEFAULT_CANNY_SCALE
+    face_crop_pad: float = DEFAULT_FACE_CROP_PAD  # Pass B identity crop padding (cf#1143)
+    plate_ip_adapter_scale: float = 0.0  # Pass A per-region portrait IP-Adapter on a two-person shot; 0 = off (cf#1143)
+    plate_regional_text: bool = False  # Pass A per-region descriptions on a two-person shot; off = one prompt (cf#1143)
+    plate_people_free_background: bool = False  # with regional text: the band names no one (cf#1143 option c)
+    plate_count_retries: int = 3     # 0..3 plate redraws while it has too many faces; 0 = off (cf#1143)
     # Identity method for the SINGLE-character path. InstantID is the default: insightface
     # face-embed through InstantID's image projection. "ip_adapter" is the h94 fallback.
     # Two-person shots ignore this and stay on the masked IP-Adapter regional path.
     identity_method: str = "instantid"
     instantid_ip_adapter_scale: float = 0.8  # InstantID face-embedding (image-proj) scale
-    pose_conditioning: bool = True   # ControlNet-OpenPose to separate bodies in multi-char shots
+    # ControlNet-OpenPose to separate bodies in multi-char shots. None = each path's default (backend#596):
+    # on for the plain regional path, off for a guarded scene-lock plate. See plate_pose_on / regional_pose_on.
+    pose_conditioning: bool | None = None
     controlnet_pose_scale: float = 0.55  # OpenPose ControlNet conditioning scale (regional path)
     region_gutter: int = 64          # px dead band between regional masks so they do not seam-blend
+    pose_spread: float = 0.0         # 0 = figures at region centres; else centre-to-centre spacing (cf#1143)
     negative_prompt: str = DEFAULT_NEGATIVE
     max_slots: int = 2               # regional path is tuned for 2; more is future work
 
@@ -110,6 +125,158 @@ class KeyframeResult:
     engine: str                      # "single" | "regional"
     identity_requested: str = ""     # what the config ASKED for: "instantid" | "ip_adapter"
     identity_path: str = ""          # what actually RAN: see IDENTITY_PATHS
+    # stage -> PNG beside `path`, only when the render was asked to save intermediates. See
+    # INTERMEDIATE_STAGES. Empty on every path that has no such stage (no plate, no Pass B).
+    intermediates: dict[str, Path] = field(default_factory=dict)
+    # The plate count guard's record when it ran, else None. See plate_count_record.
+    plate_count: dict | None = None
+
+
+# The diagnostic intermediates a scene-lock keyframe can save (vivijure-cf#1143), in draw order:
+# the Pass A pose control (only when the plate draws under pose), the Pass A plate, and the Pass B
+# canny map of that plate (only when Pass B runs). The names are the file and key suffixes.
+# With the plate count guard on, every plate draw is also kept as plate_try0.. (try0 is the first draw); "plate"
+# is always the one Pass B was given.
+INTERMEDIATE_STAGES: tuple[str, ...] = ("pose", "plate", "plate_try0", "plate_try1", "plate_try2", "plate_try3",
+                                        "canny")
+
+
+# Plate redraw seeds: far from the base seed so a retry never repeats a neighbouring shot's or seed's draw.
+PLATE_RETRY_SEED_STRIDE = 1_000_003
+
+
+def plate_count_retries_for(scene: Scene, cfg: KeyframeParams) -> int:
+    """How many plate redraws the count guard may make for this shot (vivijure-cf#1143). Two-person-plus shots
+    only: a one-person or empty shot's plate has no third person to catch. Clamped to 0..3; 0 = off."""
+    if engine_for(scene, cfg) != "regional":
+        return 0
+    return max(0, min(3, int(cfg.plate_count_retries)))
+
+
+def plate_pose_default_off(people: int | None, *, max_slots: int, pose_conditioning: bool | None,
+                           plate_count_retries: int) -> bool:
+    """True iff the backend#596 default takes the pose skeleton OFF a scene-lock plate that drew under it before.
+
+    Measured on vivijure-cf#1281 (18 jobs, one board, 6 seeds): under the fixed standing skeleton the pair posed
+    for the camera instead of acting, 2 of 6 held the action with the right people; with no skeleton, 5 of 6,
+    and the plate count guard caught every third person. So the default holds only while the guard runs: with
+    the guard off and the pose unset, the plate keeps its skeleton, and "pose off, guard off" is never a default.
+    An explicit `pose_conditioning` is the job's own choice and never counts as the default.
+
+    `people` is the shot's character count, or None for a config-only reuse hash (then it applies whenever the
+    rest holds, as for plate_count_retries). Only 2..max_slots people draw a pose at all. Pure."""
+    if pose_conditioning is not None:
+        return False
+    if people is not None and not (2 <= people <= max_slots):
+        return False
+    return max(0, min(3, int(plate_count_retries))) > 0
+
+
+def plate_pose_on(scene: Scene, cfg: KeyframeParams) -> bool:
+    """Whether a scene-lock Pass A plate draws under the pose skeleton. Only a two-plus-person (regional) shot
+    ever does; an explicit `pose_conditioning` wins; unset follows `plate_pose_default_off`. Pure."""
+    if engine_for(scene, cfg) != "regional":
+        return False
+    if cfg.pose_conditioning is not None:
+        return bool(cfg.pose_conditioning)
+    return not plate_pose_default_off(len(scene.character_slots), max_slots=cfg.max_slots,
+                                      pose_conditioning=None, plate_count_retries=cfg.plate_count_retries)
+
+
+def regional_pose_on(cfg: KeyframeParams) -> bool:
+    """Whether the plain regional path (scene lock off) draws under the pose skeleton: on unless a job turns it
+    off. backend#596 changed only the scene-lock plate; this path was not measured. Pure."""
+    return cfg.pose_conditioning is not False
+
+
+def plate_retry_seed(seed: int, attempt: int) -> int:
+    """The seed of plate redraw `attempt` (1-based). Deterministic, so a rerun reproduces the same redraws."""
+    return (int(seed) + attempt * PLATE_RETRY_SEED_STRIDE) % 2**31
+
+
+def count_faces(analyzer, image) -> int:
+    """Faces insightface finds in a PIL image (the analyser the scene-lock path already loads for face crops).
+    Measured offline on 19 saved plates: it caught 11 of 12 plates with a third person and read every clean plate
+    as 2. It misses a person facing away from the camera; that is the guard's known limit."""
+    import numpy as np
+    arr = np.array(image.convert("RGB"))[:, :, ::-1]  # insightface wants BGR
+    return len(analyzer.get(arr) or [])
+
+
+def plate_face_floor_on(scene: Scene, cfg: KeyframeParams) -> bool:
+    """Whether the plate count guard also redraws a plate with FEWER faces than people (vivijure-cf#1281).
+
+    Measured on vivijure-cf#1281 (hand board, 6 seeds): with per-region text on, the plate drew ONE person on
+    4 of 6, and the guard, which counts extras only, passed each of them, so the still lost a person. Without
+    per-region text the same board drew one face on 1 of 6. So the floor rides with per-region text and nothing
+    else: a person facing away is still a legitimate one-face plate on every other path, which is why the guard
+    accepts it there. Needs the guard itself to run (plate_count_retries). Pure."""
+    return plate_regional_text_on(scene, cfg) and plate_count_retries_for(scene, cfg) > 0
+
+
+def plate_needs_redraw(faces: int, expected: int, *, floor: bool = False) -> bool:
+    """Whether the guard redraws a plate with `faces` faces: always for an extra person, and for a missing one
+    only under the floor (plate_face_floor_on). Pure."""
+    return faces > expected or (floor and faces < expected)
+
+
+def choose_plate(counts: list[int], expected: int, *, floor: bool = False) -> int:
+    """The draw Pass B gets: the first that holds at most `expected` faces, else the one with the fewest (the
+    earliest on a tie). Fewer faces than people is accepted: a person can face away, and the guard is for extras.
+
+    Under the floor (vivijure-cf#1281) the first draw with exactly `expected` faces wins. With none, the draw
+    closest from below (the most faces not over `expected`, the earliest on a tie), and only with no draw at or
+    under it, the fewest: a missing person is still preferred to an extra one."""
+    if not counts:
+        raise ValueError("choose_plate needs at least one draw")
+    if floor:
+        for i, n in enumerate(counts):
+            if n == expected:
+                return i
+        under = [i for i, n in enumerate(counts) if n <= expected]
+        if under:
+            return max(under, key=lambda i: (counts[i], -i))
+        return min(range(len(counts)), key=lambda i: (counts[i], i))
+    for i, n in enumerate(counts):
+        if n <= expected:
+            return i
+    return min(range(len(counts)), key=lambda i: (counts[i], i))
+
+
+def plate_count_record(counts: list[int], expected: int, retries: int, *, floor: bool = False) -> dict:
+    """The guard's honest record, for the result and the event. `clean` false means the still was made from a
+    plate that still has too many faces, and says so. Under the floor, `floor` is true and `clean` also needs
+    the count to be exact: a plate that is still short of a person is not clean."""
+    chosen = choose_plate(counts, expected, floor=floor)
+    n = counts[chosen]
+    rec = {"expected": expected, "faces": list(counts), "chosen": chosen,
+           "clean": (n == expected) if floor else (n <= expected), "retries": retries}
+    if floor:
+        rec["floor"] = True
+    return rec
+
+
+def intermediate_path(out_path: Path, stage: str) -> Path:
+    """Where one intermediate lands: beside the keyframe, `<shot>.<stage>.png`."""
+    if stage not in INTERMEDIATE_STAGES:
+        raise ValueError(f"unknown keyframe intermediate stage {stage!r}")
+    return Path(out_path).with_name(f"{Path(out_path).stem}.{stage}.png")
+
+
+def write_intermediates(images: dict, out_path: Path) -> dict[str, Path]:
+    """Write each collected intermediate image beside the keyframe and return stage -> path, in
+    INTERMEDIATE_STAGES order. An unknown stage is a programming error and raises before anything
+    is written."""
+    unknown = set(images) - set(INTERMEDIATE_STAGES)
+    if unknown:
+        raise ValueError(f"unknown keyframe intermediate stage(s) {sorted(unknown)!r}")
+    saved: dict[str, Path] = {}
+    for stage in INTERMEDIATE_STAGES:
+        if stage in images:
+            p = intermediate_path(out_path, stage)
+            images[stage].save(p)
+            saved[stage] = p
+    return saved
 
 
 # The identity paths a keyframe render can actually take. Named here so the render record, the
@@ -132,12 +299,14 @@ def slot_trigger(cast: Cast, slot: str) -> str:
     return (char.name if char and char.name else slot)
 
 
-# SDXL's text encoders keep 77 tokens including start and end, so 75 are ours. The pipeline has no way
-# past that here, so anything over it is silently dropped from the end of the prompt.
-PROMPT_TOKEN_BUDGET = 75
+# SDXL's text encoders read 77 tokens including start and end, so 75 are ours per chunk. The prompt is
+# encoded in PROMPT_CHUNKS chunks (prompt_chunks.py, vivijure-cf#1143), so this is the whole budget.
+# Past it, the encoder drops the tail and says so in a keyframe.prompt_cut event.
+PROMPT_TOKEN_BUDGET = CLIP_CHUNK_TOKENS * PROMPT_CHUNKS
 # The estimate below is not the real tokenizer, which is not on this CPU path. This margin absorbs the
-# difference. Measured against CLIP on the vivijure-cf#1147 boards: it estimated low by at most 7.
-PROMPT_TOKEN_MARGIN = 8
+# difference. Measured against CLIP on the vivijure-cf#1147 boards: it estimated low by at most 7 in 75,
+# so the margin scales with the budget.
+PROMPT_TOKEN_MARGIN = 8 * PROMPT_CHUNKS
 
 
 def estimate_tokens(text: str) -> int:
@@ -181,21 +350,58 @@ _PLACE_GARMENT = re.compile(
 PLATE_SOLO = "solo"
 
 
+_COUNT_WORDS = {2: "two", 3: "three", 4: "four"}
+
+
+def adult_clause(names: list[str], *, named: bool) -> str:
+    """The shot's statement that every person in it is an adult (vivijure-cf#1143). It is the safety
+    clause, so it is said ONCE per shot for everyone, placed before anything the budget can cut, and never
+    fitted away. Stating it per shot instead of per description is also what frees the two-person budget.
+
+    `named` is the identity pass, which names each person (the names are its LoRA triggers). The plate has
+    no triggers, so it counts them. An empty shot has no clause."""
+    n = len(names)
+    if n == 0:
+        return ""
+    if not named:
+        return "an adult" if n == 1 else f"{_COUNT_WORDS.get(n, str(n))} adults"
+    if n == 1:
+        return f"{names[0]}, an adult"
+    listed = ", ".join(names[:-1]) + " and " + names[-1]
+    return f"{listed}, both adults" if n == 2 else f"{listed}, all adults"
+
+
+def setting_for(scene: Scene, storyboard: Storyboard) -> str:
+    """The film's setting for this shot, or "" when there is none, or the shot prompt or the style prefix
+    already says it (vivijure-cf#1145). A shot that names its own place keeps its own place."""
+    setting = (storyboard.setting or "").strip()
+    if not setting:
+        return ""
+    low = setting.lower()
+    if low in (scene.prompt or "").lower() or low in (storyboard.style_prefix or "").lower():
+        return ""
+    return setting
+
+
 def drop_place_from_garment(text: str) -> str:
     """"charcoal field jacket" -> "charcoal jacket". A place the prompt means to be in is untouched."""
     return _PLACE_GARMENT.sub(r"\1", text or "")
 
 
-def clause_rank(clause: str) -> int:
-    """0 is kept first. A clause naming a garment or hair outranks a mood word in the same clause."""
+def clause_rank(clause: str, *, adult_stated: bool = False) -> int:
+    """0 is kept first. A clause naming a garment or hair outranks a mood word in the same clause.
+
+    `adult_stated`: the shot already says everyone is an adult (adult_clause), so a description's own age
+    clause is a look detail, ranked after hair and clothes (vivijure-cf#1143)."""
     if _ADULT_CLAUSE.search(clause):
-        return 0
+        return 2 if adult_stated else 0
     if _LOOK_CLAUSE.search(clause):
         return 1
     return 3 if _MOOD_CLAUSE.search(clause) else 2
 
 
-def fit_description(text: str, budget: int, *, name: str = "", scene_prompt: str = "", max_rank: int = 3) -> str:
+def fit_description(text: str, budget: int, *, name: str = "", scene_prompt: str = "", max_rank: int = 3,
+                    adult_stated: bool = False) -> str:
     """The clauses of a description that fit `budget` estimated tokens, in their written order.
 
     The budget is spent by clause_rank, so a mood phrase can never cost a garment. A clause that
@@ -207,11 +413,11 @@ def fit_description(text: str, budget: int, *, name: str = "", scene_prompt: str
     usable = [
         (i, c) for i, c in enumerate(clauses)
         if c and c.lower() != name.lower() and c.lower() not in (scene_prompt or "").lower()
-        and not _DIRECTION_CLAUSE.search(c) and clause_rank(c) <= max_rank
+        and not _DIRECTION_CLAUSE.search(c) and clause_rank(c, adult_stated=adult_stated) <= max_rank
     ]
     kept: list[tuple[int, str]] = []
     used = 0
-    for i, clause in sorted(usable, key=lambda item: (clause_rank(item[1]), item[0])):
+    for i, clause in sorted(usable, key=lambda item: (clause_rank(item[1], adult_stated=adult_stated), item[0])):
         for form in (clause, clause.split(" over ")[0]):  # a jacket without what is under it still reads
             cost = estimate_tokens(form) + 1  # the joining comma
             if used + cost <= budget:
@@ -238,35 +444,68 @@ def build_prompt(scene: Scene, cast: Cast, storyboard: Storyboard, *,
     identity runs (vivijure-cf#1147, seen by rendering the plate alone at the same seed). It gets
     only the age, hair and garments, because the whole description makes a head-and-shoulders
     portrait, and the scene is said again after them, because a person described last poses for the
-    camera instead of doing the action. The repeat comes last, so the 77 token limit only ever cuts
-    the repeat. Pieces are comma-joined and de-duplicated of empty fragments so a missing style
-    or prompt never leaves a dangling comma.
+    camera instead of doing the action. The repeat comes last, so the budget only ever cuts the
+    repeat. Pieces are comma-joined and de-duplicated of empty fragments so a missing style or
+    prompt never leaves a dangling comma.
 
-    Descriptions come LAST and are FITTED to what is left of the token budget, split evenly across
-    the shot's slots. Everything before them outranks them, and the lock clause above all: it is
-    what keeps a person in the scene (vivijure-cf#1147). The even split is what stops the first
-    slot from taking the whole budget on a two-person shot."""
-    triggers = ", ".join(slot_trigger(cast, s) for s in scene.character_slots) if include_triggers else ""
-    parts = [storyboard.style_prefix, scene.prompt, triggers]
+    Every shot with people says once that they are all adults (adult_clause, vivijure-cf#1143). In
+    the identity pass that clause names them, and the names are the LoRA triggers, so it stands where
+    the triggers stood. It is never fitted away: if a long style and scene would push it past the
+    budget, it moves ahead of the scene.
+
+    Descriptions come LAST and are FITTED to what is left of the token budget (two 75-token chunks,
+    prompt_chunks.py), split evenly across the shot's slots. Everything before them outranks them,
+    and the lock clause above all: it is what keeps a person in the scene (vivijure-cf#1147). The even
+    split is what stops the first slot from taking the whole budget on a two-person shot. On a
+    two-person shot a description's own age clause ranks after hair and clothes, because the shot
+    already says both are adults.
+
+    The film's `setting` (vivijure-cf#1145) follows the shot's own prompt when the shot does not say
+    it. It is the lowest priority: said only if it still fits after the descriptions."""
+    names = [slot_trigger(cast, s) for s in scene.character_slots]
+    multi = len(names) >= 2
+    # The identity pass names each person once, in the clause that also says they are adults; the names are
+    # the LoRA triggers. The plate has no triggers, so its clause counts people instead.
+    adult = adult_clause(names, named=include_triggers)
+    # The clause sits where the triggers always sat, after the scene. If a long style and a long scene would
+    # push it past the budget, it moves ahead of the scene instead: the safety clause is never the part cut.
+    early = estimate_tokens(_join_prompt([storyboard.style_prefix, scene.prompt, adult])) > (
+        PROMPT_TOKEN_BUDGET - PROMPT_TOKEN_MARGIN)
+    tail = [] if early else [adult]
     if storyboard.style_preset and storyboard.style_preset != "None":
-        parts.append(storyboard.style_preset)
+        tail.append(storyboard.style_preset)
     if lock_clause:
-        parts.append(PASS_B_LOCK_CLAUSE)
+        tail.append(PASS_B_LOCK_CLAUSE)
     if not include_triggers and len(scene.character_slots) == 1:
-        parts.append(PLATE_SOLO)
-    prompt = drop_place_from_garment(_join_prompt(parts))
+        tail.append(PLATE_SOLO)
+    setting = setting_for(scene, storyboard)
+
+    def head(with_setting: bool) -> str:
+        parts = [storyboard.style_prefix, adult if early else "", scene.prompt, setting if with_setting else "", *tail]
+        return drop_place_from_garment(_join_prompt(parts))
+
+    prompt = head(False)
     wanted = [(s, drop_place_from_garment(slot_description(cast, s, scene.prompt))) for s in scene.character_slots]
     wanted = [(s, d) for s, d in wanted if d]
-    if not wanted:
-        return prompt
-    room = PROMPT_TOKEN_BUDGET - PROMPT_TOKEN_MARGIN - estimate_tokens(prompt)
-    share = room // len(wanted)
-    if share <= 0:
-        return prompt
-    max_rank = 3 if include_triggers else 1
-    fitted = [fit_description(d, share, name=slot_trigger(cast, s), scene_prompt=scene.prompt, max_rank=max_rank)
-              for s, d in wanted]
-    if not include_triggers:
+    fitted: list[str] = []
+    if wanted:
+        room = PROMPT_TOKEN_BUDGET - PROMPT_TOKEN_MARGIN - estimate_tokens(prompt)
+        share = room // len(wanted)
+        if share > 0:
+            # In a plate, rank 1 and above only (age, hair, garments). With the adult clause said once for
+            # the shot, a two-person plate drops the per-person age for hair and clothes.
+            max_rank = 3 if include_triggers else 1
+            fitted = [fit_description(d, share, name=slot_trigger(cast, s), scene_prompt=scene.prompt,
+                                      max_rank=max_rank, adult_stated=multi)
+                      for s, d in wanted]
+            fitted = [f for f in fitted if f]
+    # The setting is the lowest priority after the scene and the descriptions: it is said only if it
+    # still fits, so it can never cost a person their hair or clothes (vivijure-cf#1145).
+    if setting:
+        with_setting = head(True)
+        if estimate_tokens(_join_prompt([with_setting, *fitted])) <= PROMPT_TOKEN_BUDGET - PROMPT_TOKEN_MARGIN:
+            prompt = with_setting
+    if not include_triggers and scene.character_slots:
         return drop_place_from_garment(_join_prompt([prompt, *fitted, scene.prompt]))
     return _join_prompt([prompt, *fitted])
 
@@ -302,7 +541,7 @@ def plan_keyframe_passes(scene: Scene, cast: Cast, storyboard: Storyboard,
     engine = engine_for(scene, cfg)
     negative = scene_lock_negative(scene, cfg.negative_prompt)
     plate_prompt = build_prompt(scene, cast, storyboard, include_triggers=False)
-    plate_cn = "pose" if (engine == "regional" and cfg.pose_conditioning) else "none"
+    plate_cn = "pose" if plate_pose_on(scene, cfg) else "none"
     plate = KeyframePass(
         name="plate", prompt=plate_prompt, negative_prompt=negative,
         bind_loras=False, lora_scale=0.0, use_ip_adapter=False, face_crop=False,
@@ -319,6 +558,69 @@ def plan_keyframe_passes(scene: Scene, cast: Cast, storyboard: Storyboard,
         controlnet="canny", canny_from_plate=True,
     )
     return [plate, identity]
+
+
+def regional_ip_adapter_scale(cfg: KeyframeParams) -> float:
+    """The masked IP-Adapter identity scale each region gets on a two-person draw (scene-lock Pass B and the plain
+    regional render): the per-slot value when a job sets it, else the keyframe ip_adapter_scale, which is what
+    both paths drew at before the per-slot field reached the renderer (vivijure-backend#599). Pure."""
+    if cfg.ip_adapter_scale_per_slot is None:
+        return cfg.ip_adapter_scale
+    return max(0.0, min(1.0, float(cfg.ip_adapter_scale_per_slot)))
+
+
+def plate_ip_adapter_scale_for(scene: Scene, cfg: KeyframeParams) -> float:
+    """The scale at which Pass A takes each person's whole cast portrait, confined to their region, or 0.0 for off.
+
+    vivijure-cf#1143: on a two-person shot the plate draws hair from shared text that SDXL does not bind to a
+    person, and Pass B keeps the plate's outline (measured: the bun survived canny 0.4 and every identity-crop
+    padding). Only the no-plate path, which takes the whole portrait, restored the hair. This gives the plate the
+    portrait. Two-person shots only: a one-person plate holds its hair from its own description, and an empty shot
+    has no one to condition. Off unless set, so the plate is unchanged by default."""
+    if engine_for(scene, cfg) != "regional":
+        return 0.0
+    return max(0.0, min(1.0, float(cfg.plate_ip_adapter_scale)))
+
+
+def plate_regional_text_on(scene: Scene, cfg: KeyframeParams) -> bool:
+    """Whether Pass A gives each person's description to their own region (vivijure-cf#1143 option a). Two-person
+    shots within the regional slot cap only, and only when set."""
+    return bool(cfg.plate_regional_text) and engine_for(scene, cfg) == "regional"
+
+
+def plate_region_prompts(scene: Scene, cast: Cast, storyboard: Storyboard) -> tuple[str, list[str]]:
+    """The two-person plate's prompts for per-region text: (shared, [one per person, in slot order]).
+
+    `shared` is the plate prompt with NO person's description: the style, the scene and its action, the setting,
+    the adult clause and the scene repeat. The background keeps it, and it opens every person's prompt, so none of
+    it can be masked away. Each person's prompt is `shared` plus that person's own description, fitted to what is
+    left of the budget for one person (not split, since each prompt holds one), with hair and clothes ahead of age.
+    No other person's description is in it: that is the whole point."""
+    shared = build_prompt(scene, Cast(characters={}), storyboard, include_triggers=False)
+    out = []
+    for s in scene.character_slots:
+        desc = drop_place_from_garment(slot_description(cast, s, scene.prompt))
+        room = PROMPT_TOKEN_BUDGET - PROMPT_TOKEN_MARGIN - estimate_tokens(shared)
+        fitted = fit_description(desc, room, name=slot_trigger(cast, s), scene_prompt=scene.prompt, max_rank=1,
+                                 adult_stated=True) if desc and room > 0 else ""
+        out.append(_join_prompt([shared, fitted]))
+    return shared, out
+
+
+def plate_people_free_background_on(scene: Scene, cfg: KeyframeParams) -> bool:
+    """Whether the band outside both people reads a people-free prompt (vivijure-cf#1143 option c). Only with
+    per-region text on, which is what gives the band a prompt of its own."""
+    return plate_regional_text_on(scene, cfg) and bool(cfg.plate_people_free_background)
+
+
+def plate_background_prompt(storyboard: Storyboard) -> str:
+    """The prompt the band outside both people reads under option (c): the style and the setting, and nothing else.
+
+    Measured on 1.1.9 (vivijure-cf#1143): with per-region text on, the band read the shot text "Mara and Dev
+    stand ...", and drew a third person there at 2 of 2 seeds. So it gets no shot text, no name, no description and
+    no people count. It draws no person, so it carries no adult clause; every region that draws a person still
+    does (plate_region_prompts). With no style and no setting it is empty, which is a valid prompt."""
+    return _join_prompt([storyboard.style_prefix, (storyboard.setting or "").strip()])
 
 
 def keyframe_render_path(engine: str, cfg: KeyframeParams, *, has_instantid_ref: bool) -> str:
@@ -409,6 +711,7 @@ def render_keyframe(
     params: KeyframeParams | None = None,
     lora_paths: dict[str, Path] | None = None,
     pose_image: "Path | None" = None,
+    save_intermediates: bool = False,
 ) -> KeyframeResult:
     """Render one scene's keyframe to `out_path`.
 
@@ -416,6 +719,10 @@ def render_keyframe(
     `lora_paths` maps slot -> trained adapter file. Single-character shots take the ordinary
     identity path; two-character shots take the regional anti-bleed path. Heavy imports are
     deferred; the body is validated on a pod.
+
+    `save_intermediates` (diagnostic, vivijure-cf#1143) also writes the scene-lock path's pose
+    control, plate and canny map beside `out_path` and lists them in `KeyframeResult.intermediates`.
+    It changes nothing that is drawn. Other paths have no plate and save nothing.
     """
     cfg = params or KeyframeParams()
     out_path = Path(out_path)
@@ -433,9 +740,12 @@ def render_keyframe(
     # One person with an InstantID ref takes InstantID even when scene_lock is on.
     # Two people stay on the regional body. scene_lock is plate then canny + face-crop
     # IP-Adapter for every other shot.
+    collected: dict = {}
+    report: dict = {}
     if path == "scene_lock":
         image, identity_path, prompt = _render_scene_lock(
-            server, scene, cast, storyboard, cfg, loras, pose_image)
+            server, scene, cast, storyboard, cfg, loras, pose_image,
+            sink=collected if save_intermediates else None, report=report)
     elif path == "instantid":
         prompt = build_prompt(scene, cast, storyboard)
         image, identity_path = _render_instantid(server, prompt, scene, cast, cfg, loras, single_slot)
@@ -452,16 +762,27 @@ def render_keyframe(
 
     refuse_lora_only_still(identity_path)
     image.save(out_path)
+    intermediates = write_intermediates(collected, out_path) if collected else {}
     return KeyframeResult(shot_id=scene.id or "shot", path=out_path, slots=slots,
                           multi_char=(engine == "regional"), prompt=prompt, seed=cfg.seed,
                           engine=engine, identity_requested=cfg.identity_method,
-                          identity_path=identity_path)
+                          identity_path=identity_path, intermediates=intermediates,
+                          plate_count=report.get("plate_count"))
 
 
-def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image):
+def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image, sink=None, report=None):
     """Pass A: scene plate (no LoRA, no IP-Adapter). Pass B: canny of that plate + face-crop
     IP-Adapter + split LoRA. No-character shots skip Pass B. Few-step tiers still run Pass B
-    (t2i). InstantID is not this path. Returns `(image, identity_path, prompt)`."""
+    (t2i). InstantID is not this path. Returns `(image, identity_path, prompt)`.
+
+    `sink`, when a dict, collects the intermediates by INTERMEDIATE_STAGES name. Collecting only
+    keeps a reference; it changes no input to any pass.
+
+    The plate count guard (`plate_count_retries`, two-person-plus shots): after the first plate, count its faces and
+    redraw ONLY the plate with plate_retry_seed while it has more faces than people (or, under per-region text,
+    fewer: plate_face_floor_on), up to the limit. Pass B then
+    runs once, on the chosen plate, with the original generator, so a first plate that is clean gives exactly the
+    still the guard-off path draws. `report["plate_count"]` gets the record whenever the guard ran."""
     import json
     import torch
     from .models import ModelRole
@@ -474,7 +795,10 @@ def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image):
 
     # Distill adapter tracks the tier; character LoRAs stay off for Pass A.
     _bind_loras(pipe, {}, cfg.lora_scale, few_step=cfg.few_step)
-    _ensure_ip_adapter(pipe, 0)
+    plate_ip_scale = plate_ip_adapter_scale_for(scene, cfg)
+    plate_ip_kw = _plate_ip_kwargs(pipe, cast, scene, cfg, plate_ip_scale) if plate_ip_scale > 0 else {}
+    if not plate_ip_kw:
+        _ensure_ip_adapter(pipe, 0)
 
     plate_spec = passes[0]
     if plate_spec.controlnet == "pose":
@@ -486,20 +810,66 @@ def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image):
             from PIL import Image
             control = Image.open(pose_image).convert("RGB").resize((cfg.width, cfg.height))
         else:
-            control = _pose_skeleton(cfg.width, cfg.height, boxes)
+            control = _pose_skeleton(cfg.width, cfg.height, boxes, spread=cfg.pose_spread)
         cn_scale = cfg.controlnet_pose_scale
+        if sink is not None:
+            sink["pose"] = control
     else:
         server.set_keyframe_controlnet(ModelRole.CONTROLNET_POSE)
         control = _blank_control(cfg.width, cfg.height)
         cn_scale = 0.0
-    plate = pipe(
-        prompt=plate_spec.prompt, negative_prompt=plate_spec.negative_prompt,
-        num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
-        height=cfg.height, width=cfg.width, generator=generator,
-        image=control, controlnet_conditioning_scale=cn_scale,
-    ).images[0]
+    from . import regional_text
+    plate_prompt = plate_spec.prompt
+    regions: list = []
+    if plate_regional_text_on(scene, cfg):
+        shared, persons = plate_region_prompts(scene, cast, storyboard)
+        plate_prompt = shared  # the background's prompt; each person's region gets its own below
+        slots = scene.character_slots[:cfg.max_slots]
+        boxes = region_boxes(cfg.width, cfg.height, len(slots), orientation="vertical", gutter=cfg.region_gutter)
+        regions = [(encode_long_prompt(pipe, p, plate_spec.negative_prompt, shot_id=scene.id or "shot")["prompt_embeds"], b)
+                   for p, b in zip(persons, boxes)]
+    background = None
+    if regions and plate_people_free_background_on(scene, cfg):
+        background = encode_long_prompt(pipe, plate_background_prompt(storyboard), plate_spec.negative_prompt,
+                                        shot_id=scene.id or "shot")["prompt_embeds"]
+    def draw_plate(gen):
+        with regional_text.applied(pipe, regions, width=cfg.width, height=cfg.height,
+                                   cfg_batch=_guidance(cfg) > 1.0, background=background):
+            return pipe(
+                **encode_long_prompt(pipe, plate_prompt, plate_spec.negative_prompt, shot_id=scene.id or "shot"),
+                num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
+                height=cfg.height, width=cfg.width, generator=gen,
+                image=control, controlnet_conditioning_scale=cn_scale,
+                **plate_ip_kw,
+            ).images[0]
+
+    plate = draw_plate(generator)
+    retries = plate_count_retries_for(scene, cfg)
+    if retries:
+        expected = len(scene.character_slots[:cfg.max_slots])
+        floor = plate_face_floor_on(scene, cfg)
+        analyzer = server.face_analyzer()
+        draws = [plate]
+        counts = [count_faces(analyzer, plate)]
+        while plate_needs_redraw(counts[-1], expected, floor=floor) and len(draws) <= retries:
+            retry_gen = torch.Generator(device="cuda").manual_seed(plate_retry_seed(cfg.seed, len(draws)))
+            draws.append(draw_plate(retry_gen))
+            counts.append(count_faces(analyzer, draws[-1]))
+        record = plate_count_record(counts, expected, retries, floor=floor)
+        plate = draws[record["chosen"]]
+        if report is not None:
+            report["plate_count"] = record
+        if sink is not None:
+            for i, d in enumerate(draws):
+                sink[f"plate_try{i}"] = d
+        print("@event keyframe.plate_count " + json.dumps(
+            {"shot_id": scene.id or "shot", "seed": cfg.seed, **record}, sort_keys=True), flush=True)
     print("@event keyframe.scene_plate " + json.dumps(
-        {"shot_id": scene.id or "shot", "seed": cfg.seed}, sort_keys=True), flush=True)
+        {"shot_id": scene.id or "shot", "seed": cfg.seed, "plate_ip_adapter_scale": plate_ip_scale if plate_ip_kw else 0.0,
+         "plate_regional_text": bool(regions), "plate_people_free_background": background is not None},
+        sort_keys=True), flush=True)
+    if sink is not None:
+        sink["plate"] = plate
 
     if len(passes) == 1:
         return plate, "none", plate_spec.prompt
@@ -507,15 +877,17 @@ def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image):
     ident = passes[1]
     server.set_keyframe_controlnet(ModelRole.CONTROLNET_CANNY)
     canny = _canny_preprocess(plate)
+    if sink is not None:
+        sink["canny"] = canny
     scale = ident.lora_scale
     if engine == "regional":
         slots = scene.character_slots[:cfg.max_slots]
-        crops, any_face = _face_crops_for_slots(server, cast, slots)
+        crops, any_face = _face_crops_for_slots(server, cast, slots, pad_ratio=cfg.face_crop_pad)
         image, identity_path = _pass_b_regional(
             pipe, ident, scene, cfg, loras, generator, canny, scale, crops, any_face)
     else:
         slot = scene.character_slots[0] if scene.character_slots else None
-        crops, any_face = _face_crops_for_slots(server, cast, [slot] if slot else [])
+        crops, any_face = _face_crops_for_slots(server, cast, [slot] if slot else [], pad_ratio=cfg.face_crop_pad)
         image, identity_path = _pass_b_single(
             pipe, ident, scene, cfg, loras, generator, canny, scale, crops, any_face)
     # Next shot's Pass A expects pose on the shared pipe.
@@ -539,7 +911,7 @@ def _pass_b_single(pipe, ident, scene, cfg, loras, generator, canny, scale, crop
         identity_path = single_identity_path(slot, has_ref_image=False,
                                              has_lora=bool(slot and slot in loras))
     image = pipe(
-        prompt=ident.prompt, negative_prompt=ident.negative_prompt,
+        **encode_long_prompt(pipe, ident.prompt, ident.negative_prompt, shot_id=scene.id or "shot"),
         num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
         height=cfg.height, width=cfg.width, generator=generator,
         image=canny, controlnet_conditioning_scale=cfg.canny_scale,
@@ -557,7 +929,7 @@ def _pass_b_regional(pipe, ident, scene, cfg, loras, generator, canny, scale, cr
     _bind_loras(pipe, {s: loras[s] for s in slots if s in loras}, scale, few_step=cfg.few_step)
     if any_face:
         _ensure_ip_adapter(pipe, n=len(slots))
-        scales = [cfg.ip_adapter_scale if c is not None else 0.0 for c in crops]
+        scales = [regional_ip_adapter_scale(cfg) if c is not None else 0.0 for c in crops]
         pipe.set_ip_adapter_scale(scales)
         from PIL import Image
         ip_images = [c if c is not None else Image.new("RGB", (64, 64), (0, 0, 0)) for c in crops]
@@ -570,7 +942,7 @@ def _pass_b_regional(pipe, ident, scene, cfg, loras, generator, canny, scale, cr
         ip_kw = {}
         identity_path = "lora_only" if any(s in loras for s in slots) else "none"
     image = pipe(
-        prompt=ident.prompt, negative_prompt=ident.negative_prompt,
+        **encode_long_prompt(pipe, ident.prompt, ident.negative_prompt, shot_id=scene.id or "shot"),
         num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
         height=h, width=w, generator=generator,
         image=canny, controlnet_conditioning_scale=cfg.canny_scale,
@@ -579,8 +951,30 @@ def _pass_b_regional(pipe, ident, scene, cfg, loras, generator, canny, scale, cr
     return image, identity_path
 
 
-def _face_crops_for_slots(server, cast, slots):
-    """Per-slot face crop (or None). No-face slots skip IP-Adapter (blank, scale 0)."""
+def _plate_ip_kwargs(pipe, cast, scene, cfg, scale):
+    """Pass A keyword arguments for the per-region portrait IP-Adapter (vivijure-cf#1143 option b): one whole cast
+    portrait per person, each confined to the same region box the pose skeleton and Pass B use. A person with no
+    portrait gets a blank image at scale 0. Returns {} when no one in the shot has a portrait, so the caller draws
+    the plate as before. GPU path: validated on a pod."""
+    from diffusers.image_processor import IPAdapterMaskProcessor
+    from PIL import Image
+
+    slots = scene.character_slots[:cfg.max_slots]
+    w, h = cfg.width, cfg.height
+    boxes = region_boxes(w, h, len(slots), orientation="vertical", gutter=cfg.region_gutter)
+    refs = [_ref_images(cast, s, count=1) for s in slots]
+    if not any(refs):
+        return {}
+    images = [r[0] if r else Image.new("RGB", (64, 64), (0, 0, 0)) for r in refs]
+    _ensure_ip_adapter(pipe, n=len(slots))
+    pipe.set_ip_adapter_scale([scale if r else 0.0 for r in refs])
+    masks = IPAdapterMaskProcessor().preprocess([_box_mask(w, h, b) for b in boxes], height=h, width=w)
+    return {"ip_adapter_image": images, "cross_attention_kwargs": {"ip_adapter_masks": masks}}
+
+
+def _face_crops_for_slots(server, cast, slots, *, pad_ratio: float = DEFAULT_FACE_CROP_PAD):
+    """Per-slot identity crop (or None), padded by `pad_ratio` of the face box on each side. No-face slots skip
+    IP-Adapter (blank, scale 0)."""
     from . import instantid as _iid
     crops = []
     for slot in slots:
@@ -588,7 +982,7 @@ def _face_crops_for_slots(server, cast, slots):
         crop = None
         if refs:
             try:
-                crop = _iid.crop_face(server.face_analyzer(), refs[0])
+                crop = _iid.crop_face(server.face_analyzer(), refs[0], pad_ratio=pad_ratio)
             except Exception:  # noqa: BLE001 -- no-face / analyzer miss is a skip, not a crash
                 crop = None
         crops.append(crop)
@@ -641,7 +1035,7 @@ def _render_single(pipe, prompt, scene, cast, cfg, loras, generator):
     identity_path = single_identity_path(slot, has_ref_image=bool(ip_images),
                                          has_lora=bool(slot and slot in loras))
     image = pipe(
-        prompt=prompt, negative_prompt=cfg.negative_prompt,
+        **encode_long_prompt(pipe, prompt, cfg.negative_prompt, shot_id=scene.id or "shot"),
         num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
         height=cfg.height, width=cfg.width, generator=generator,
         image=_blank_control(cfg.width, cfg.height),
@@ -667,7 +1061,7 @@ def _render_regional(pipe, prompt, scene, cast, cfg, loras, generator, pose_imag
 
     # One IP-Adapter image per slot (its refs), each confined to its region's mask.
     _ensure_ip_adapter(pipe, n=len(slots))
-    pipe.set_ip_adapter_scale([cfg.ip_adapter_scale] * len(slots))
+    pipe.set_ip_adapter_scale([regional_ip_adapter_scale(cfg)] * len(slots))
     ip_images = [_ref_images(cast, s, count=1)[0] for s in slots]
     masks = IPAdapterMaskProcessor().preprocess(
         [_box_mask(w, h, b) for b in boxes], height=h, width=w)
@@ -677,18 +1071,18 @@ def _render_regional(pipe, prompt, scene, cast, cfg, loras, generator, pose_imag
     # "older Aria" collapse). An explicit pose_image overrides the generated skeleton. With
     # pose_conditioning off, a blank control image at scale 0.0 makes the ControlNet inert and the
     # path degrades to masked-IP-Adapter only.
-    if cfg.pose_conditioning:
+    if regional_pose_on(cfg):
         if pose_image is not None:
             from PIL import Image
             control = Image.open(pose_image).convert("RGB").resize((w, h))
         else:
-            control = _pose_skeleton(w, h, boxes)
+            control = _pose_skeleton(w, h, boxes, spread=cfg.pose_spread)
         cn_scale = cfg.controlnet_pose_scale
     else:
         control = _blank_control(w, h)
         cn_scale = 0.0
     image = pipe(
-        prompt=prompt, negative_prompt=cfg.negative_prompt,
+        **encode_long_prompt(pipe, prompt, cfg.negative_prompt, shot_id=scene.id or "shot"),
         num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
         height=h, width=w, generator=generator,
         ip_adapter_image=ip_images,
@@ -737,7 +1131,7 @@ def _render_instantid(server, prompt, scene, cast, cfg, loras, slot):
         proc.id_embeds = id_embeds
     try:
         return pipe(
-            prompt=prompt, negative_prompt=cfg.negative_prompt,
+            **encode_long_prompt(pipe, prompt, cfg.negative_prompt, shot_id=scene.id or "shot"),
             num_inference_steps=cfg.steps, guidance_scale=_guidance(cfg),
             height=cfg.height, width=cfg.width, generator=generator,
         ).images[0], "instantid"
@@ -938,18 +1332,43 @@ _POSE_COLORS = [(255, 0, 0), (255, 85, 0), (255, 170, 0), (255, 255, 0), (170, 2
                 (255, 0, 255), (255, 0, 170), (255, 0, 85)]
 
 
-def _pose_skeleton(width, height, boxes):
+def pose_figure_shifts(width: int, boxes, spread: float) -> list[float]:
+    """Horizontal shift of each region's pose figure, in pixels (vivijure-cf#1143).
+
+    With `spread` 0 (or one box) every shift is 0: each figure stands at the centre of its region, as it always
+    has. Otherwise the figures' centres are placed `spread * width` apart in total, evenly around the frame
+    centre, which closes the empty band a wide frame leaves between two people (the plate drew a third person
+    there). Each shift is clamped so the figure, which spans _POSE_KP's x range of its box width, stays inside
+    its own region box: the masks, LoRAs and per-region text that key on those boxes still match the bodies."""
+    n = len(boxes)
+    if n < 2 or spread <= 0:
+        return [0.0] * n
+    xs = [x for x, _ in _POSE_KP]
+    lo, hi = min(xs), max(xs)
+    shifts = []
+    for i, (l, _t, r, _b) in enumerate(boxes):
+        bw = r - l
+        target = width * (0.5 + spread * (i / (n - 1) - 0.5))
+        centre = l + 0.5 * bw
+        dx = target - centre
+        dx = max(l - (l + lo * bw), min(r - (l + hi * bw), dx))  # keep [l+lo*bw+dx, l+hi*bw+dx] in [l, r]
+        shifts.append(dx)
+    return shifts
+
+
+def _pose_skeleton(width, height, boxes, *, spread: float = 0.0):
     """Render an OpenPose skeleton with ONE standing COCO-18 figure per region box on black, so the
     ControlNet plants exactly that many distinct bodies (the fix for two characters merging into
-    one). Each figure scales into its box with a small vertical margin. Geometry is deterministic;
-    visual fidelity to the ControlNet's training distribution is validated on the pod."""
+    one). Each figure scales into its box with a small vertical margin, shifted sideways by
+    `pose_figure_shifts` (none at `spread` 0). Geometry is deterministic; visual fidelity to the
+    ControlNet's training distribution is validated on the pod."""
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (width, height), (0, 0, 0))
     draw = ImageDraw.Draw(img)
-    for (l, t, r, b) in boxes:
+    for (l, t, r, b), dx in zip(boxes, pose_figure_shifts(width, boxes, spread)):
         bw, bh = r - l, b - t
         my = int(bh * 0.04)  # top/bottom margin so head + ankles are not clipped at the box edge
-        pts = [(l + x * bw, t + my + y * (bh - 2 * my)) for (x, y) in _POSE_KP]
+        pts = [(l + x * bw + dx, t + my + y * (bh - 2 * my)) for (x, y) in _POSE_KP]
         lw = max(2, bw // 70)
         for i, (a, c) in enumerate(_POSE_LIMBS):
             draw.line([pts[a], pts[c]], fill=_POSE_COLORS[i % len(_POSE_COLORS)], width=lw)
