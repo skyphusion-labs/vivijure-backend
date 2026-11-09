@@ -287,7 +287,8 @@ class GpuPipeline:
                 # regeneration when config is unchanged (_finish copies both into state.tar.gz).
                 try:
                     kf_path.with_suffix(".hash").write_text(
-                        kf_hash(self.config.keyframe, scene=scene, cast=cast, storyboard=storyboard))
+                        kf_hash(self.config.keyframe, scene=scene, cast=cast, storyboard=storyboard,
+                                bound_loras=plan.bound_loras))  # backend#478: the planner's map
                 except Exception:
                     pass  # hash write is best-effort; a missing file = old-state reuse behavior
                 # Record WHICH identity path ran, and for the InstantID path the ONNX providers
