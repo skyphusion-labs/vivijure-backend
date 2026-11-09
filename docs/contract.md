@@ -127,7 +127,7 @@ routing flags it still reads off it (e.g. `finish_offloaded`).
 | `render` | as needed | as needed | yes | Full render. |
 | `preview` | as needed | as needed | no | Cheap keyframe preview before committing GPU-seconds. |
 | `finalize` | no | reuse | yes | Animate over existing keyframes; zero training. |
-| `regen_shot` | no | as needed | no | Redraw specific keyframes (with `process_shot_ids`), no motion. |
+| `regen_shot` | no | as needed | no | Redraw the named keyframes (with `process_shot_ids`) whose keyframe params changed; an unchanged shot is reused, not redrawn. No motion. |
 | `train_lora` | yes | no | no | Train character adapters only. |
 | `i2v_clip` | no | no | yes | Standalone image-to-video on one keyframe. Separate job shape (no bundle); see [the `i2v_clip` job](#the-i2v_clip-job). |
 | `finish_clip` | no | no | no | Standalone finishing pass on one existing clip. Separate job shape (no bundle); see [the `finish_clip` job](#the-finish_clip-job). |
