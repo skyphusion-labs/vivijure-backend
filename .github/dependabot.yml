@@ -29,8 +29,9 @@ updates:
     #              is the newest av that supports 3.11. Dependabot #513 proposed 19.0.1 and the
     #              resolve-hosted gate refused it, which is that gate working as designed
     #              (backend#518). Moving it means moving the env, not accepting the bump.
-    #   tokenizers >0.22.2 breaks against transformers 5.14.1, which caps tokenizers<=0.23.0, and
-    #              PyPI never shipped a 0.23.0 stable. It can only move PAIRED with transformers.
+    #   tokenizers >=0.24.0 breaks against transformers 5.22.1, which requires tokenizers
+    #              >=0.23.1,<0.24.0. 0.23.x patches are safe to propose; a 0.24 bump can only
+    #              move PAIRED with a transformers release that allows it.
     #   torchao    >=0.18.0 imports torch.nn.functional.ScalingType (torch 2.10+) at package
     #              load (quantization/quantize_/workflows/float8/float8_tensor.py). Dependabot
     #              #419 bumped 0.17.0 -> 0.18.0 as a "minor"; 1.0.15 died importing Wan i2v on
@@ -44,7 +45,7 @@ updates:
       - dependency-name: "av"
         versions: [">=19.0.0"]
       - dependency-name: "tokenizers"
-        versions: [">0.22.2"]
+        versions: [">=0.24.0"]
       - dependency-name: "torchao"
         versions: [">=0.18.0"]
       # onnxruntime-gpu 1.31 allows a CUDA 13 wheel. The base is CUDA 12.8
