@@ -128,13 +128,17 @@ def test_model_server_uses_job_config_specs(monkeypatch):
     req_same = _req(render_overrides={"keyframe": {"base_model": "SG161222/custom-sdxl-base"}})
     pipe2 = worker.build_pipeline(req_same)
     assert pipe2.server is pipe.server  # reused
-    # ...but a second job with DIFFERENT models is REFUSED, never silently rendered on the
-    # previously-loaded (wrong) set -- the client resubmits and a fresh worker loads correctly.
-    import pytest
+    # ...and a second job with a DIFFERENT keyframe base swaps it on the same server (#559), never
+    # rendering on the previously-loaded (wrong) base. An i2v divergence still refuses
+    # (tests/test_keyframe_base_swap_559.py).
+    import vivijure_backend.harness.models_mirror as mirror
+    monkeypatch.setattr(mirror, "repo_in_hf_cache", lambda repo_id, env=None: True)  # the new base is on disk
     req_diverged = _req(render_overrides={"keyframe": {"base_model": "SG161222/other-sdxl"}})
-    with pytest.raises(worker.ModelDivergenceError, match="SG161222/other-sdxl"):
-        worker.build_pipeline(req_diverged)
-    assert worker._SERVER.specs[ModelRole.KEYFRAME_BASE].repo_id == "SG161222/custom-sdxl-base"  # unchanged
+    pipe3 = worker.build_pipeline(req_diverged)
+    assert pipe3.server is pipe.server
+    assert worker._SERVER.specs[ModelRole.KEYFRAME_BASE].repo_id == "SG161222/other-sdxl"
+    assert (worker._SERVER.specs[ModelRole.KEYFRAME_FEWSTEP].weight_name
+            == DEFAULT_SPECS[ModelRole.KEYFRAME_FEWSTEP].weight_name)
 
 
 def test_cold_start_rejects_disallowed_model_repo_id(monkeypatch):
