@@ -331,6 +331,13 @@ worker reuses the models it already loaded. If an `i2v_clip` `config` carries `m
 `distill_model`, they apply on a cold worker; a warm worker whose loaded i2v models differ refuses
 the job (`ModelDivergenceError`), exactly as it does for a render.
 
+The keyframe base is the exception (#559). A render's `keyframe.base_model` (or `style`) applies on
+a warm worker too, when that base is on the worker's disk: the worker drops its two SDXL pipes,
+reloads the requested base on the next draw, and prints `@event keyframe_model_swap`. Cost: one base
+reload per change of base. A base that is not on the worker fails with the missing-weights error
+before anything is dropped, so the loaded pipes stay warm. Anime is that case on the GPU image:
+anime keyframes run on `cloud-keyframe` (#557), and an anime job sent here fails that way.
+
 **Output:**
 
 | Field | Type | Notes |

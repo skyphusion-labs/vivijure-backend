@@ -27,27 +27,23 @@ def _server(req: RenderRequest | None = None):
     is a singleton. On first call, specs from `req.config` (keyframe base/distill, i2v base/distill)
     are wired in so a non-default model repo configured in the job DOES take effect -- provided this
     is the cold-start job. On subsequent calls (warm worker, server already built) the existing
-    model set is reused regardless of `req.config.*.model` fields; per-job hot-swapping requires a
-    pod restart. If `req` is None the server uses DEFAULT_SPECS (e.g. standalone test usage)."""
+    model set is returned as is; `build_pipeline` then swaps the keyframe roles to the job's
+    (`_swap_keyframe_models`, #559) and refuses an i2v divergence. If `req` is None the server uses
+    DEFAULT_SPECS (e.g. standalone test usage)."""
     global _SERVER
     if _SERVER is None:
         # deferred: torch; validate_repo_id rejects path/URI/foreign-namespace ids before load
         from .models import ModelServer, ModelRole, DEFAULT_SPECS, validate_repo_id
         job_specs: dict = {}
         if req is not None:
-            kc, ic = req.config.keyframe, req.config.i2v
+            ic = req.config.i2v
             # Use dataclasses.replace to override ONLY the repo_id, preserving weight_name and
             # all other spec fields (KEYFRAME_FEWSTEP carries weight_name=<specific .safetensors>;
             # rebuilding ModelSpec positionally drops it and breaks the distill LoRA load).
             # validate_repo_id runs BEFORE ModelServer construction so job-controlled ids cannot
             # smuggle absolute paths or non-allowlisted HF namespaces into the load path.
             job_specs = {
-                ModelRole.KEYFRAME_BASE: dataclasses.replace(
-                    DEFAULT_SPECS[ModelRole.KEYFRAME_BASE],
-                    repo_id=validate_repo_id(kc.base_model)),
-                ModelRole.KEYFRAME_FEWSTEP: dataclasses.replace(
-                    DEFAULT_SPECS[ModelRole.KEYFRAME_FEWSTEP],
-                    repo_id=validate_repo_id(kc.distill_model)),
+                **_keyframe_specs(req.config.keyframe),
                 ModelRole.I2V: dataclasses.replace(
                     DEFAULT_SPECS[ModelRole.I2V],
                     repo_id=validate_repo_id(ic.model)),
@@ -90,9 +86,39 @@ def build_pipeline(req: RenderRequest) -> GpuPipeline:
     over the shared model server. The server is initialized from `req.config` model fields on
     the first (cold-start) job; subsequent jobs reuse the already-loaded model set."""
     server = _server(req)
+    _swap_keyframe_models(req, server)
     _check_model_divergence(req, server)
     return GpuPipeline(config=req.config, pretrained_loras=req.pretrained_loras, server=server,
                        debug_intermediates=req.debug_intermediates)
+
+
+def _keyframe_specs(kc) -> dict:
+    """The job's keyframe specs (base + distill), each a DEFAULT_SPECS entry with only the repo id
+    replaced. `validate_repo_id` runs here, so a job-controlled id is rejected before any server is
+    built or changed. Shared by the cold start (`_server`) and the warm swap (`_swap_keyframe_models`)."""
+    from .models import DEFAULT_SPECS, ModelRole, validate_repo_id
+    return {
+        ModelRole.KEYFRAME_BASE: dataclasses.replace(
+            DEFAULT_SPECS[ModelRole.KEYFRAME_BASE], repo_id=validate_repo_id(kc.base_model)),
+        ModelRole.KEYFRAME_FEWSTEP: dataclasses.replace(
+            DEFAULT_SPECS[ModelRole.KEYFRAME_FEWSTEP], repo_id=validate_repo_id(kc.distill_model)),
+    }
+
+
+def _swap_keyframe_models(req: RenderRequest, server) -> None:
+    """vivijure-backend#559: a warm worker loads the job's keyframe base instead of refusing it.
+
+    `style` and `base_model` pick the base per job, and the server froze the first job's base, so a
+    warm worker refused every job with another one. Worse, a cold anime job (animagine is not on the
+    GPU image, #557) failed on missing weights and left its spec loaded, so that worker then refused
+    every photoreal job for the rest of its life. Now a base on local disk swaps in (only the two SDXL
+    pipes are dropped; the next draw reloads them), a base not on disk fails with the missing-weights
+    error and changes nothing, and a swap prints `@event keyframe_model_swap`, so it is never silent."""
+    changed = server.swap_keyframe_specs(_keyframe_specs(req.config.keyframe))
+    if changed:
+        import json, time
+        print("@event keyframe_model_swap " + json.dumps({"ts": time.time(), "swapped": changed},
+                                                         sort_keys=True), flush=True)
 
 
 class ModelDivergenceError(RuntimeError):
@@ -105,7 +131,9 @@ class ModelDivergenceError(RuntimeError):
 def _check_model_divergence(req: RenderRequest, server) -> None:
     """REFUSE a warm-worker job whose requested models differ from the loaded set.
 
-    Specs freeze from the cold-start job; a warm worker cannot swap models without a restart.
+    Specs freeze from the cold-start job, except the keyframe roles, which `_swap_keyframe_models`
+    has already moved to the job's (#559), so in practice only an i2v divergence refuses here. The
+    keyframe roles stay in the check as the backstop: a swap that did not take still refuses.
     This used to be a log-only warning that let the job render anyway (a valid-looking result
     from the wrong model). Now: emit the structured divergence event for the observability
     channel, then fail the job with a real error. DETECTION stays best-effort (an import/shape

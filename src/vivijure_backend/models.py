@@ -920,6 +920,58 @@ class ModelServer:
         self._cache[cache_key] = restorer
         return restorer
 
+    # vivijure-backend#559: the cache entries built from the keyframe roles. KEYFRAME_BASE is the SDXL that
+    # draws the still and KEYFRAME_FEWSTEP is the distill adapter attached to both pipes, so these are the
+    # entries a keyframe swap must drop. The ControlNets, the face analyzer, the i2v pipe and the finish
+    # models do not read either role, so they stay loaded.
+    KEYFRAME_CACHE_KEYS = ("keyframe", "instantid")
+    KEYFRAME_ROLES = (ModelRole.KEYFRAME_BASE, ModelRole.KEYFRAME_FEWSTEP)
+
+    def swap_keyframe_specs(self, specs: dict[ModelRole, ModelSpec]) -> dict[str, dict[str, str]]:
+        """Point the keyframe roles at `specs` on a warm server (vivijure-backend#559).
+
+        A job picks its keyframe base per job (`style: anime` or `photoreal`), and the server used to
+        freeze it from the first job, so a warm worker refused every job of the other style. This swaps
+        the spec and drops only the pipes built from it; the next `keyframe_pipeline()` or
+        `instantid_pipeline()` loads the new base from local disk, exactly as a cold worker would.
+
+        A new base that is not on this worker's disk raises `missing_keyframe_weights_error` BEFORE
+        anything changes, so the loaded pipes stay warm for the next job. That is the anime case today:
+        anime keyframes run on `cloud-keyframe`, and the GPU image does not carry animagine (#557, not
+        planned), so a stray anime job fails with the honest error and costs the worker nothing.
+
+        Only the keyframe roles may change here. An i2v swap is not offered: the Wan pipe is the largest
+        load on the worker, so a warm i2v divergence is still refused (worker._refuse_divergence).
+
+        Returns {role name: {"loaded", "requested"}} for each role whose repo changed. Empty means
+        nothing changed and nothing was dropped."""
+        bad = sorted(r.name for r in specs if r not in self.KEYFRAME_ROLES)
+        if bad:
+            raise ValueError(f"swap_keyframe_specs takes only the keyframe roles, not {bad}")
+        changed = {
+            role.name: {"loaded": self.specs[role].repo_id, "requested": spec.repo_id}
+            for role, spec in specs.items() if self.specs[role].repo_id != spec.repo_id
+        }
+        if not changed:
+            return {}
+        base = specs.get(ModelRole.KEYFRAME_BASE)
+        if base is not None and ModelRole.KEYFRAME_BASE.name in changed:
+            from .harness.models_mirror import repo_in_hf_cache
+            if not repo_in_hf_cache(base.repo_id):
+                raise missing_keyframe_weights_error(base.repo_id)
+        for role, spec in specs.items():
+            self.specs[role] = spec
+        for key in self.KEYFRAME_CACHE_KEYS:
+            self._cache.pop(key, None)
+        try:
+            import gc
+            import torch
+            gc.collect()
+            torch.cuda.empty_cache()
+        except Exception:
+            pass  # CPU-only test process, or no CUDA: nothing to free
+        return changed
+
     def unload(self) -> None:
         self._cache.clear()
         try:
