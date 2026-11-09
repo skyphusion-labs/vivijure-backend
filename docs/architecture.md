@@ -212,8 +212,8 @@ The decisions:
 
 - **Action** selects the path. `render` does everything; `preview` draws keyframes but skips
   i2v (cheap previews before committing GPU-seconds); `finalize` animates over existing
-  keyframes with zero training; `regen_shot` redraws specific keyframes without animating;
-  `train_lora` trains only.
+  keyframes with zero training; `regen_shot` redraws the named shots whose keyframe params
+  changed (an unchanged shot is reused) without animating; `train_lora` trains only.
 - **LoRA: train vs reuse.** A slot is reused if it was trained on a prior render (a `.trained`
   marker in the restored state) or supplied as a `pretrained_loras` passthrough; otherwise it
   trains. Pretrained adapters supersede prior-state ones.
