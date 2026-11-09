@@ -56,13 +56,14 @@ def test_slot_trigger_is_the_character_name():
 def test_prompt_combines_style_scene_and_triggers():
     sc = Scene.from_dict({"id": "shot_01", "prompt": "rooftop standoff", "character_slots": ["A", "B"]}, 0)
     p = build_prompt(sc, CAST, _sb())
-    assert p == "cyberpunk anime, rooftop standoff, Vesper, Rhode, teal-haired netrunner, bearded fixer"
+    # vivijure-cf#1143: the triggers are said once, in the clause that says everyone is an adult.
+    assert p == "cyberpunk anime, rooftop standoff, Vesper and Rhode, both adults, teal-haired netrunner, bearded fixer"
 
 
 def test_pass_a_prompt_omits_triggers():
     sc = Scene.from_dict({"id": "shot_01", "prompt": "diner booth", "character_slots": ["A"]}, 0)
     p = build_prompt(sc, CAST, _sb(), include_triggers=False)
-    assert p == "cyberpunk anime, diner booth, solo, teal-haired netrunner, diner booth"
+    assert p == "cyberpunk anime, diner booth, an adult, solo, teal-haired netrunner, diner booth"
     assert "Vesper" not in p
 
 
@@ -195,7 +196,7 @@ def test_anti_bleed_defaults():
     assert p.lora_scale == DEFAULT_LORA_SCALE == 0.3
     assert p.lora_scale_per_slot == DEFAULT_LORA_SCALE_PER_SLOT == 0.35
     assert p.ip_adapter_scale == DEFAULT_IP_ADAPTER_SCALE == 0.7
-    assert p.pose_conditioning is True
+    assert p.pose_conditioning is None  # per-path default (backend#596): see test_plate_pose_default_596
     assert p.max_slots == 2
     assert p.scene_lock is True
     assert p.canny_scale == DEFAULT_CANNY_SCALE == 0.70
@@ -495,8 +496,9 @@ def test_plan_two_passes_for_character_shot():
 
 
 def test_plan_regional_pass_a_is_pose_pass_b_is_canny_at_slot_scale():
+    # With the pose asked for explicitly; the default plate draws without it (backend#596).
     sc = Scene.from_dict({"id": "s", "prompt": "a diner", "character_slots": ["A", "B"]}, 0)
-    cfg = KeyframeParams()
+    cfg = KeyframeParams(pose_conditioning=True)
     plate, ident = plan_keyframe_passes(sc, CAST, _sb(), cfg)
     assert plate.controlnet == "pose"
     assert ident.controlnet == "canny"
@@ -595,7 +597,8 @@ def test_two_people_share_the_budget():
 
 
 def test_a_prompt_with_no_room_is_left_alone():
-    sc = Scene.from_dict({"id": "s", "prompt": " ".join(["word"] * 90), "character_slots": ["A"]}, 0)
+    # The budget is two 75-token chunks since vivijure-cf#1143, so "no room" takes a scene past 150.
+    sc = Scene.from_dict({"id": "s", "prompt": " ".join(["word"] * 160), "character_slots": ["A"]}, 0)
     assert "charcoal" not in build_prompt(sc, LONG, _sb())
 
 

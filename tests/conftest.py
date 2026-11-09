@@ -19,3 +19,14 @@ def _fresh_volume_repoint_state(monkeypatch):
     next."""
     from vivijure_backend.harness import models_mirror
     monkeypatch.setattr(models_mirror, "_PRISTINE_ROOTS", None)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_rclone_size(monkeypatch):
+    """The pull-size guard (vivijure-backend#600) lists the remote with `rclone size`, a subprocess of its own. Tests
+    fake rclone through `_run_rclone`, which this listing does not go through, so without this a test on a machine
+    WITH rclone installed would list a real remote with fake credentials (and wait out its timeout). Every test
+    therefore starts with the listing reporting "could not measure" (None), which is exactly the guard's pass-through,
+    so an existing mirror test keeps its meaning; a guard test sets its own size."""
+    from vivijure_backend.harness import models_mirror
+    monkeypatch.setattr(models_mirror, "remote_bytes", lambda cmd, env: None)

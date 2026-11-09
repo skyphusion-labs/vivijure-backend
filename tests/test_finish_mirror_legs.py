@@ -44,7 +44,7 @@ def pulls(tmp_path, monkeypatch):
     """Stub rclone. Returns (env, pulled), where `pulled` lists each leg the mirror asked rclone for."""
     pulled: list[str] = []
 
-    def fake(argv, env, deadline=None):
+    def fake(argv, env, deadline=None, **_kw):
         pulled.append(_leg_of(argv))
         return 0
 
@@ -204,7 +204,7 @@ def test_a_failed_leg_writes_no_sentinel(pulls, tmp_path, monkeypatch):
     import subprocess
     env, _ = pulls
 
-    def boom(argv, env, deadline=None):
+    def boom(argv, env, deadline=None, **_kw):
         raise subprocess.CalledProcessError(1, argv)
 
     monkeypatch.setattr(mm, "_run_rclone", boom)

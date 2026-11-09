@@ -48,6 +48,17 @@ def _clamp(value: Any, lo: float, hi: float, default: float) -> float:
     return max(lo, min(hi, v))
 
 
+def _clamp_opt(value: Any, lo: float, hi: float) -> float | None:
+    """As `_clamp`, for a knob whose absence means something: None (absent, null or junk) stays None."""
+    if value is None:
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(lo, min(hi, v))
+
+
 def _clamp_int(value: Any, lo: int, hi: int, default: int) -> int:
     return int(_clamp(value, lo, hi, default))
 
@@ -127,26 +138,41 @@ class MultiCharConfig:
     pose knobs that separate two bodies. InstantID is deliberately absent: it is single-face by
     nature, so the regional path stays masked-IP-Adapter only.
 
-    Defaults mirror `orchestrator.MULTI_CHAR_DEFAULTS` (engine=regional, pose_conditioning=True,
-    lora_scale_per_slot=0.35, ip_adapter_scale_per_slot=0.7, max_slots=2)."""
-    pose_conditioning: bool = True            # OpenPose ControlNet to separate bodies
+    Defaults mirror `orchestrator.MULTI_CHAR_DEFAULTS` (engine=regional, pose_conditioning=None,
+    lora_scale_per_slot=0.35, ip_adapter_scale_per_slot=None, max_slots=2).
+
+    `pose_conditioning` has THREE states (backend#596). None, the default, means each path's own default: the
+    plain regional path draws under the pose skeleton, and a scene-lock plate for two-plus people draws without
+    it while the plate count guard runs (`keyframe.plate_pose_on`). An explicit True or False sets it on both
+    paths, which is how a job turns the plate's pose back on."""
+    pose_conditioning: bool | None = None     # OpenPose ControlNet to separate bodies; None = per-path default
     lora_scale_per_slot: float = 0.35         # 0..2; regional only (single-char reads KeyframeConfig.lora_scale)
-    ip_adapter_scale_per_slot: float = 0.7    # 0..1; per-region masked IP-Adapter identity pull
+    # 0..1; the per-region masked IP-Adapter identity pull on both two-person paths (scene-lock Pass B and the plain
+    # regional render). None, the default, means KeyframeConfig.ip_adapter_scale, which is what both paths drew at
+    # before this field reached the renderer (vivijure-backend#599), so an unset job draws and hashes as before.
+    ip_adapter_scale_per_slot: float | None = None
     max_slots: int = 2                        # 1..4; characters the no-bleed path supports at once
     controlnet_pose_scale: float = 0.55       # 0..1.5; OpenPose ControlNet conditioning scale
     region_gutter: int = 64                   # 0..256 px dead band between regional masks (anti seam-blend)
+    # 0 = each pose figure at the centre of its region (unchanged). 0.15..0.9 = the figures' centres sit this
+    # fraction of the width apart around the frame centre, so no empty band is left between two people
+    # (vivijure-cf#1143: the plate drew a third person in that band). Clamped so a figure stays in its region.
+    pose_spread: float = 0.0
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "MultiCharConfig":
         d = d if isinstance(d, dict) else {}
         base = cls()
         return cls(
-            pose_conditioning=bool(d.get("pose_conditioning", base.pose_conditioning)),
+            pose_conditioning=(base.pose_conditioning if d.get("pose_conditioning") is None
+                               else bool(d.get("pose_conditioning"))),
             lora_scale_per_slot=_clamp(d.get("lora_scale_per_slot"), 0.0, 2.0, base.lora_scale_per_slot),
-            ip_adapter_scale_per_slot=_clamp(d.get("ip_adapter_scale_per_slot"), 0.0, 1.0, base.ip_adapter_scale_per_slot),
+            # Absent, null or junk leaves it unset (the keyframe scale); a number is clamped like every other knob.
+            ip_adapter_scale_per_slot=_clamp_opt(d.get("ip_adapter_scale_per_slot"), 0.0, 1.0),
             max_slots=_clamp_int(d.get("max_slots"), 1, 4, base.max_slots),
             controlnet_pose_scale=_clamp(d.get("controlnet_pose_scale"), 0.0, 1.5, base.controlnet_pose_scale),
             region_gutter=_clamp_int(d.get("region_gutter"), 0, 256, base.region_gutter),
+            pose_spread=_clamp(d.get("pose_spread"), 0.0, 0.9, base.pose_spread),
         )
 
 
@@ -187,6 +213,25 @@ class KeyframeConfig:
     lora_scale: float = 0.30         # 0..2; single-char LoRA; regional uses multi_char.lora_scale_per_slot
     scene_lock: bool = True          # two-pass plate then canny; default true only on the canny-bearing image
     canny_scale: float = 0.70        # 0..1.5; Pass B ControlNet conditioning
+    # 0..2; Pass B identity crop padding, as a fraction of the face box on each side. 0.35 is a face with little
+    # hair. Larger keeps the hair and shoulders for the masked IP-Adapter (vivijure-cf#1143).
+    face_crop_pad: float = 0.35
+    # 0..1; Pass A (the plate) on a two-person shot: each person's whole cast portrait through the masked IP-Adapter,
+    # confined to their region, at this scale. 0 is off, the plate as before (vivijure-cf#1143 option b).
+    plate_ip_adapter_scale: float = 0.0
+    # Pass A on a two-person shot: each person's description reaches only their own region of the plate, while the
+    # scene, style, setting and adult clause stay global. Off, the plate as before (vivijure-cf#1143 option a).
+    plate_regional_text: bool = False
+    # With plate_regional_text: the band outside both people reads only the style and the setting, never the shot
+    # text that names them, so it is not told to draw a third person (vivijure-cf#1143 option c). Off = it reads
+    # the shared prompt, as before.
+    plate_people_free_background: bool = False
+    # 0..3; on a two-person-plus shot, count the faces in the plate and redraw ONLY the plate, with a derived seed,
+    # while it holds more faces than the shot has people, up to this many times. Pass B never adds a person, so a
+    # clean plate gives a clean still. 0 = off: no count, the plate as before (vivijure-cf#1143).
+    # Default 3 (ruled 2026-11-06 on the live 1.1.13 check: clean two-person stills 2 of 6 -> 5 of 6, no false
+    # clean, about +23 s per two-person keyframe on average, at most 3 extra plates).
+    plate_count_retries: int = 3
     multi_char: MultiCharConfig = field(default_factory=MultiCharConfig)
 
     @classmethod
@@ -237,6 +282,11 @@ class KeyframeConfig:
             lora_scale=_clamp(d.get("lora_scale"), 0.0, 2.0, base.lora_scale),
             scene_lock=bool(d.get("scene_lock", base.scene_lock)),
             canny_scale=_clamp(d.get("canny_scale"), 0.0, 1.5, base.canny_scale),
+            face_crop_pad=_clamp(d.get("face_crop_pad"), 0.0, 2.0, base.face_crop_pad),
+            plate_ip_adapter_scale=_clamp(d.get("plate_ip_adapter_scale"), 0.0, 1.0, base.plate_ip_adapter_scale),
+            plate_regional_text=d.get("plate_regional_text") is True if "plate_regional_text" in d else base.plate_regional_text,
+            plate_people_free_background=d.get("plate_people_free_background") is True if "plate_people_free_background" in d else base.plate_people_free_background,
+            plate_count_retries=_clamp_int(d.get("plate_count_retries"), 0, 3, base.plate_count_retries),
             multi_char=MultiCharConfig.from_dict(d.get("multi_char")),
         )
 

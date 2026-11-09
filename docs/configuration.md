@@ -68,6 +68,11 @@ The SDXL keyframe stage. Fields map to diffusers SDXL parameters.
 | `lora_scale` | float | 0.30 | 0-2 | Single-char LoRA. The mapper must not read `lora_scale_per_slot` for this path. |
 | `scene_lock` | bool | true | -- | Two-pass plate then canny. Default true only on the canny-bearing image. Off is a debug hatch. Do not tag `backend-v*` until seed+runtime contain `CONTROLNET_CANNY`. |
 | `canny_scale` | float | 0.70 | 0-1.5 | Pass B ControlNet conditioning. |
+| `face_crop_pad` | float | 0.35 | 0-2 | Pass B identity crop: the face box padded by this fraction on each side (vivijure-cf#1143). |
+| `plate_ip_adapter_scale` | float | 0 | 0-1 | Two-person plate: each person's whole portrait through the masked IP-Adapter at this scale. 0 is off (cf#1143 option b). |
+| `plate_regional_text` | bool | false | -- | Two-person plate: each person's description reaches only their own region (cf#1143 option a). With the plate count guard on, it also turns on the guard's face floor: a plate with FEWER faces than people is redrawn too (cf#1281, see `plate_count_retries`). |
+| `plate_people_free_background` | bool | false | -- | With `plate_regional_text`: the band outside both people reads no shot text (cf#1143 option c). |
+| `plate_count_retries` | int | 3 | 0-3 | Two-person-plus plate count guard. After Pass A, count faces in the plate with the loaded insightface analyser; while there are more faces than people, redraw only the plate with a derived seed, up to this many times. Pass B runs once, on the first draw with at most that many faces, else on the draw with the fewest. Each still the guard ran on reports `plate_count` in the result and a `keyframe.plate_count` event; `clean: false` says no draw passed. 0 is off: no count, nothing changes. Misses a person facing away from the camera (vivijure-cf#1143). Default 3 since 2026-11-06 (live: clean two-person stills 2 of 6 to 5 of 6, about +23 s per two-person keyframe on average). In the reuse hash only when set, and only for a two-person-plus shot, so one-person stills keep their hash. Under `plate_regional_text` the guard also redraws a plate short of a person (the face floor, cf#1281: that path drew one person on 4 of 6 seeds), then prefers an exact count, then the most faces not over it, and `plate_count` carries `floor: true`, with `clean: false` for a plate still short. Everywhere else a short plate is accepted, since a person can face away. |
 | `multi_char` | MultiCharConfig | see below | -- | Regional multi-character anti-bleed block. |
 
 `from_dict` also accepts a `resolution` string `"WIDTHxHEIGHT"` (the control plane's shape) in
@@ -87,12 +92,13 @@ single-face by nature), so the regional path stays masked-IP-Adapter only.
 | Field | Type | Default | Range | Notes |
 |---|---|---|---|---|
 | `regional` | bool | true | -- | Use the regional no-bleed engine for multi-char shots. |
-| `pose_conditioning` | bool | true | -- | OpenPose ControlNet to separate bodies. |
+| `pose_conditioning` | bool or unset | unset | -- | OpenPose ControlNet to separate bodies. Unset means each path's default: the plain regional path (scene lock off) draws under the pose skeleton; a scene-lock plate for two-plus people draws WITHOUT it while the plate count guard runs, and with it when `plate_count_retries` is 0 (backend#596, measured on vivijure-cf#1281). `true` or `false` sets both paths. |
 | `lora_scale_per_slot` | float | 0.35 | 0-2 | Regional only. Was 0.7 live for both paths (the studio-portrait defect). |
-| `ip_adapter_scale_per_slot` | float | 0.7 | 0-1 | Per-region masked IP-Adapter identity pull. |
+| `ip_adapter_scale_per_slot` | float or unset | unset | 0-1 | Per-region masked IP-Adapter identity pull on both two-person paths (scene-lock Pass B and the plain regional render). Unset means `ip_adapter_scale` (0.65), which is what both paths drew at before this field reached the renderer; before vivijure-backend#599 the field was parsed and hashed but never used. |
 | `max_slots` | int | 2 | 1-4 | Characters the no-bleed path supports at once. |
 | `controlnet_pose_scale` | float | 0.55 | 0-1.5 | OpenPose ControlNet conditioning scale. |
 | `region_gutter` | int | 64 | 0-256 | Dead-band px between masks (anti seam-blend). |
+| `pose_spread` | float | 0 | 0-0.9 | 0 keeps each pose figure at the centre of its region. Above 0, the two figures' centres sit this fraction of the width apart around the frame centre, so the plate leaves no empty band between two people where it can draw a third (vivijure-cf#1143). Each figure is clamped inside its own region. In the reuse hash only when set. |
 
 ## I2VConfig
 
@@ -216,6 +222,8 @@ image (see [operations.md](operations.md#environment)); the R2 credential is the
 | `VJ_VOLUME_SELF_PRELOAD` | `0` | First-worker fill. Off for a global volume. |
 | `VJ_MODEL_VERSION` | `1` | Mirror sentinel version; bump to force a re-mirror on warm workers. |
 | `VJ_FINISH_MIRROR_MAX_SECONDS` | `120` | The budget for a `finish_clip` job to pull its model legs. A hung pull is killed at this budget and the job soft-degrades. See `docs/finish-deadline.md`. |
+| `VJ_MIRROR_MAX_SECONDS` | `3000` | The budget for any other job to pull its models. Past it rclone is killed and the job fails by name (#564). Junk, zero and negatives fall back to the default; no value turns it off. |
+| `VJ_MIRROR_STALL_SECONDS` | `300` | How long any model pull may go without moving a byte, read from rclone's stats line every 60 s. Past it rclone is killed as stalled: a finish job soft-degrades and any other job fails by name (#566). A slow pull that still moves is never killed by it. A value under `120` (two stats lines) is raised to `120`; junk, zero and negatives fall back to the default; no value turns it off. Applies to every pull: the job pull, the lazy i2v pull, a hub-repo pull and a volume self-preload. |
 | `VJ_I2V_DISTILL` | `1` | Toggle the Wan2.2-Lightning distill LoRA. |
 | `VJ_I2V_FP8` | `1` | Toggle Wan fp8 quantization. |
 | `HF_HOME` | `/opt/models/hf-cache` | HuggingFace cache the mirror fills (read offline). |
