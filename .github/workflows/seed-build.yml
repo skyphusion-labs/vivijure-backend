@@ -49,7 +49,7 @@ on:
         required: true
         default: bf16
         type: choice
-        options: [bf16, fp8]
+        options: [bf16]
       model_version:
         description: 'Model set version -> the image tag prefix (bump on a weight-set change).'
         required: true
@@ -134,7 +134,7 @@ jobs:
           set -eu
           PREC='${{ github.event.inputs.precision }}'
           MVER='${{ github.event.inputs.model_version }}'
-          case "${PREC}" in fp8|bf16) ;; *) echo "::error::precision must be fp8 or bf16"; exit 1;; esac
+          case "${PREC}" in bf16) ;; *) echo "::error::precision must be bf16 (there is no fp8 seed stage)"; exit 1;; esac
           case "${MVER}" in ''|*[!0-9]*) echo "::error::model_version must be a positive integer"; exit 1;; esac
           TAG="${MVER}-${PREC}"
           echo "precision=${PREC}"                >> "$GITHUB_OUTPUT"
