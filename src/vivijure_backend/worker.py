@@ -91,7 +91,8 @@ def build_pipeline(req: RenderRequest) -> GpuPipeline:
     the first (cold-start) job; subsequent jobs reuse the already-loaded model set."""
     server = _server(req)
     _check_model_divergence(req, server)
-    return GpuPipeline(config=req.config, pretrained_loras=req.pretrained_loras, server=server)
+    return GpuPipeline(config=req.config, pretrained_loras=req.pretrained_loras, server=server,
+                       debug_intermediates=req.debug_intermediates)
 
 
 class ModelDivergenceError(RuntimeError):

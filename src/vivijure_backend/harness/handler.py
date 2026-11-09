@@ -13,6 +13,7 @@ the per-shot clips plus a manifest for a separate CPU container to merge.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -22,7 +23,8 @@ from typing import Protocol, runtime_checkable
 
 from ..assemble import ClipInput, assemble, build_manifest, order_for_storyboard, write_manifest
 from ..contract import Bundle, RenderRequest, RenderResult, Keyframe, Clip
-from ..finish import Deadline, FinishDeadlineExceeded, job_mirror_legs, max_job_mirror_seconds, max_mirror_seconds
+from ..finish import (Deadline, FinishDeadlineExceeded, MirrorStalled, job_mirror_legs, max_job_mirror_seconds,
+                      max_mirror_seconds)
 from ..orchestrator import (Action, KeyframeMode, RenderPlan, plan as make_plan,
                             resolve_lora_family, validate)
 from . import keys
@@ -48,6 +50,10 @@ class Outputs:
     loras: dict[str, Path] = field(default_factory=dict)        # slot -> SDXL adapter file
     wan_loras: dict[str, tuple[Path, Path]] = field(default_factory=dict)  # slot -> (high, low) Wan experts
     keyframes: dict[str, Path] = field(default_factory=dict)    # shot_id -> png
+    # shot_id -> {stage: png}; only a debug_intermediates job fills it (vivijure-cf#1143).
+    intermediates: dict[str, dict[str, Path]] = field(default_factory=dict)
+    # shot_id -> the plate count guard's record, only for a still the guard ran on (vivijure-cf#1143).
+    plate_counts: dict[str, dict] = field(default_factory=dict)
     clips: list[tuple[str, Path]] = field(default_factory=list)  # (shot_id, mp4)
     final_video: Path | None = None
     audio: Path | None = None
@@ -121,6 +127,7 @@ def run_job(
             req, bundle.storyboard,
             trained_slots=set(trained_slots) | set(req.pretrained_loras),
             existing_keyframes=existing_keyframes,
+            cast=bundle.cast,
         )
         # Post-plan ref check: validate can't know which slots actually need training (that
         # depends on prior trained_slots from R2), so check refs here where the plan is settled.
@@ -279,13 +286,25 @@ def _finish(req: RenderRequest, plan: RenderPlan, bundle: Bundle, outputs: Outpu
     for shot_id, path in outputs.keyframes.items():
         key = store.put_file(Path(path), keys.job_keyframe_key(project, job_id, shot_id),
                              content_type="image/png")
-        result.keyframes.append(Keyframe(shot_id=shot_id, key=key))
+        result.keyframes.append(Keyframe(shot_id=shot_id, key=key, plate_count=outputs.plate_counts.get(shot_id)))
         reported_shots.add(shot_id)
         hash_src = Path(path).with_suffix(".hash")
         param_hash = hash_src.read_text().strip() if hash_src.is_file() else None
         store.put_bytes(json.dumps({"key": key, "hash": param_hash or None}).encode("utf-8"),
                         keys.keyframe_latest_key(project, shot_id),
                         content_type="application/json")
+
+    # Diagnostic intermediates (vivijure-cf#1143), only when the JOB asked for them: the request flag
+    # gates the upload as well as the draw, so a pipeline that kept files cannot publish them unasked.
+    # Each lands beside its still under this job's own segment and is listed in the result.
+    if req.debug_intermediates:
+        for shot_id, stages in outputs.intermediates.items():
+            for stage, path in stages.items():
+                key = store.put_file(Path(path), keys.job_keyframe_intermediate_key(project, job_id, shot_id, stage),
+                                     content_type="image/png")
+                result.debug_intermediates.append({"shot_id": shot_id, "stage": stage, "key": key})
+        if result.debug_intermediates:
+            progress.emit("debug_intermediates", items=list(result.debug_intermediates))
 
     # Reused and injected keyframes are not drawn, but the caller needs a key to animate. Copy each
     # to this job's own key: the pointer's target belongs to the render that drew it, and deleting
@@ -834,10 +853,15 @@ def handler(job: dict) -> dict:
             # needs it: whether the volume must carry the Wan i2v corpus depends on whether an i2v
             # stage can run at all (models_mirror.i2v_stage_possible, backend#453).
             # A finish job pulls only the legs its step loads, and its budget ends the pull if it hangs.
+            # While a cold pull runs, each rclone stats line (about once a minute) becomes a
+            # `mirror_progress` event, so a pull is not a silent job (#564, #566). run_job's own emitter
+            # writes the same progress keys afterwards, from `started`, so these are live state only.
+            pulling = ProgressEmitter(store, project, job_id, on_progress=on_progress)
             mirrored = ensure_models(action=action_in,
                                      finish_legs=job_mirror_legs(payload) if is_finish else None,
-                                     deadline=mirror_deadline)
-        except FinishDeadlineExceeded:
+                                     deadline=mirror_deadline,
+                                     on_progress=lambda fields: pulling.emit("mirror_progress", **fields))
+        except FinishDeadlineExceeded as expiry:
             # Not an Exception (see its docstring), so it needs its own clause to keep this record.
             # The handler's one catch site below turns the expiry into the soft degrade.
             failed = ProgressEmitter(store, project, job_id, on_progress=on_progress)
@@ -845,7 +869,9 @@ def handler(job: dict) -> dict:
             if is_finish:
                 raise
             # A job that needs these weights has nothing to pass through, so it fails, and the worker goes free.
-            error = RuntimeError(f"model pull ran past its {mirror_deadline.budget_seconds:.0f} s budget")
+            # A stall (#566) says so by name; it is not a budget that ran out.
+            error = RuntimeError(expiry.reason if isinstance(expiry, MirrorStalled)
+                                 else f"model pull ran past its {mirror_deadline.budget_seconds:.0f} s budget")
             failed.error("mirror", error)
             raise error from None
         except Exception as e:
@@ -867,6 +893,9 @@ def handler(job: dict) -> dict:
             from .models_mirror import start_i2v_prefetch
             start_i2v_prefetch()
 
+        # vivijure-backend#600: a disk below the floor fails here, by number, before the job writes anything.
+        from .disk import check_job_floor
+        check_job_floor(tempfile.gettempdir(), dict(os.environ))
         workdir = Path(tempfile.mkdtemp(prefix="vj-job-"))
         try:
             action = str(payload.get("action", "render"))
@@ -896,10 +925,30 @@ def handler(job: dict) -> dict:
         # _finish_deadline_degrade for why a raise here is worse than the hang it replaces.
         return _finish_deadline_degrade(expiry, project=project, job_id=job_id,
                                         store=store, on_progress=on_progress)
+    except Exception as exc:
+        from .disk import is_disk_failure
+        if not is_disk_failure(exc):
+            raise
+        return _disk_failure(exc, project=project, job_id=job_id, store=store, on_progress=on_progress)
     finally:
         quiesce = getattr(on_progress, "quiesce", None)
         if callable(quiesce):
             quiesce()
+
+
+def _disk_failure(exc: BaseException, *, project: str, job_id: str, store, on_progress) -> dict:
+    """The job's failure when the container disk is the cause (vivijure-backend#600): a pull that cannot fit, a disk
+    below the job floor, or an ENOSPC from anywhere in the job.
+
+    RETURNED, NOT RAISED, because that is the only way the RunPod SDK honours `refresh_worker`: its run_job pops
+    `error` and `refresh_worker` from a returned dict and sets `stopPod` (runpod 1.12.0 and 2.1.0,
+    serverless/modules/rp_job.py), while a raised exception takes its except branch, which never stops the pod. The
+    `error` key still fails the job, exactly as a raise does. Stopping the pod is the point: a full worker otherwise
+    fails every job it takes within seconds, and RunPod replaces a stopped worker with a fresh disk."""
+    from .disk import DiskSpaceError
+    reason = str(exc) if isinstance(exc, DiskSpaceError) else f"worker disk full: {exc}"
+    ProgressEmitter(store, project, job_id, on_progress=on_progress).error("disk", reason)
+    return {"error": f"{reason}; this worker is being replaced", "refresh_worker": True}
 
 
 def _runpod_progress_hook(job: dict):

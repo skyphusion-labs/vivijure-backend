@@ -59,15 +59,22 @@ def keyframe_params_from(config: RenderConfig) -> KeyframeParams:
         scheduler=kc.scheduler.value,              # ddim_trailing on the few-step path, a solver on final
         lora_scale=kc.lora_scale,                  # single-char only; must not read lora_scale_per_slot
         lora_scale_per_slot=mc.lora_scale_per_slot,
-        ip_adapter_scale=kc.ip_adapter_scale,      # single-char field; multi-char path uses mc.ip_adapter_scale_per_slot via region override
+        ip_adapter_scale=kc.ip_adapter_scale,      # single-char, and the two-person default (vivijure-backend#599)
+        ip_adapter_scale_per_slot=mc.ip_adapter_scale_per_slot,  # two-person override; None = ip_adapter_scale
         identity_method=kc.identity_method.value,  # one person: instantid (default) or ip_adapter
         instantid_ip_adapter_scale=kc.instantid_ip_adapter_scale,
         pose_conditioning=mc.pose_conditioning,
         controlnet_pose_scale=mc.controlnet_pose_scale,
         region_gutter=mc.region_gutter,
+        pose_spread=mc.pose_spread,
         max_slots=mc.max_slots,
         scene_lock=kc.scene_lock,
         canny_scale=kc.canny_scale,
+        face_crop_pad=kc.face_crop_pad,
+        plate_ip_adapter_scale=kc.plate_ip_adapter_scale,
+        plate_regional_text=kc.plate_regional_text,
+        plate_people_free_background=kc.plate_people_free_background,
+        plate_count_retries=kc.plate_count_retries,
     )
 
 
@@ -129,6 +136,8 @@ class GpuPipeline:
     config: RenderConfig
     pretrained_loras: dict[str, str] = field(default_factory=dict)
     server: Any = None  # models.ModelServer; created lazily on first GPU use
+    # The job's top-level `debug_intermediates` (vivijure-cf#1143): keep the scene-lock intermediates.
+    debug_intermediates: bool = False
 
     def _model_server(self):
         if self.server is None:
@@ -176,6 +185,7 @@ class GpuPipeline:
         return _keyframe.render_keyframe(
             scene, cast, storyboard, self._model_server(), out_path,
             params=keyframe_params_from(self.config), lora_paths=lora_paths,
+            save_intermediates=self.debug_intermediates,
         )
 
     def _onnx_provider_facts(self):
@@ -269,10 +279,15 @@ class GpuPipeline:
                     scene, cast, storyboard, workdir / "keyframes" / f"{sp.shot_id}.png", lora_paths)
                 kf_path = kf.path
                 out.keyframes[sp.shot_id] = kf_path
+                if kf.intermediates:
+                    out.intermediates[sp.shot_id] = dict(kf.intermediates)
+                if kf.plate_count is not None:
+                    out.plate_counts[sp.shot_id] = dict(kf.plate_count)
                 # Write a param hash alongside the PNG so the next warm-worker run can skip
                 # regeneration when config is unchanged (_finish copies both into state.tar.gz).
                 try:
-                    kf_path.with_suffix(".hash").write_text(kf_hash(self.config.keyframe))
+                    kf_path.with_suffix(".hash").write_text(
+                        kf_hash(self.config.keyframe, scene=scene, cast=cast, storyboard=storyboard))
                 except Exception:
                     pass  # hash write is best-effort; a missing file = old-state reuse behavior
                 # Record WHICH identity path ran, and for the InstantID path the ONNX providers
@@ -284,6 +299,7 @@ class GpuPipeline:
                 self.progress.emit("keyframe_done", shot=sp.shot_id,
                                    identity_requested=kf.identity_requested,
                                    identity_path=kf.identity_path,
+                                   plate_count=kf.plate_count,
                                    onnx_providers=self._onnx_provider_facts())
             else:
                 kf_path = self._resolve_keyframe(sp, scene, bundle, workdir, required=sp.needs_i2v)

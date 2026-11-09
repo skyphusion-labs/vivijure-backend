@@ -23,13 +23,19 @@ from .routing import QualityTier, Stage, Tier, gpu_for
 import hashlib
 import json
 
+# Bump on ANY change to how a keyframe is drawn that leaves the prompts the same (the encoder, the passes, the
+# pipelines, the identity path). A change to prompt building needs no bump: the built prompts are in the hash
+# (vivijure-backend#573). Without this, a new image re-rendering the same board returned the old stills as
+# `reused` and the run read COMPLETED (film-0afa679b on 1.1.6).
+KEYFRAME_ENGINE_VERSION = "kf-2026-11-06-chunked"
+
 # Anti-bleed defaults for the multi-character keyframe path (the standard, not cranked,
 # per-slot scales + pose conditioning that hold two identities apart).
 MULTI_CHAR_DEFAULTS: dict[str, object] = {
     "engine": "regional",
-    "pose_conditioning": True,
+    "pose_conditioning": None,  # per-path default: regional on, a guarded scene-lock plate off (#596)
     "lora_scale_per_slot": 0.35,
-    "ip_adapter_scale_per_slot": 0.7,
+    "ip_adapter_scale_per_slot": None,  # unset: the keyframe ip_adapter_scale (vivijure-backend#599)
     "max_slots": 2,
     "region_gutter": 64,
 }
@@ -126,16 +132,24 @@ class RenderPlan:
         return "\n".join(lines)
 
 
-def kf_hash(kc) -> str:
-    """Short SHA-256 hash of the keyframe render params (steps, guidance, scheduler, seed, models,
-    the distill flag, the identity scales, the multi-char anti-bleed knobs, and the scene-lock
-    two-pass knobs). Stored alongside each
-    keyframe in state so an incremental re-run with changed params forces regeneration instead
-    of silently reusing a stale image.
+# The value kf_hash's `ip_scale` key has always carried (the per-slot field's old default, which never reached a draw).
+# Fixed, not derived: changing it would change every stored still's hash and redraw the fleet (vivijure-backend#599).
+LEGACY_IP_SCALE_HASH = 0.7
 
-    Covers every input that changes the SDXL output but NOT the prompt or character refs -- those
-    are project-level inputs that change the bundle, not the config. If only prompt/refs changed,
-    the user supplies a new bundle and the state tar is naturally stale (different project slot).
+
+def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard: Storyboard | None = None) -> str:
+    """Short SHA-256 hash of what draws ONE shot's keyframe. Stored beside each keyframe so a re-run reuses a
+    still only when nothing that draws it has changed.
+
+    It covers the render params (steps, guidance, scheduler, seed, models, the distill flag, the identity
+    scales, the multi-char anti-bleed knobs, the scene-lock two-pass knobs), the keyframe engine version, and,
+    given the shot, the prompts the engine would build for it: the plate, the identity pass and the plain
+    pass. So an edited shot, a changed cast description, a new setting, or new prompt-building code redraws
+    (vivijure-backend#573). Before, the prompt was left out on the theory that a changed board means a new
+    project; a board keeps its project when it is edited, so an edited shot reused its old still.
+
+    The writer (pipeline) and the reader (plan) must pass the same shot, cast and board. If they ever
+    differ, the hashes differ and the still is redrawn: the safe direction.
 
     Flipping `scene_lock` MUST change this hash so incremental preview does not reuse grey
     studio portraits. Accepts any object with the KeyframeConfig attribute shape to avoid a
@@ -156,15 +170,59 @@ def kf_hash(kc) -> str:
         "height": kc.height,
         "lora_scale": kc.lora_scale,
         "lora_scale_per_slot": mc.lora_scale_per_slot,
-        "ip_scale": mc.ip_adapter_scale_per_slot,
-        "pose_cond": mc.pose_conditioning,
+        # vivijure-backend#599: this key always read 0.7, the old field default, and the field never reached a draw.
+        # It stays 0.7 so every stored hash holds; a set per-slot value is a new key below, so it redraws.
+        "ip_scale": LEGACY_IP_SCALE_HASH,
+        # Unset reads as on, its meaning before #596, so this key keeps every existing hash; where the new
+        # default changes a drawing, `plate_pose` below says so.
+        "pose_cond": mc.pose_conditioning is not False,
         "cn_scale": mc.controlnet_pose_scale,
         "gutter": mc.region_gutter,
         "max_slots": mc.max_slots,
         "scene_lock": kc.scene_lock,
         "canny_scale": kc.canny_scale,
+        "face_crop_pad": kc.face_crop_pad,
+        "plate_ip_adapter_scale": kc.plate_ip_adapter_scale,
+        "plate_regional_text": kc.plate_regional_text,
+        "plate_people_free_background": kc.plate_people_free_background,
         "two_pass": "scene_lock_v1",
+        "engine": KEYFRAME_ENGINE_VERSION,
     }
+    # vivijure-backend#599: a set per-slot identity scale now changes the drawing, so it says so; unset adds nothing.
+    if mc.ip_adapter_scale_per_slot is not None:
+        payload["ip_scale_per_slot"] = mc.ip_adapter_scale_per_slot
+    # Only when set: at 0 the skeleton is byte-identical to the one drawn before this field existed, so a
+    # still drawn then is still the same image and keeps its hash (no fleet-wide redraw for a no-op).
+    if mc.pose_spread:
+        payload["pose_spread"] = mc.pose_spread
+    # Same rule: off draws exactly what it drew before, so the hash stays. And only on a shot the guard can run on
+    # (2..max_slots people, keyframe.engine_for): a one-person or empty shot draws the same with it on, so turning
+    # the default on must not redraw those stills. With no scene (a config-only hash) it is included when set.
+    guarded = scene is None or 2 <= len(scene.character_slots) <= mc.max_slots
+    if kc.plate_count_retries and guarded:
+        payload["plate_count_retries"] = kc.plate_count_retries
+        # vivijure-cf#1281: under per-region text the guard also redraws a plate short of a person, so only those
+        # stills change and only they get this key; every other still keeps its hash (keyframe.plate_face_floor_on).
+        if kc.plate_regional_text:
+            payload["plate_face_floor"] = 1
+    # backend#596: a guarded scene-lock plate for two-plus people now draws without the pose skeleton when the
+    # job leaves pose_conditioning unset. Only those stills change, so only they get this key and redraw; the
+    # rule is keyframe.plate_pose_default_off, the same function the renderer reads.
+    from .keyframe import plate_pose_default_off
+    if kc.scene_lock and plate_pose_default_off(
+            None if scene is None else len(scene.character_slots), max_slots=mc.max_slots,
+            pose_conditioning=mc.pose_conditioning, plate_count_retries=kc.plate_count_retries):
+        payload["plate_pose"] = "off"
+    if scene is not None and storyboard is not None:
+        from .keyframe import DEFAULT_NEGATIVE, build_prompt, scene_lock_negative
+
+        c = cast if cast is not None else Cast(characters={})
+        payload["prompts"] = [
+            build_prompt(scene, c, storyboard, include_triggers=False),
+            build_prompt(scene, c, storyboard, include_triggers=True, lock_clause=True),
+            build_prompt(scene, c, storyboard),
+            scene_lock_negative(scene, DEFAULT_NEGATIVE),
+        ]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -215,6 +273,7 @@ def plan(
     *,
     trained_slots: set[str] = frozenset(),       # slots whose LoRA already exists (prior state)
     existing_keyframes: dict[str, str | None] = {},  # shot_id -> stored hash (None = unproven, redrawn; old state, no hash)
+    cast: Cast | None = None,  # the bundle's cast: its descriptions are in each shot's keyframe hash (#573)
 ) -> RenderPlan:
     """Decide the whole render on the CPU. Nothing here touches a GPU."""
     action = Action.parse(request.action)
@@ -262,7 +321,7 @@ def plan(
     # the wasteful over-estimate this planner exists to prevent.
     scene_plans: list[ScenePlan] = []
     for sc in (scenes if (want_keyframe or want_i2v) else []):
-        cur_hash = kf_hash(request.config.keyframe)
+        cur_hash = kf_hash(request.config.keyframe, scene=sc, cast=cast, storyboard=storyboard)
         mode = _keyframe_mode(sc, action, existing_keyframes, want_keyframe, cur_hash)
         if mode is not KeyframeMode.GENERATE and want_keyframe:
             skips.append(f"{sc.id} keyframe: {mode.value} (no SDXL pass)")

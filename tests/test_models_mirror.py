@@ -858,7 +858,7 @@ def test_ensure_hub_repos_force_pulls_on_baked_image(tmp_path, monkeypatch):
         return R()
 
     monkeypatch.setattr(models_mirror.shutil, "which", lambda _n: "/usr/bin/rclone")
-    monkeypatch.setattr(models_mirror.subprocess, "run", fake_run)
+    monkeypatch.setattr(models_mirror, "_run_rclone", fake_run)
     skipped = models_mirror.ensure_hub_repos(
         ("models--xinsir--controlnet-canny-sdxl-1.0",), env=env)
     assert skipped is False
@@ -906,7 +906,7 @@ def _drive_cold_pull(tmp_path, monkeypatch):
     import subprocess as _sp
     calls = []
 
-    def fake_run(argv, env):
+    def fake_run(argv, env, deadline=None, **_kw):
         calls.append((argv, {"env": env, "check": True}))
         return 0
 
@@ -1001,7 +1001,7 @@ def test_run_rclone_raises_on_a_failed_exit(tmp_path, monkeypatch):
 
 
 def test_a_cold_pull_records_legs_retries_and_bytes(tmp_path, monkeypatch):
-    def fake(argv, env):
+    def fake(argv, env, deadline=None, **_kw):
         return 2 if any("hf-cache" in a for a in argv) else 0
     monkeypatch.setattr(models_mirror.shutil, "which", lambda _: "/usr/bin/rclone")
     monkeypatch.setattr(models_mirror, "_run_rclone", fake)
@@ -1020,7 +1020,7 @@ def test_a_cold_pull_records_legs_retries_and_bytes(tmp_path, monkeypatch):
 
 def test_a_failed_pull_keeps_the_legs_that_finished(tmp_path, monkeypatch):
     import subprocess as _sp
-    def fake(argv, env):
+    def fake(argv, env, deadline=None, **_kw):
         if any("antelopev2" in a for a in argv):
             raise _sp.CalledProcessError(1, argv)
         return 1

@@ -88,6 +88,22 @@ MIRROR_MAX_SECONDS_ENV = "VJ_FINISH_MIRROR_MAX_SECONDS"
 DEFAULT_JOB_MIRROR_MAX_SECONDS = 3000
 JOB_MIRROR_MAX_SECONDS_ENV = "VJ_MIRROR_MAX_SECONDS"
 
+# A pull that has stopped moving bytes (#566). The budgets above bound the WHOLE pull, so they cannot tell a slow pull
+# from a hung one: a slow pull that would have finished fails at the budget, and a hung one holds its GPU until the
+# budget runs out. rclone prints its transferred bytes every MIRROR_STATS_SECONDS, and models_mirror reads every line,
+# so a pull whose bytes have not moved for this long is killed as stalled, and a slow pull that still moves is left
+# alone. It runs beside the budgets, never instead of them.
+#
+# WHY 300 SECONDS. Five stats lines with no movement at all. The slowest cold pull measured (2618 s for 26.2 GB, #564)
+# still averaged about 10 MB/s, about 600 MB a minute, so a healthy pull moves on every line. 300 s of GPU at $3.49 an
+# hour is about $0.29, against about $2.90 for a hang held to the 3000 s budget.
+DEFAULT_MIRROR_STALL_SECONDS = 300
+MIRROR_STALL_SECONDS_ENV = "VJ_MIRROR_STALL_SECONDS"
+# rclone's `--stats` period. The stall window must hold at least two stats lines, or a healthy pull could be killed
+# between two of them, so a smaller setting is raised to this floor.
+MIRROR_STATS_SECONDS = 60
+MIN_MIRROR_STALL_SECONDS = 2 * MIRROR_STATS_SECONDS
+
 
 def max_finish_seconds(env: dict | None = None) -> float:
     """The finish wall-clock budget in seconds: VJ_FINISH_MAX_SECONDS when it parses to a positive
@@ -128,6 +144,20 @@ def max_job_mirror_seconds(env: dict | None = None) -> float:
     return v if v > 0 else float(DEFAULT_JOB_MIRROR_MAX_SECONDS)
 
 
+def max_mirror_stall_seconds(env: dict | None = None) -> float:
+    """Seconds a model pull may go without moving a byte before it is killed (#566). Junk, an empty string, zero and
+    negatives fall back to the default, and no value turns it off, as for the budgets. A value below
+    MIN_MIRROR_STALL_SECONDS is raised to it, because a shorter window can fall between two rclone stats lines. Pure."""
+    e = os.environ if env is None else env
+    try:
+        v = float(str(e.get(MIRROR_STALL_SECONDS_ENV)).strip())
+    except (TypeError, ValueError):
+        return float(DEFAULT_MIRROR_STALL_SECONDS)
+    if not v > 0:
+        return float(DEFAULT_MIRROR_STALL_SECONDS)
+    return max(v, float(MIN_MIRROR_STALL_SECONDS))
+
+
 class FinishDeadlineExceeded(BaseException):
     """The finish wall-clock budget ran out. Carries the stage, the elapsed seconds and the budget.
 
@@ -155,6 +185,23 @@ class FinishDeadlineExceeded(BaseException):
         self.reason = (f"finish_clip deadline: {self.elapsed:.1f}s of {self.budget:.0f}s"
                        f" budget at stage {self.stage}")
         super().__init__(self.reason)
+
+
+class MirrorStalled(FinishDeadlineExceeded):
+    """A model pull whose transferred bytes stopped moving for the stall window (#566).
+
+    A subclass of FinishDeadlineExceeded ON PURPOSE, so a stall takes exactly the routes an expired budget takes and
+    no handler needs a second clause to keep it from being swallowed: a finish step soft degrades, and every other job
+    fails by name with this reason. `budget` holds the stall window, and `moved_bytes` what the pull had moved."""
+
+    def __init__(self, stage: str, elapsed: float, stall_seconds: float, moved_bytes: int) -> None:
+        super().__init__(stage, elapsed, stall_seconds)
+        self.stall_seconds = float(stall_seconds)
+        self.moved_bytes = int(moved_bytes)
+        # Inside the 120-character degrade reason, like the parent's.
+        self.reason = (f"model pull stalled: no bytes for {self.stall_seconds:.0f}s at stage {self.stage},"
+                       f" {self.moved_bytes / 1e9:.2f} GB moved")
+        self.args = (self.reason,)
 
 
 @dataclass
