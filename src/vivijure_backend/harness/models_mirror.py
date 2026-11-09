@@ -9,10 +9,16 @@ and for job I/O; the worker holds no other credential.
 
 The sentinel is written only after the pull fully succeeds, so a worker killed mid-pull leaves
 no marker and re-runs (rclone copy is idempotent) rather than rendering against a half-mirror.
+
+The STILLS set is the exception (#564). A keyframe job's ~26 GB pulled on the GPU clock after every
+release, while RunPod pulls image layers before a worker starts, unbilled. So that set is staged by
+`stage_stills` (this same pull), packed into a weights base image under the code layer, and found warm
+by the stills sentinel; see docs/stills-weights-base.md. Everything else still pulls here.
 The rclone command is built by a pure helper so it tests without spawning anything.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import random
@@ -25,7 +31,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
-from ..finish import FINISH_LEGS, Deadline, FinishDeadlineExceeded
+from ..finish import (
+    FINISH_LEGS,
+    MIRROR_STATS_SECONDS,
+    Deadline,
+    FinishDeadlineExceeded,
+    MirrorStalled,
+    max_mirror_stall_seconds,
+)
 from . import stills_manifest
 
 # Module-level handle for the eager i2v prefetch thread (see start_i2v_prefetch).
@@ -258,7 +271,7 @@ def mirror_cmd(src: str, dst: Path, *, skip_repos: tuple[str, ...] = (),
     cmd = ["rclone", "copy", "--links",
            "--transfers", "16", "--checkers", "16",
            "--multi-thread-streams", "8", "--multi-thread-cutoff", "100M",
-           "--stats", "60s", "--stats-one-line", "-v",
+           "--stats", f"{MIRROR_STATS_SECONDS}s", "--stats-one-line", "-v",
            "--exclude", _INCOMPLETE_GLOB]
     for repo in skip_repos:
         cmd += ["--exclude", f"hub/{repo}/**"]
@@ -266,6 +279,58 @@ def mirror_cmd(src: str, dst: Path, *, skip_repos: tuple[str, ...] = (),
         cmd += ["--filter", rule]
     cmd += [src, str(dst)]
     return cmd
+
+
+# ----------------------------------------------------------- pull-size guard (vivijure-backend#600)
+
+# How long a `rclone size` listing may take before the guard gives up measuring. A listing is metadata only.
+SIZE_TIMEOUT_SECONDS = 120
+
+
+def size_cmd_for(copy_cmd: list[str]) -> list[str]:
+    """argv for `rclone size --json` over exactly what `copy_cmd` (a mirror_cmd argv) would copy: the same source and
+    the same --exclude and --filter rules, so the guard measures the pull that will run and not the whole remote. Pure."""
+    if len(copy_cmd) < 4 or copy_cmd[:2] != ["rclone", "copy"]:
+        raise ValueError("size_cmd_for takes a mirror_cmd argv")
+    cmd = ["rclone", "size", "--json", "--links"]
+    flags = copy_cmd[2:-2]
+    for i, arg in enumerate(flags):
+        if arg in ("--exclude", "--filter") and i + 1 < len(flags):
+            cmd += [arg, flags[i + 1]]
+    return cmd + [copy_cmd[-2]]
+
+
+def remote_bytes(cmd: list[str], env: dict) -> int | None:
+    """Bytes `rclone size --json` reports for `cmd`, or None when it cannot say (rclone failed, timed out, or printed
+    something else). None means "could not measure", never zero."""
+    try:
+        r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=SIZE_TIMEOUT_SECONDS, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return int(json.loads(r.stdout)["bytes"])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def guard_pull(leg: str, copy_cmd: list[str], renv: dict, e: dict, log: Callable[[str], None] = print) -> None:
+    """Fail a pull that cannot fit BEFORE it writes, instead of filling the disk (#600). The bytes still to pull are the
+    source's size less what the destination already holds (a copy skips identical files). Raises DiskSpaceError when
+    they do not fit with the job floor left free. A listing that cannot be measured is logged and the pull goes ahead:
+    the job-start floor and the ENOSPC handling still stand behind it, and a blind refusal would stop every pull."""
+    from .disk import GIB, check_pull_fits
+    dst = Path(copy_cmd[-1])
+    total = remote_bytes(size_cmd_for(copy_cmd), renv)
+    if total is None:
+        log(f"models_mirror: could not measure {leg!r} before the pull; pulling without the size guard.")
+        return
+    have = _dir_bytes(dst) if dst.exists() else 0
+    needed = max(0, total - have)
+    log(f"models_mirror: {leg!r} needs {needed / GIB:.1f} GiB ({total / GIB:.1f} GiB at the source, "
+        f"{have / GIB:.1f} GiB already here).")
+    check_pull_fits(leg, needed, dst, e)
 
 
 # ----------------------------------------------------------- cold-start telemetry (issue #55)
@@ -288,37 +353,100 @@ def last_mirror_stats() -> dict | None:
     return _last_stats
 
 
-def _run_rclone(cmd: list[str], env: dict, deadline: Deadline | None = None) -> int:
+# rclone's one-line stats, as rclone 1.75 prints them at -v with `--stats-one-line`:
+#   2026/11/06 06:59:45 INFO  :    16.027 MiB / 24.000 MiB, 67%, 8.027 MiB/s, ETA 0s
+# The first figure is what the pull has moved so far, the second what it plans to move. A total of 0 prints "-" for
+# the percent. Captured from a real rclone run and held by tests/test_mirror_stall.py.
+_RCLONE_STATS = re.compile(
+    r"INFO\s*:\s+([0-9.]+)\s*(B|KiB|MiB|GiB|TiB|PiB)\s*/\s*([0-9.]+)\s*(B|KiB|MiB|GiB|TiB|PiB),\s*(\d+%|-)")
+_UNIT_BYTES = {"B": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30, "TiB": 1 << 40, "PiB": 1 << 50}
+
+
+def parse_rclone_stats(line: str) -> tuple[int, int] | None:
+    """(bytes moved, bytes planned) from one rclone stats line, or None for any other line. Pure."""
+    m = _RCLONE_STATS.search(line)
+    if m is None:
+        return None
+    return (int(float(m.group(1)) * _UNIT_BYTES[m.group(2)]),
+            int(float(m.group(3)) * _UNIT_BYTES[m.group(4)]))
+
+
+def _watch_interval(deadline: Deadline | None, stall_seconds: float) -> float:
+    """How often the watchdog wakes: a tenth of the shortest bound, held between 0.05 s and 5 s. Pure."""
+    shortest = stall_seconds if deadline is None else min(stall_seconds, deadline.budget_seconds)
+    return min(5.0, max(0.05, shortest / 10.0))
+
+
+def _run_rclone(cmd: list[str], env: dict, deadline: Deadline | None = None, *,
+                stall_seconds: float | None = None,
+                on_stats: Callable[[int, int], None] | None = None) -> int:
     """Run one rclone leg, passing its log through live. Returns the failed passes it logged, which is
     how a leg that succeeded after retrying can be told from a clean one. Raises on a non-zero exit.
 
-    With a `deadline`, a watchdog kills rclone when the budget runs out, and that raises
-    FinishDeadlineExceeded. A stalled rclone writes nothing, so a check in the read loop would never
-    run. A leg that exits 0 succeeded, even if the watchdog fired in the same instant."""
+    TWO bounds, checked by one watchdog thread, because a hung rclone writes nothing and a check in the
+    read loop would never run:
+      - `deadline`, optional: the whole pull's budget. Past it rclone is killed and this raises
+        FinishDeadlineExceeded.
+      - the stall window, ALWAYS on (#566): rclone prints its transferred bytes every
+        MIRROR_STATS_SECONDS, and when that figure has not changed for `stall_seconds` (default
+        `finish.max_mirror_stall_seconds`), rclone is killed and this raises MirrorStalled. A slow
+        pull that still moves is never killed by it. The clock starts at launch, so an rclone that
+        never prints a stats line is a stall too.
+    A leg that exits 0 succeeded, even if the watchdog fired in the same instant.
+
+    `on_stats(moved, planned)` is called for every stats line. It is best-effort: an error in it is
+    swallowed and never touches the pull."""
+    stall = max_mirror_stall_seconds() if stall_seconds is None else float(stall_seconds)
+    started = time.monotonic()
     proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, errors="replace")
-    fired = threading.Event()
-    watchdog = None
-    if deadline is not None:
-        def _kill() -> None:
-            fired.set()
-            proc.kill()
-        watchdog = threading.Timer(deadline.remaining(), _kill)
-        watchdog.daemon = True
-        watchdog.start()
+    lock = threading.Lock()
+    progress: dict[str, float] = {"moved": 0, "moved_at": started}
+    fired: list[str] = []
+    stop = threading.Event()
+
+    def _watch() -> None:
+        interval = _watch_interval(deadline, stall)
+        while not stop.wait(interval):
+            if deadline is not None and deadline.expired():
+                fired.append("deadline")
+            else:
+                with lock:
+                    idle = time.monotonic() - progress["moved_at"]
+                if idle >= stall:
+                    fired.append("stall")
+            if fired:
+                proc.kill()
+                return
+
+    watchdog = threading.Thread(target=_watch, daemon=True, name="vj-rclone-watchdog")
+    watchdog.start()
     retries = 0
     try:
+        assert proc.stdout is not None
         for line in proc.stdout:
             print(line, end="", flush=True)
             if _RCLONE_ATTEMPT_FAILED.search(line):
                 retries += 1
+            stats = parse_rclone_stats(line)
+            if stats is None:
+                continue
+            with lock:
+                if stats[0] != progress["moved"]:
+                    progress["moved"] = stats[0]
+                    progress["moved_at"] = time.monotonic()
+            if on_stats is not None:
+                with contextlib.suppress(Exception):  # a progress report must never touch the pull
+                    on_stats(*stats)
         returncode = proc.wait()
     finally:
-        if watchdog is not None:
-            watchdog.cancel()
+        stop.set()
+        watchdog.join()
     if returncode:
-        if deadline is not None and fired.is_set():
+        if fired == ["deadline"] and deadline is not None:
             raise FinishDeadlineExceeded("model_mirror", deadline.elapsed(), deadline.budget_seconds)
+        if fired == ["stall"]:
+            raise MirrorStalled("model_mirror", time.monotonic() - started, stall, int(progress["moved"]))
         raise subprocess.CalledProcessError(returncode, cmd)
     return retries
 
@@ -601,7 +729,9 @@ def _self_preload_volume(e: dict, model_version: str, log: Callable[[str], None]
         sub.pop("VJ_VOLUME_SELF_PRELOAD", None)
         ensure_models(env=sub, log=log)          # base set + base sentinel -> volume
         ensure_i2v_models(env=sub, log=log)      # Wan set + i2v sentinel  -> volume
-    except Exception as exc:  # noqa: BLE001 -- a failed fill must never abort the job; fall back
+    except (Exception, MirrorStalled) as exc:  # noqa: BLE001 -- a failed fill must never abort the job
+        # MirrorStalled is a BaseException (see finish.FinishDeadlineExceeded), so it is named here: a
+        # stalled fill is a failed fill, and this job falls back to its own pull (#566).
         log(f"models_mirror: self-preload of {vol} failed ({exc}); this job uses the R2 mirror.")
         return VolumeState.INCOMPLETE
     finally:
@@ -715,7 +845,8 @@ def _finish_leg_current(models_root: Path, leg: str, model_version: str) -> bool
 def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print,
                   skip_repos: tuple[str, ...] = DEFAULT_SKIP_REPOS,
                   action: str | None = None, finish_legs: tuple[str, ...] | None = None,
-                  deadline: Deadline | None = None) -> bool:
+                  deadline: Deadline | None = None,
+                  on_progress: Callable[[dict], None] | None = None) -> bool:
     """Mirror the kept model set from R2 into the local HF cache + antelopev2 dir.
 
     Returns True if a pull ran, False if it was skipped (warm worker, or no R2 creds so weights
@@ -729,6 +860,10 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     (#553). A pulled leg gets its own sentinel, so a warm worker does not copy it again, and the base
     sentinel stays unwritten, so a later job that needs the rest still pulls the rest. `deadline`
     ends that pull if it hangs, by raising FinishDeadlineExceeded.
+
+    Every leg also ends on a STALL (#566): see `_run_rclone`. And while a leg runs, `on_progress` gets one
+    dict per rclone stats line (about once a minute): the leg, the bytes moved and planned, and the leg's
+    seconds so far, so a slow pull can be told from a silent job while it runs. Best-effort.
     """
     global _last_stats
     _last_stats = None
@@ -785,9 +920,17 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     stills_only = wants_stills_only(action, e)
     stills_sentinel = models_root / STILLS_SENTINEL
     if stills_only and stills_sentinel.exists() and stills_sentinel.read_text().strip() == model_version:
-        log("models_mirror: warm worker (stills set present); skipping R2 pull.")
-        log(_skip_event("warm_stills"))
-        return False
+        # The sentinel can come from the IMAGE (the stills weights base, #564), not only from a pull on
+        # this worker, so it is checked before it is trusted: a stat of each listed file at its size. A
+        # sentinel whose files are not all there pulls again, rather than failing at load.
+        try:
+            stills_manifest.verify(hf_home)
+        except stills_manifest.StillsIncomplete as exc:
+            log(f"models_mirror: stills sentinel present but the set is not ({exc}); pulling it again.")
+        else:
+            log("models_mirror: warm worker (stills set present); skipping R2 pull.")
+            log(_skip_event("warm_stills"))
+            return False
     if not e.get("R2_ACCESS_KEY_ID"):
         hub = hf_home / "hub"
         if not hub.is_dir() or not any(hub.iterdir()):
@@ -823,9 +966,15 @@ def ensure_models(*, env: dict | None = None, log: Callable[[str], None] = print
     _last_stats = stats
 
     def run_leg(name: str, cmd: list[str]) -> None:
+        guard_pull(name, cmd, renv, e, log)
         t0 = time.monotonic()
-        stats["retries"] += (_run_rclone(cmd, renv, deadline) if deadline is not None
-                             else _run_rclone(cmd, renv)) or 0
+
+        def report(moved: int, planned: int) -> None:
+            if on_progress is not None:
+                on_progress({"leg": name, "moved_bytes": moved, "planned_bytes": planned,
+                             "leg_seconds": round(time.monotonic() - t0, 1)})
+
+        stats["retries"] += _run_rclone(cmd, renv, deadline, on_stats=report) or 0
         seconds = time.monotonic() - t0
         legs.append((name, seconds))
         stats["legs"][name] = round(seconds, 1)
@@ -970,9 +1119,10 @@ def ensure_i2v_models(*, env: dict | None = None, log: Callable[[str], None] = p
     legs: list[tuple[str, float]] = []
     for repo in repos:
         log(f"models_mirror: lazy i2v pull -> mirroring {repo} from R2...")
-        legs.append((repo, _timed(
-            subprocess.run,
-            mirror_cmd(f"r2:{bucket}/models/hf-cache/hub/{repo}", hub / repo), check=True, env=renv)))
+        cmd = mirror_cmd(f"r2:{bucket}/models/hf-cache/hub/{repo}", hub / repo)
+        guard_pull(repo, cmd, renv, e, log)
+        # _run_rclone, not subprocess.run, so a stalled pull is killed (#566) instead of holding the worker.
+        legs.append((repo, _timed(_run_rclone, cmd, renv)))
     _reconstruct_symlinks(hf_home, log)
     sentinel.write_text(model_version + "\n")
     # Best-effort telemetry (see ensure_models): never fail a good lazy pull on a _dir_bytes walk.
@@ -1046,9 +1196,10 @@ def ensure_hub_repos(repos: tuple[str, ...], *, env: dict | None = None,
     hub.mkdir(parents=True, exist_ok=True)
     for repo in repos:
         log(f"models_mirror: hub-repo pull -> mirroring {repo} from R2...")
-        subprocess.run(
-            mirror_cmd(f"r2:{bucket}/models/hf-cache/hub/{repo}", hub / repo),
-            check=True, env=renv)
+        cmd = mirror_cmd(f"r2:{bucket}/models/hf-cache/hub/{repo}", hub / repo)
+        guard_pull(repo, cmd, renv, e, log)
+        # _run_rclone, not subprocess.run, so a stalled pull is killed (#566) instead of holding the worker.
+        _run_rclone(cmd, renv)
     _reconstruct_symlinks(hf_home, log)
     log("models_mirror: hub-repo pull complete.")
     return True
@@ -1148,6 +1299,66 @@ def flatten_symlinks(root: Path, log: Callable[[str], None] = print) -> int:
     return n
 
 
+def check_stills(env: dict | None = None) -> list[str]:
+    """What is wrong with a stills tree, as a list of problems; empty means it is complete (#564).
+
+    The stills weights base image is trusted only if this is empty, at stage time and again on the built
+    image. Complete means: the stills sentinel at this model version, every stills file at its size
+    (`stills_manifest.verify`), every finish leg's sentinel at this version, a non-empty `antelopev2`,
+    and NO `.vj-baked`. That marker would short-circuit every pull for every action, and this tree
+    holds only the stills set and the finish legs, so a job needing anything else must still pull it.
+    Pure apart from stat and small reads."""
+    e = env if env is not None else os.environ
+    root = Path(e.get("VJ_MODELS_ROOT", "/opt/models"))
+    version = e.get("VJ_MODEL_VERSION") or _DEFAULT_MODEL_VERSION
+    problems: list[str] = []
+    if (root / BAKED_SENTINEL).exists():
+        problems.append(f"{BAKED_SENTINEL} present: a stills tree must not claim the full set")
+    sentinel = root / STILLS_SENTINEL
+    if not sentinel.is_file() or sentinel.read_text().strip() != version:
+        problems.append(f"{STILLS_SENTINEL} missing or not at model version {version!r}")
+    try:
+        stills_manifest.verify(_hf_home(env))
+    except stills_manifest.StillsIncomplete as exc:
+        problems.append(str(exc))
+    for leg in FINISH_LEGS:
+        if not _finish_leg_current(root, leg, version):
+            problems.append(f"finish leg {leg} sentinel missing or not at model version {version!r}")
+    antelope = root / "antelopev2"
+    if not antelope.is_dir() or not any(antelope.iterdir()):
+        problems.append("antelopev2 missing or empty")
+    return problems
+
+
+def stage_stills(env: dict | None = None, log: Callable[[str], None] = print) -> list[str]:
+    """Fill an empty `VJ_MODELS_ROOT` with the stills set and the finish legs, through the SAME pull a
+    cold worker runs, then check it (#564). Returns `check_stills`' problems; empty means staged.
+
+    The weights base image is built from this tree, so a baked stills job sees exactly the files a cold
+    one would have pulled from R2: same bytes, same symlinks, same `.no_exist` stubs, same sentinels.
+    A volume is refused rather than read, since this writes the tree that becomes the image."""
+    e = dict(env if env is not None else os.environ)
+    e.pop("VJ_VOLUME_ROOT", None)
+    if Path(DEFAULT_VOLUME_ROOT).is_dir():
+        return [f"{DEFAULT_VOLUME_ROOT} is mounted here; stage on a host without a volume"]
+    ensure_models(env=e, log=log, action="preview")
+    ensure_models(env=e, log=log, action="finish_clip", finish_legs=FINISH_LEGS)
+    return check_stills(e)
+
+
+def _stills_main(argv: list[str]) -> int:
+    """`--stage-stills` fills and checks; `--check-stills` only checks. Exit 0 iff the tree is complete."""
+    if "--stage-stills" in argv:
+        problems = stage_stills()
+    else:
+        problems = check_stills()
+    for line in problems:
+        print(f"models_mirror: stills tree problem: {line}", flush=True)
+    root = os.environ.get("VJ_MODELS_ROOT", "/opt/models")
+    print(f"models_mirror: stills tree at {root} is {'INCOMPLETE' if problems else 'complete'}", flush=True)
+    return 1 if problems else 0
+
+
 def _preload_main(argv: list[str] | None = None) -> int:
     """Stage weights onto a mounted volume from R2.
 
@@ -1188,6 +1399,9 @@ if __name__ == "__main__":
     import sys
     if "--preload" in sys.argv:
         _preload_main()
+    elif "--stage-stills" in sys.argv or "--check-stills" in sys.argv:
+        sys.exit(_stills_main(sys.argv[1:]))
     else:
         print("usage: python -m vivijure_backend.harness.models_mirror "
-              "--preload [--stills] [--flatten]", flush=True)
+              "--preload [--stills] [--flatten] | --stage-stills | --check-stills", flush=True)
+        sys.exit(2)

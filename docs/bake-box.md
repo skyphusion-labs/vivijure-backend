@@ -153,7 +153,7 @@ over SSH stdin for one run, and stays in RAM. Swap is off, so RAM stays RAM.
 | Credential | Needed for | Source and life | On the box |
 | --- | --- | --- | --- |
 | GHCR push token | Any push to `ghcr.io/skyphusion-labs/vivijure-backend` | A classic PAT with `write:packages` only, at the shortest expiry GitHub offers. Conrad mints it, because a PAT needs the GitHub web UI. **Revoke it when the bake ends.** Never use a crew PAT: those carry admin and delete scopes. | `DOCKER_CONFIG=/run/bake-creds/docker`, removed at the end of the run |
-| R2 temporary credential | **Only** a seed stage (`deploy/stage_bake_seed.py`). `deploy/runtime.Dockerfile` pulls the public seed image, so a runtime or thin build needs no R2 access. | Minted on the laptop with `POST /accounts/{id}/r2/temp-access-credentials`, scoped to the `vivijure` bucket and the prefixes the stage uses, with a TTL that fits the run. The parent R2 key stays on the laptop. | `RCLONE_CONFIG_R2_*` in the environment of that one command, with `SESSION_TOKEN`. No `rclone.conf`. |
+| R2 temporary credential | **Only** a stage: a seed stage (`deploy/stage_bake_seed.py`), or the stills stage for the weights base (`models_mirror --stage-stills`, [stills-weights-base.md](stills-weights-base.md), read-only on `models/`). `deploy/runtime.Dockerfile` pulls the public seed image, so a runtime or thin build needs no R2 access. | Minted on the laptop with `POST /accounts/{id}/r2/temp-access-credentials`, scoped to the `vivijure` bucket and the prefixes the stage uses, with a TTL that fits the run. The parent R2 key stays on the laptop. | `RCLONE_CONFIG_R2_*` in the environment of that one command, with `SESSION_TOKEN`. No `rclone.conf`. The stills stage reads `R2_ENDPOINT`, `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` and builds the rest itself, so it takes those three plus `RCLONE_CONFIG_R2_SESSION_TOKEN`, passed to `docker run` with `-e NAME` (no value on the command line). |
 | Tunnel token | Always | Only runs this tunnel's connector. Rotate it with `rotate-tunnel` and `install-token.sh` if the box is kept between bakes. | `/run/bake-tunnel/token`, RAM, mode 600 |
 
 No RunPod key is needed to build. Do not pass a credential as a `--build-arg`, because
@@ -202,6 +202,11 @@ cache. It is housekeeping, not erasure: blocks stay on the disk until overwritte
 is acceptable because the disk holds only public inputs under the custody rule. If
 anything else ever reached the disk, destroy the box and tell the lead. Revoke the GHCR
 PAT in both cases.
+
+After the image is pushed, the endpoint repin is a separate step. Follow "Repinning the backend endpoint"
+in [runpod-endpoint-config.md](runpod-endpoint-config.md):
+- wait 65 s after the release;
+- every worker then starts cold and pulls about 24 GB from R2, and a warm-up batch does not change that: each new worker pulls again. Keep the number of concurrent cold workers small, about 4 to 6, by submitting in small batches, and budget one cold pull per worker. On 2026-11-06, 15 cold workers at once slowed pulls to 2.6 MiB/s and stretched cold jobs to about 20 minutes each; 6 at once pulled normally. Submitting 2 first did not help after a new image: the next batch also started cold.
 
 ## Destroy
 

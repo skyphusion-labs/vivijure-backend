@@ -146,6 +146,8 @@ class Storyboard:
     duration_seconds: float | None = None
     clip_seconds: float | None = None
     style_prefix: str = ""
+    # vivijure-cf#1145: where the film takes place, said on a shot whose prompt does not say it.
+    setting: str = ""
     style_category: str = "None"
     style_preset: str = "None"
     use_characters: list[str] = field(default_factory=list)
@@ -176,6 +178,7 @@ class Storyboard:
             duration_seconds=_num(d.get("duration_seconds")),
             clip_seconds=_num(d.get("clip_seconds")),
             style_prefix=_str(d.get("style_prefix")),
+            setting=_str(d.get("setting")).strip(),
             style_category=cat,
             style_preset=preset,
             use_characters=use_chars,
@@ -318,6 +321,13 @@ class RenderRequest:
     # orchestrator resolves: train_lora on the train image -> wan; render inline train -> sdxl).
     # Unknown non-empty values fall back to "sdxl".
     model_family: str = ""
+    # Diagnostic only (vivijure-cf#1143): save the scene-lock intermediates (the Pass A plate, its pose
+    # control, the Pass B canny map) beside each drawn keyframe and list them in the result. A TOP-LEVEL
+    # job field, never under render_overrides, so it is not a generation knob: it is not in RenderConfig,
+    # not in the keyframe reuse hash, and the studio's keyframe module never forwards it (that module
+    # builds the job from a fixed list of keyframe_config fields). Only a direct /run caller sets it.
+    # Only a real JSON `true` turns it on; any other value is off.
+    debug_intermediates: bool = False
     # NOTE: there is deliberately NO submitter-identity field. The control plane completed the
     # anti-SaaS identity strip (vivijure #292): the studio is single-operator, sends no user_email,
     # and serves /api/artifact by key with no per-row ownership check. A legacy/hostile job body that
@@ -341,6 +351,7 @@ class RenderRequest:
             audio_key=_str(d.get("audio_key")) or None,
             keyframes_only=_bool(d.get("keyframes_only")),
             model_family=_str(d["model_family"], "sdxl") if "model_family" in d else "",
+            debug_intermediates=d.get("debug_intermediates") is True,
         )
 
 
@@ -352,6 +363,10 @@ class Keyframe:
     # True when this job drew nothing and reports a still already in the store. The studio stamps its
     # config provenance only on a still drawn this run, or the record claims a match it does not have.
     reused: bool = False
+    # Only when the plate count guard ran (keyframe.plate_count_retries > 0 on a two-person-plus shot):
+    # {expected, faces: [per draw], chosen, clean, retries}. `clean: false` means no draw held at most the
+    # expected number of faces and the still was made from the draw with the fewest (vivijure-cf#1143).
+    plate_count: dict[str, Any] | None = None
 
 
 @dataclass
@@ -380,6 +395,8 @@ class RenderResult:
     clips: list[Clip] = field(default_factory=list)
     lora: dict[str, Any] = field(default_factory=dict)  # slot -> {lora_id}
     state_key: str | None = None
+    # Only on a `debug_intermediates` job: [{shot_id, stage, key}] for every intermediate uploaded.
+    debug_intermediates: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -388,11 +405,14 @@ class RenderResult:
             "seconds": self.seconds,
             "has_audio": self.has_audio,
             "audio_missing": self.audio_missing,
-            "keyframes": [{"shot_id": k.shot_id, "key": k.key, **({"reused": True} if k.reused else {})}
+            "keyframes": [{"shot_id": k.shot_id, "key": k.key, **({"reused": True} if k.reused else {}),
+                           **({"plate_count": dict(k.plate_count)} if k.plate_count is not None else {})}
                           for k in self.keyframes],
             "lora": self.lora,
             "state_key": self.state_key,
         }
+        if self.debug_intermediates:
+            out["debug_intermediates"] = [dict(d) for d in self.debug_intermediates]
         if self.clips:
             out["clips"] = [
                 {"shot_id": c.shot_id, "key": c.key, **({"target_seconds": c.target_seconds} if c.target_seconds else {})}

@@ -65,6 +65,18 @@ def job_keyframe_key(project: str, job_id: str, shot_id: str) -> str:
     return f"renders/{_slug(project)}/keyframes/{_slug(job_id)}/{_slug(shot_id)}.png"
 
 
+def job_keyframe_intermediate_key(project: str, job_id: str, shot_id: str, stage: str) -> str:
+    """A diagnostic intermediate of one job's keyframe (vivijure-cf#1143), beside the still:
+    `renders/<project>/keyframes/<job>/<shot>.<stage>.png`. `stage` must be one of the keyframe
+    stages (`pose`, `plate`, `canny`); anything else raises, so no caller can invent a key. The
+    studio adopts a keyframe only when the file name is exactly `<shot_id>.png`, so these names
+    are never read as stills."""
+    from ..keyframe import INTERMEDIATE_STAGES
+    if stage not in INTERMEDIATE_STAGES:
+        raise ValueError(f"unknown keyframe intermediate stage {stage!r}")
+    return f"renders/{_slug(project)}/keyframes/{_slug(job_id)}/{_slug(shot_id)}.{stage}.png"
+
+
 def keyframe_latest_key(project: str, shot_id: str) -> str:
     """The reuse pointer for a shot (#534): one JSON object naming the newest job-scoped still and
     its param hash. ONE object, so a concurrent writer can never pair one job's PNG with another

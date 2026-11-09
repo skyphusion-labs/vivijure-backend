@@ -100,6 +100,40 @@ def test_keyframe_single_char_lora_scale_reaches_params():
     assert p.lora_scale_per_slot == pytest.approx(0.7)
 
 
+def test_keyframe_plate_count_retries_reaches_params():
+    # vivijure-cf#1143: the plate count guard. On at 3 by default (2026-11-06), clamped to 0..3.
+    assert keyframe_params_from(_rcfg(kf={"plate_count_retries": 2})).plate_count_retries == 2
+    assert keyframe_params_from(_rcfg(kf={"plate_count_retries": 9})).plate_count_retries == 3
+    assert keyframe_params_from(_rcfg()).plate_count_retries == 3
+    assert keyframe_params_from(_rcfg(kf={"plate_count_retries": 0})).plate_count_retries == 0
+
+
+def test_keyframe_plate_people_free_background_reaches_params():
+    # vivijure-cf#1143 option c: off by default; only an exact true turns it on.
+    assert keyframe_params_from(_rcfg(kf={"plate_people_free_background": True})).plate_people_free_background is True
+    assert keyframe_params_from(_rcfg(kf={"plate_people_free_background": 1})).plate_people_free_background is False
+    assert keyframe_params_from(_rcfg()).plate_people_free_background is False
+
+
+def test_keyframe_plate_regional_text_reaches_params():
+    # vivijure-cf#1143 option a: off by default; only an exact true turns it on.
+    assert keyframe_params_from(_rcfg(kf={"plate_regional_text": True})).plate_regional_text is True
+    assert keyframe_params_from(_rcfg(kf={"plate_regional_text": "true"})).plate_regional_text is False
+    assert keyframe_params_from(_rcfg()).plate_regional_text is False
+
+
+def test_keyframe_plate_ip_adapter_scale_reaches_params():
+    # vivijure-cf#1143 option b: off by default.
+    assert keyframe_params_from(_rcfg(kf={"plate_ip_adapter_scale": 0.4})).plate_ip_adapter_scale == pytest.approx(0.4)
+    assert keyframe_params_from(_rcfg()).plate_ip_adapter_scale == 0.0
+
+
+def test_keyframe_face_crop_pad_reaches_params():
+    # vivijure-cf#1143: Pass B identity crop padding; the default is the crop shipped before it was a knob.
+    assert keyframe_params_from(_rcfg(kf={"face_crop_pad": 1.1})).face_crop_pad == pytest.approx(1.1)
+    assert keyframe_params_from(_rcfg()).face_crop_pad == pytest.approx(0.35)
+
+
 def test_keyframe_scene_lock_and_canny_scale_reach_params():
     p = keyframe_params_from(_rcfg(kf={"scene_lock": False, "canny_scale": 0.55}))
     assert p.scene_lock is False
@@ -251,6 +285,11 @@ KEYFRAME_ASSERTED = {
     "lora_scale",
     "scene_lock",
     "canny_scale",
+    "face_crop_pad",
+    "plate_ip_adapter_scale",
+    "plate_regional_text",
+    "plate_people_free_background",
+    "plate_count_retries",
     "multi_char",
 }
 

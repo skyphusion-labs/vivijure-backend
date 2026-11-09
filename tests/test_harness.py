@@ -160,6 +160,15 @@ class FakePipeline:
         return out
 
 
+def _shot_hash(tmp_path, req, shot_id="shot_01"):
+    """The hash a drawn still carries (#573): the params AND that shot's own prompts, from the real bundle."""
+    from vivijure_backend.contract import Bundle
+    from vivijure_backend.orchestrator import kf_hash
+    b = Bundle.extract(_bundle_tar(tmp_path / "hash-src.tar.gz"), tmp_path / "hash-src")
+    sc = next(s for s in b.storyboard.scenes if s.id == shot_id)
+    return kf_hash(req.config.keyframe, scene=sc, cast=b.cast, storyboard=b.storyboard)
+
+
 def _job(**over):
     return {"action": "render", "project": "neon", "bundle_key": "bundles/neon.tar.gz",
             "quality_tier": "final", **over}
@@ -876,7 +885,7 @@ def test_a_reused_still_is_copied_to_this_jobs_own_key(tmp_path):
     still = keys.job_keyframe_key("neon", "job-a", "shot_01")
     from vivijure_backend.contract import RenderRequest
     from vivijure_backend.orchestrator import kf_hash
-    current = kf_hash(RenderRequest.from_dict(_job(render_overrides={"finish_offloaded": True})).config.keyframe)
+    current = _shot_hash(tmp_path, RenderRequest.from_dict(_job(render_overrides={"finish_offloaded": True})))
 
     class PriorStore(FakeStore):
         def exists(self, key):
@@ -946,7 +955,7 @@ def test_a_cloud_still_at_the_flat_key_with_no_sidecar_is_redrawn(tmp_path):
 def test_a_proven_reuse_is_reported_as_reused(tmp_path):
     from vivijure_backend.orchestrator import kf_hash
     from vivijure_backend.contract import RenderRequest
-    current = kf_hash(RenderRequest.from_dict(_job(render_overrides={"finish_offloaded": True})).config.keyframe)
+    current = _shot_hash(tmp_path, RenderRequest.from_dict(_job(render_overrides={"finish_offloaded": True})))
 
     class HashedStore(FakeStore):
         def exists(self, key):

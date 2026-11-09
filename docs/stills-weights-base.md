@@ -1,0 +1,154 @@
+# Stills weights base
+
+Issue #564. The keyframe endpoint carries the stills set in its image, below the code layer.
+
+## Why
+
+A thin image has no weights. A cold worker pulled the stills set from R2 inside the handler:
+26.22 GB, measured at 104 to 2618 s per worker, and about 20 minutes per job when 15 workers pulled at
+once. That time is on the GPU clock, and every release makes every worker cold.
+
+RunPod pulls the image before a worker starts, and that pull is not billed (RunPod docs:
+`serverless/pricing`, "Compute cost breakdown"; `serverless/workers/overview`, "Worker lifecycle"). So
+the same bytes cost nothing as image layers. The comparison with a global volume, a network volume, a
+smaller pull and FlashBoot is on issue #564.
+
+## Shape
+
+```
+toolchain-t1                     CUDA, torch, deps, HF configs (unchanged)
+  + stills weights base          the stills set and the finish legs, 4 bin layers  (this page)
+    + code image                 deploy/Dockerfile.thin, TOOLCHAIN_REF = the base   (every release)
+```
+
+A code-only release rebuilds only the top layer. A host that ran the previous release keeps the weight
+layers. Rebuild the base only when the stills set, the finish legs, the toolchain or `VJ_MODEL_VERSION`
+changes.
+
+The base has **no `.vj-baked`**. That marker ends every pull for every action, and this image holds only
+the stills set and the finish legs. A stills job (`preview`, `regen_shot`, `train_lora`) finds
+`.vj-stills-complete` and pulls nothing. The worker checks that sentinel against the files before it
+trusts it (`stills_manifest.verify`, a stat of 11 files) and pulls again if a file is missing. A finish
+job finds its leg sentinels. Any other action still pulls what it needs from R2.
+
+## Build
+
+Run on the bake box ([bake-box.md](bake-box.md)). It needs two credentials, both for this run only:
+
+- An R2 temporary credential, read-only, scoped to the `vivijure` bucket prefix `models/`. Mint it on
+  the laptop as [bake-box.md](bake-box.md) describes. It reaches the container as environment, never a
+  file and never a build argument.
+- The GHCR push token, as for any bake.
+
+### 1. Stage, with the worker's own pull
+
+Use an image whose code has `--stage-stills` (#591 or later), at the commit that will ship on this base. That code reads
+the tree. An older image does not know the flag. On the first bake, 1.1.14 printed the usage line and exited 0 with
+nothing staged. So on a first bake, build a local thin image at the target commit on the bare toolchain, and stage
+with it. Do not push that image.
+
+Pass the R2 credential on the SSH stdin, and source it in a shell that runs in the FOREGROUND. Background only
+the `docker run`. A backgrounded `bash -c` has its stdin set to `/dev/null`, so the credential never arrives,
+and the stage reports `no_creds_empty_cache`.
+
+```
+mkdir -p ~/stills/stage
+docker run --rm \
+  -e R2_ENDPOINT -e R2_ACCESS_KEY_ID -e R2_SECRET_ACCESS_KEY -e RCLONE_CONFIG_R2_SESSION_TOKEN \
+  -e R2_BUCKET=vivijure -e VJ_MODEL_VERSION=1 \
+  -e VJ_MODELS_ROOT=/stage -e HF_HOME=/stage/hf-cache \
+  -v ~/stills/stage:/stage \
+  ghcr.io/skyphusion-labs/vivijure-backend:<current tag>@<digest> \
+  conda run --no-capture-output -n vivijure \
+  python -m vivijure_backend.harness.models_mirror --stage-stills
+```
+
+It runs `ensure_models` for a stills action and for every finish leg, which is the pull a cold worker
+runs, and then `--check-stills`. It must end with `stills tree at /stage is complete` and exit 0.
+`VJ_MODEL_VERSION` must match the endpoint's value, or every worker pulls again.
+
+### 2. Gate the staged tree
+
+```
+python3 deploy/bake_layers.py assert-no-tree-cache --root ~/stills/stage/hf-cache
+python3 deploy/bake_layers.py assert-finish-shas --root ~/stills/stage
+```
+
+### 3. Pack under the layer limit
+
+The largest file is the RealVisXL UNet shard 1, 9,988,139,160 bytes (9.30 GiB). The GHCR layer limit
+that `bake_layers.py` enforces is 10 GiB. So the ceiling is 9.5 GiB, and the set fits 3 bins of the 4
+the Dockerfile copies.
+
+```
+python3 deploy/bake_layers.py bin --src ~/stills/stage --out ~/stills/bins \
+  --bins 4 --ceiling-gb 9.5 --min-gb 23
+```
+
+### 4. Build and push the base
+
+```
+docker buildx build -f deploy/stills-weights.Dockerfile --provenance=false \
+  --build-arg TOOLCHAIN_REF=ghcr.io/skyphusion-labs/vivijure-backend:toolchain-t1@sha256:<digest> \
+  -t ghcr.io/skyphusion-labs/vivijure-backend:stills-t1-m1 --load ~/stills/bins
+python3 deploy/bake_layers.py verify-image --image ghcr.io/skyphusion-labs/vivijure-backend:stills-t1-m1
+docker push ghcr.io/skyphusion-labs/vivijure-backend:stills-t1-m1
+```
+
+The tag names the toolchain (`t1`) and the model version (`m1`). Read the digest back from GHCR and pin
+that digest.
+
+### 5. Build the code image on it
+
+As for any thin release, with the base as the toolchain:
+
+```
+docker buildx build -f deploy/Dockerfile.thin --provenance=false \
+  --build-arg TOOLCHAIN_REF=ghcr.io/skyphusion-labs/vivijure-backend:stills-t1-m1@sha256:<digest> \
+  -t ghcr.io/skyphusion-labs/vivijure-backend:<version> --load .
+```
+
+### 6. Gate the image you will push
+
+CPU only. This checks the tree the worker will read, in the image that ships:
+
+```
+docker run --rm ghcr.io/skyphusion-labs/vivijure-backend:<version> \
+  conda run --no-capture-output -n vivijure \
+  python -m vivijure_backend.harness.models_mirror --check-stills
+```
+
+It must print `complete` and exit 0. Then push, read the digest back, and repin as
+[runpod-endpoint-config.md](runpod-endpoint-config.md) says.
+
+## Proof on the endpoint
+
+The first job on a new worker must show, in its log and progress:
+
+- `mirror_skipped {"reason": "warm_stills"}`, not `mirror_complete`;
+- `mirror_done` with `pulled: false`;
+- an `executionTime` near a warm job's, plus the model load.
+
+**First bake, 2026-11-06 (`stills-t1-m1@sha256:6d0e19bd18bdba3318e510fcc0055d9d75c1a1353df918795dc92be0d70740b6`, on
+`toolchain-t1@sha256:456b417b...`).**
+- **Stage:** 26,180,415,017 bytes of stills set in 72.5 s (361 MB/s), plus 555,648,645 bytes of finish legs in 8.4 s.
+  It was run in a local thin image at `9de17db`, for the reason above.
+- **Gates:** `assert-no-tree-cache` OK; `assert-finish-shas` OK (2 facexlib weights).
+- **Bins:** `bin` packed 62 files and 33 symlinks into 4 bins, 24.9 GB in total, with the largest at 9.49 GB. The fourth bin is empty.
+- **Build:** 12:44:34Z to 12:57:39Z. `verify-image`: OK, all layers under the 10 GB ceiling.
+- **Layers added over the toolchain, compressed:**
+  - `76c9fde8193f`, 4,601,336,414 bytes (4.29 GiB);
+  - `f953853e0b64`, 7,802,787,740 bytes (7.27 GiB);
+  - `89cf0b497764`, 5,400,004,930 bytes (5.03 GiB);
+  - the empty bin, which is the shared empty layer `4f4fb700ef54` (32 bytes).
+  - In total 16.58 GiB.
+- **Push:** 12:57:39Z to 12:58:36Z (57 s). The 23 toolchain layers already existed on GHCR.
+- **Credential:** read-only, scoped to `models/`, 4 h TTL. It was minted from a dedicated read-only parent token, and the parent was deleted after the stage.
+
+Record for the first bake: each layer's compressed size, the push time, how long a new worker stays
+`INITIALIZING`, and the cold job's `executionTime`. Those are the after numbers for #564.
+
+## Rollback
+
+Repin the previous thin image. It pulls the stills set from R2 as before. Nothing in the code depends on
+the base: on an image without it, the stills sentinel is absent and the worker pulls.
