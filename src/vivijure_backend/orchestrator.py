@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from .contract import Cast, RenderRequest, Scene, Storyboard
+from .harness.keys import lora_key
 from .routing import QualityTier, Stage, Tier, gpu_for
 import hashlib
 import json
@@ -111,6 +112,9 @@ class RenderPlan:
     estimated_gpu_seconds: float
     skips: list[str] = field(default_factory=list)   # every GPU unit the plan eliminated, in words
     lora_family: str = "sdxl"                        # "sdxl" (in-process) or "wan" (ai-toolkit A14B)
+    # vivijure-backend#478: slot -> the adapter KEY a drawn keyframe binds for that slot (bound_lora_keys).
+    # The planner hashes with it and the pipeline's sidecar writer reads it from here, so the two cannot differ.
+    bound_loras: dict[str, str] = field(default_factory=dict)
 
     @property
     def keyframes_to_generate(self) -> int:
@@ -137,7 +141,34 @@ class RenderPlan:
 LEGACY_IP_SCALE_HASH = 0.7
 
 
-def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard: Storyboard | None = None) -> str:
+def bound_lora_keys(project: str, lora: LoraPlan, trained_slots, pretrained_loras: dict[str, str],
+                    lora_family: str = "sdxl") -> dict[str, str]:
+    """vivijure-backend#478: which character LoRA a keyframe draw binds, per slot, as the adapter KEY.
+
+    The one place the mapping is built. `plan` hashes with it and stores it on the RenderPlan, and the
+    pipeline's sidecar writer reads it from the plan, so the hash a still is stored with and the hash it is
+    checked against come from the same map. `trained_slots` is what `_restore_prior_state` found in R2
+    (the harness adds the pretrained slots to it before calling `plan`).
+
+    - A slot trained this run, or reused from R2, binds the project key `lora_key(project, slot)`.
+    - A `pretrained_loras` entry supersedes it, as `_stage_pretrained_loras` stages it.
+    - A Wan-family job draws no SDXL keyframe with a project adapter, so it binds only pretrained ones.
+
+    LIMIT, accepted on #478: a retrain at the SAME key keeps the same map, so it is not caught. The fix for
+    that is a versioned LoRA key on retrain, which is not this change."""
+    out: dict[str, str] = {}
+    if str(lora_family).strip().lower() != "wan":
+        trained = set(trained_slots)
+        for slot in list(lora.train) + [s for s in lora.reuse if s in trained]:
+            out[slot] = lora_key(project, slot)
+    for slot, ref in pretrained_loras.items():
+        if isinstance(ref, str) and ref:
+            out[slot] = ref
+    return out
+
+
+def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard: Storyboard | None = None,
+            bound_loras: dict[str, str] | None = None) -> str:
     """Short SHA-256 hash of what draws ONE shot's keyframe. Stored beside each keyframe so a re-run reuses a
     still only when nothing that draws it has changed.
 
@@ -150,6 +181,10 @@ def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard
 
     The writer (pipeline) and the reader (plan) must pass the same shot, cast and board. If they ever
     differ, the hashes differ and the still is redrawn: the safe direction.
+
+    `bound_loras` (vivijure-backend#478, from `bound_lora_keys`) is narrowed to the shot's own slots, so a
+    repointed, added or removed LoRA redraws only the shots its character is in. With no LoRA bound for those
+    slots it adds no key, so the hash of a still drawn without a LoRA is the hash it had before #478.
 
     Flipping `scene_lock` MUST change this hash so incremental preview does not reuse grey
     studio portraits. Accepts any object with the KeyframeConfig attribute shape to avoid a
@@ -213,6 +248,11 @@ def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard
             None if scene is None else len(scene.character_slots), max_slots=mc.max_slots,
             pose_conditioning=mc.pose_conditioning, plate_count_retries=kc.plate_count_retries):
         payload["plate_pose"] = "off"
+    if bound_loras:
+        slots = bound_loras.keys() if scene is None else scene.character_slots
+        bound = {s: bound_loras[s] for s in sorted(set(slots)) if s in bound_loras}
+        if bound:
+            payload["bound_loras"] = bound
     if scene is not None and storyboard is not None:
         from .keyframe import DEFAULT_NEGATIVE, build_prompt, scene_lock_negative
 
@@ -306,6 +346,7 @@ def plan(
         why = "pretrained passthrough" if s in request.pretrained_loras else "already trained"
         skips.append(f"LoRA slot {s}: reused ({why})")
     lora = LoraPlan(train=to_train, reuse=reused)
+    bound = bound_lora_keys(request.project, lora, trained_slots, request.pretrained_loras, lora_family)
 
     # --- per-scene keyframe + i2v plan ---
     # PREVIEW is RENDER minus motion: it draws keyframes (and trains the LoRAs they need, since
@@ -321,7 +362,7 @@ def plan(
     # the wasteful over-estimate this planner exists to prevent.
     scene_plans: list[ScenePlan] = []
     for sc in (scenes if (want_keyframe or want_i2v) else []):
-        cur_hash = kf_hash(request.config.keyframe, scene=sc, cast=cast, storyboard=storyboard)
+        cur_hash = kf_hash(request.config.keyframe, scene=sc, cast=cast, storyboard=storyboard, bound_loras=bound)
         mode = _keyframe_mode(sc, action, existing_keyframes, want_keyframe, cur_hash)
         if mode is not KeyframeMode.GENERATE and want_keyframe:
             skips.append(f"{sc.id} keyframe: {mode.value} (no SDXL pass)")
@@ -347,6 +388,7 @@ def plan(
         estimated_gpu_seconds=0.0,
         skips=skips,
         lora_family=lora_family,
+        bound_loras=bound,
     )
     plan_obj.estimated_gpu_seconds = _estimate_cost(plan_obj)
     return plan_obj

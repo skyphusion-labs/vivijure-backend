@@ -246,7 +246,8 @@ def test_execute_honors_reuse_and_pretrained(tmp_path):
                                    "quality_tier": "final", "pretrained_loras": {"A": str(pre)}})
     plan = make_plan(req, bundle.storyboard,
                      trained_slots=set(req.pretrained_loras),
-                     existing_keyframes={"shot_01": kf_hash(req.config.keyframe, scene=bundle.storyboard.scenes[0], cast=bundle.cast, storyboard=bundle.storyboard)}, cast=bundle.cast)
+                     existing_keyframes={"shot_01": kf_hash(req.config.keyframe, scene=bundle.storyboard.scenes[0], cast=bundle.cast, storyboard=bundle.storyboard,
+                                                            bound_loras=make_plan(req, bundle.storyboard, trained_slots=set(req.pretrained_loras), cast=bundle.cast).bound_loras)}, cast=bundle.cast)
     work = tmp_path / "work"
     (work / "keyframes").mkdir(parents=True)
     (work / "keyframes" / "shot_01.png").write_bytes(b"x")   # stage the reused keyframe
@@ -268,7 +269,8 @@ def test_execute_fails_loud_when_reused_keyframe_is_missing(tmp_path):
     bundle = _extract_bundle(tmp_path)
     req = RenderRequest.from_dict({"action": "render", "project": "neon",
                                    "bundle_key": "x", "quality_tier": "final"})
-    plan = make_plan(req, bundle.storyboard, existing_keyframes={"shot_01": kf_hash(req.config.keyframe, scene=bundle.storyboard.scenes[0], cast=bundle.cast, storyboard=bundle.storyboard)}, cast=bundle.cast)
+    bound = make_plan(req, bundle.storyboard, cast=bundle.cast).bound_loras  # backend#478: the plan's own map
+    plan = make_plan(req, bundle.storyboard, existing_keyframes={"shot_01": kf_hash(req.config.keyframe, scene=bundle.storyboard.scenes[0], cast=bundle.cast, storyboard=bundle.storyboard, bound_loras=bound)}, cast=bundle.cast)
     pipe = StubPipeline(req.config)
     with pytest.raises(HarnessError, match="shot_01"):
         pipe.execute(plan, bundle, tmp_path / "work")     # shot_01 keyframe not staged

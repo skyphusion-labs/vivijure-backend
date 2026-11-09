@@ -85,7 +85,8 @@ def test_injected_start_image_skips_keyframe_gen():
 def _shot_hash(req, sb, shot_id="shot_01"):
     """The hash the pipeline writes beside a drawn still (#573): the params AND that shot's own prompts."""
     sc = next(s for s in sb.scenes if s.id == shot_id)
-    return kf_hash(req.config.keyframe, scene=sc, storyboard=sb)
+    # backend#478: and the LoRA each slot binds, from the same plan the reader builds (plan's own map).
+    return kf_hash(req.config.keyframe, scene=sc, storyboard=sb, bound_loras=plan(req, sb).bound_loras)
 
 
 def test_existing_keyframe_is_reused():

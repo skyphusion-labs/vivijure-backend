@@ -166,7 +166,11 @@ def _shot_hash(tmp_path, req, shot_id="shot_01"):
     from vivijure_backend.orchestrator import kf_hash
     b = Bundle.extract(_bundle_tar(tmp_path / "hash-src.tar.gz"), tmp_path / "hash-src")
     sc = next(s for s in b.storyboard.scenes if s.id == shot_id)
-    return kf_hash(req.config.keyframe, scene=sc, cast=b.cast, storyboard=b.storyboard)
+    # backend#478: the hash carries the LoRA each slot binds. With nothing in R2, every slot trains in this run
+    # and binds the project key, which is exactly what the first render that drew this still wrote.
+    from vivijure_backend.orchestrator import plan
+    bound = plan(req, b.storyboard, cast=b.cast).bound_loras
+    return kf_hash(req.config.keyframe, scene=sc, cast=b.cast, storyboard=b.storyboard, bound_loras=bound)
 
 
 def _job(**over):
