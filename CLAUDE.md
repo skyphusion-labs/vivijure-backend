@@ -59,21 +59,24 @@ python scripts/run_keyframe.py                            # local: SDXL keyframe
 python scripts/run_i2v.py                                 # local: image-to-video stage
 python scripts/run_lora_train.py                          # local: per-character LoRA training
 docker build -f deploy/Dockerfile -t <ghcr-tag> .         # build the serverless GPU image
-python scripts/pin-runpod-template.py                     # pin the RunPod template to the new image
+python scripts/pin-runpod-template.py                     # not a prod path (own or staging endpoint; docs/operations.md)
 ```
 
 The image is baked in `deploy/` (layer baking, HF config baking, fp8 i2v quantize) and pushed to
-**GHCR**; the RunPod template is then pinned to the new image digest. **Registry-auth is MCP/API
+**GHCR**; the RunPod template is repinned by the `runpod-verify` promote path. **Registry-auth is MCP/API
 managed** (RunPod MCP v1.4.0+): create the container-registry-auth and attach it via
 `containerRegistryAuthId` on the template, no dashboard step.
 
 ## Verifying changes
 
-`pytest` is the suite (CI: `.github/workflows/tests.yml`). The live pod-staging gate is NOT built
-yet: `.github/workflows/runpod-verify.yml` runs the verify harness DRY-RUN only (mocked client, no
-GPU), and promotion to the prod endpoint is a manual, deliberate endpoint pin to a `:version` tag.
-GPU-path verification against the deployed image/endpoint is done by hand (never trust the tag or
-our records). `release.yml` cuts releases; `docs/release-gate.md` records the intended design. For a local stage check, run the `scripts/run_*.py` entries.
+`pytest` is the suite (CI: `.github/workflows/tests.yml`). The pod-staging gate is
+`.github/workflows/runpod-verify.yml` (`workflow_dispatch` only). With `live` false it runs the
+verify harness dry-run (mocked client, no GPU). With `live` true, `live-gate` spins one Secure GPU
+pod and tears it down. `promote` defaults off, so a proof run does not repin production. The only
+prod path is `promote_image()` in `deploy/runpod_verify.py`, and it runs only on a dispatch that
+passes with `live` true and `promote` true. Do not pin the template by hand. Never trust the tag
+or our records in place of the artifact. `release.yml` publishes the GHCR image on a `backend-v*`
+tag; `docs/release-gate.md` is the gate contract. For a local stage check, run the `scripts/run_*.py` entries.
 
 ## Architecture (load-bearing)
 
@@ -141,13 +144,15 @@ Never trust: CI green alone, bake green alone, or image size alone.
 
 ## Commits & versioning
 
-Conventional Commits (`feat(i2v):`, `fix(keyframe):`, `docs:`); body explains the why. SemVer-style
-`0.MINOR.PATCH` while pre-1.0; a release commit bumps the version and updates `RELEASES.md` / `CHANGELOG.md`.
+Conventional Commits (`feat(i2v):`, `fix(keyframe):`, `docs:`); body explains the why. SemVer is the
+`backend-v*` tag. The line is past 0.x; read the latest tag, do not copy a number from this file.
+A release commit updates `RELEASES.md` / `CHANGELOG.md`.
 A PR that touches `src/` adds a `changelog.d/<issue>-<slug>.md` fragment (see `changelog.d/README.md`; CI job
 `changelog`) instead of editing `CHANGELOG.md`; the release commit runs `scripts/changelog-assemble.py`.
 
 ## Release / deploy
 
-**Tag-gated production deploy.** Merges to `main` run CI only; they do not ship production.
-Cut an annotated SemVer tag on `main` to release (`git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z`).
-Deploy workflows assert the tag commit is an ancestor of `origin/main`.
+**Tag-gated image publish.** Merges to `main` run CI only; they do not publish the production image.
+Cut an annotated tag on `main` (`git tag -a backend-vX.Y.Z -m "..." && git push origin backend-vX.Y.Z`).
+`release.yml` triggers on `backend-v*` (a `v*` tag does nothing) and refuses the build unless that commit is an ancestor of `origin/main`.
+Publishing the image is not the prod pin. Prod is the `runpod-verify.yml` promote path; see `docs/release-gate.md`.
