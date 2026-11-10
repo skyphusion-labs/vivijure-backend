@@ -8,9 +8,9 @@
 > (DELETE on every path -- PASS and FAIL both end at delete + list-confirm zero; a FAIL captures its
 > evidence to the R2 channel + a workflow artifact first) with an always-run reap backstop. PROMOTE
 > (repin prod `t9wcvlxh8rc5la`) is OFF by default -- a proof run validates up|verify|down without
-> touching prod; a real release turns it on. Per verify-before-require the job goes REQUIRED in branch
-> protection only AFTER a real dispatch passes green end to end; until then an image may still reach
-> prod by a deliberate manual `:version` pin.
+> touching prod; a real release turns it on. The job is deliberately NOT a required check (see below),
+> and there is no manual `:version` pin path to prod: the only path is the verified promote in the
+> Doctrine section.
 >
 > **Verify pass (2026-07-23):** live gate **PASS** on `ghcr.io/skyphusion-labs/vivijure-backend:1.0.9`
 > with `promote=false` after #330 tenant-scoped smoke bundle keys (`bundles/verify/Verify_Smoke.tar.gz`,
