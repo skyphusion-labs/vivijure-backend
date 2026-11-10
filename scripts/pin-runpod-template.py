@@ -8,7 +8,7 @@ pulling a new image on its next cold start.
   RUNPOD_API_KEY=...  RUNPOD_TEMPLATE_ID=...  \\
     python3 scripts/pin-runpod-template.py ghcr.io/skyphusion-labs/vivijure-backend:0.1.0
 
-On mindcrime RUNPOD_API_KEY is available after `source ~/.bashrc`; set RUNPOD_TEMPLATE_ID to the
+Set RUNPOD_API_KEY from your own credential store and RUNPOD_TEMPLATE_ID to the
 vivijure-backend endpoint's template id.
 
 RunPod's saveTemplate mutation requires the FULL template object (containerDiskInGb, dockerArgs,
