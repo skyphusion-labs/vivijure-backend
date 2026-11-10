@@ -59,11 +59,11 @@ python scripts/run_keyframe.py                            # local: SDXL keyframe
 python scripts/run_i2v.py                                 # local: image-to-video stage
 python scripts/run_lora_train.py                          # local: per-character LoRA training
 docker build -f deploy/Dockerfile -t <ghcr-tag> .         # build the serverless GPU image
-python scripts/pin-runpod-template.py                     # pin the RunPod template to the new image
+python scripts/pin-runpod-template.py                     # not a prod path (own or staging endpoint; docs/operations.md)
 ```
 
 The image is baked in `deploy/` (layer baking, HF config baking, fp8 i2v quantize) and pushed to
-**GHCR**; the RunPod template is then pinned to the new image digest. **Registry-auth is MCP/API
+**GHCR**; the RunPod template is repinned by the `runpod-verify` promote path. **Registry-auth is MCP/API
 managed** (RunPod MCP v1.4.0+): create the container-registry-auth and attach it via
 `containerRegistryAuthId` on the template, no dashboard step.
 
