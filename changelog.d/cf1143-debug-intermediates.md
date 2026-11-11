@@ -1,3 +1,0 @@
-**Feat: a diagnostic job flag, `debug_intermediates`, saves the scene-lock plate beside the keyframe.**
-
-A two-person shot sometimes draws a third person, and the knobs measured so far do not move how often (vivijure-cf#1143). To find which pass draws the extra person, a job with the top-level field `debug_intermediates: true` also writes the Pass A pose control, the Pass A plate and the Pass B canny map beside each drawn still, as `renders/<project>/keyframes/<job>/<shot>.<stage>.png`, and lists them under `debug_intermediates` in the result. It is not a generation knob: it is not under `render_overrides`, not in the reuse hash, and the studio never sends it, so only a direct `/run` caller sets it. Off by default, and with it on every input to every pass is unchanged.

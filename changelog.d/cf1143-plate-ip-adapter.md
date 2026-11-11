@@ -1,3 +1,0 @@
-**Feat: a two-person plate can take each person's cast portrait, `keyframe.plate_ip_adapter_scale`.**
-
-Off by default (0), so the plate is unchanged until it is set. When set (0 to 1), Pass A of a two-person shot conditions each region on that person's whole cast portrait through the masked IP-Adapter, using the same region boxes as the pose skeleton and Pass B. A person with no portrait gets scale 0. Measured on 1.1.6 and 1.1.7 (vivijure-cf#1143): the plate draws the two-person hair from shared text, and nothing in Pass B undoes it, while only the whole-portrait path restored the hair. The scale is in the keyframe reuse hash, and the `keyframe.scene_plate` event reports the scale used.

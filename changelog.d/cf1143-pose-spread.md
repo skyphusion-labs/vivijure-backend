@@ -1,3 +1,0 @@
-**Feat: `keyframe.multi_char.pose_spread` moves the two pose figures toward the frame centre.**
-
-The 1.1.11 plate diagnostic (vivijure-cf#1143) showed that the third person in a two-shot is drawn by the scene plate, in the empty band the pose skeleton leaves between two figures placed at the centres of the two halves of the frame. Above 0, this value places the figures' centres that fraction of the width apart around the frame centre, clamped so each figure stays inside its own region (the masks, LoRAs and per-region text are unchanged). The default stays 0: the skeleton is byte-identical to before, and the reuse hash is unchanged. A set value is part of the hash.
