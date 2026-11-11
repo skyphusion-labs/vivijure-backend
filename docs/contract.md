@@ -12,8 +12,9 @@ borrowed implementation. The backend is a clean-sheet implementation written aga
 ## The project bundle
 
 The control plane writes a gzipped tar to R2 and passes its key as `bundle_key`. The backend
-extracts it (rejecting symlinks, hardlinks, and path-traversal entries) into the project
-working tree.
+extracts it into the project working tree. Only regular files and directories are
+accepted. A link is refused, including one whose target resolves outside that tree.
+Absolute paths and paths with a `..` component are refused.
 
 ```
 bundle.tar.gz
