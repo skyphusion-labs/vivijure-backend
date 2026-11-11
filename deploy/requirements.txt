@@ -85,7 +85,7 @@ onnxruntime-gpu>=1.21.0,<1.27.0
 # the validated env); add only if a future tokenizer requires them.
 
 # --- serverless SDK + R2 object I/O : floors (import-validated, not render-exercised) ---
-runpod>=2.0.0
+runpod>=2.1.0
 boto3>=1.43.126
 
 # --- finishing stage (RIFE interpolation + face restore) ---
