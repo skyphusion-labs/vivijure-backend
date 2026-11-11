@@ -201,7 +201,9 @@ else
   info "creating a new endpoint"
   # NOT `endpoint_json | rp POST ...`: a pipeline runs rp in a subshell, so RP_BODY (read by
   # json_field below) would never reach this shell. Feed rp by here-string.
-  rp POST /serverless <<<"$EP_BODY"
+  # v2 requires the request-routing type on create; it is fixed then, and an update does not take it.
+  CREATE_BODY="$(printf "%s" "$EP_BODY" | python3 -c "import sys,json; o=json.load(sys.stdin); o[\"type\"]=\"QUEUE\"; print(json.dumps(o))")" || die "could not build the create body"
+  rp POST /serverless <<<"$CREATE_BODY"
   EP_ID="$(json_field id)"
 fi
 [ -n "$EP_ID" ] || die "could not determine the endpoint id after create/update."
