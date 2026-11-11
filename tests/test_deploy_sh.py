@@ -83,6 +83,7 @@ def test_first_time_create_posts_a_v2_endpoint_with_everything_on_it(tmp_path):
     assert not any("/templates" in c for c in calls), "v2 deploy makes no template"
     assert {urlsplit(c.split(" ", 1)[1]).hostname for c in calls} == {"api.runpod.io"}
     body = sent[0]
+    assert body["type"] == "QUEUE"
     assert body["name"] == "vivijure-backend"
     assert body["image"].startswith("ghcr.io/skyphusion-labs/vivijure-backend:")
     assert body["env"] == {"R2_ENDPOINT": "https://stub.invalid", "R2_ACCESS_KEY_ID": "stub-id",
@@ -106,6 +107,7 @@ def test_an_existing_endpoint_on_a_later_page_is_patched_in_place(tmp_path):
         "PATCH https://api.runpod.io/v2/serverless/ep-2",
     ]
     assert sent[0]["image"].startswith("ghcr.io/skyphusion-labs/vivijure-backend:")
+    assert "type" not in sent[0], "type is create-only on v2"
 
 
 def test_a_list_that_claims_more_without_a_cursor_stops_the_run(tmp_path):
