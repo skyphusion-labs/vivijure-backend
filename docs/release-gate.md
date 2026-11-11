@@ -1,5 +1,10 @@
 # Release gate: pod = staging, serverless = production
 
+> **Current build path:** see [RELEASES.md](../RELEASES.md) "Current build path". In short: the worker image is
+> built by `thin-image.yml` on GitHub-hosted `ubuntu-latest`, from an existing base digest
+> (`toolchain_ref`). `release.yml`, `runtime-build.yml` and `seed-build.yml` are disabled and fail
+> closed. There is no bake box and no self-hosted runner. The text below describes the gate as designed around the `release.yml` build; the verify and promote half (`runpod-verify.yml`) is still the prod path, and promote now PATCHes the endpoint image.
+
 > **STATUS (2026-07-02, truth-pass S7): the LIVE gate is WIRED (dispatch-gated).** Both prerequisites
 > landed -- RUNPOD_API_KEY + R2_* are CI secrets, and the pod-side @event emitter exists
 > (`vivijure_backend.verify`, #175). `.github/workflows/runpod-verify.yml` now carries a `live-gate` job

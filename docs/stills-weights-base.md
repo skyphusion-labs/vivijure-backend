@@ -33,7 +33,10 @@ job finds its leg sentinels. Any other action still pulls what it needs from R2.
 
 ## Build
 
-Run on the bake box ([bake-box.md](bake-box.md)). It needs two credentials, both for this run only:
+> The current stills base (`stills-t1-m1`, the `toolchain_ref` for 1.1.19) was built on the bake
+> box, which is retired. A host for the next stills build is not settled in this repo yet.
+
+It was run on the bake box ([bake-box.md](bake-box.md)). It needs two credentials, both for this run only:
 
 - An R2 temporary credential, read-only, scoped to the `vivijure` bucket prefix `models/`. Mint it on
   the laptop as [bake-box.md](bake-box.md) describes. It reaches the container as environment, never a
