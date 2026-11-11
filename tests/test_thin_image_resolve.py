@@ -47,7 +47,7 @@ def run(tmp_path, table, **env):
 def test_a_prebuilt_digest_builds_no_toolchain(tmp_path):
     r, o, probed = run(tmp_path, {BASE: "exists"}, VER="1.1.19", REF=BASE)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert o == {"version": "1.1.19", "mode": "prebuilt", "toolchain_ref": BASE}
+    assert o == {"version": "1.1.19", "mode": "prebuilt", "toolchain_ref": BASE, "smoke_ref": ""}
     assert probed == [BASE, IMAGE + ":1.1.19"]
 
 
@@ -97,7 +97,7 @@ def test_a_bad_version_is_refused(tmp_path, ver):
 def test_without_a_ref_the_toolchain_tag_path_is_kept(tmp_path):
     r, o, _ = run(tmp_path, {}, VER="1.1.19", TOOL="t2")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert o == {"version": "1.1.19", "mode": "build", "toolchain_ref": IMAGE + ":toolchain-t2"}
+    assert o == {"version": "1.1.19", "mode": "build", "toolchain_ref": IMAGE + ":toolchain-t2", "smoke_ref": ""}
 
 
 def test_without_a_ref_a_bad_toolchain_tag_is_refused(tmp_path):
@@ -113,3 +113,56 @@ def test_the_workflow_uses_the_resolver_and_skips_the_toolchain_with_a_ref():
     assert "if: steps.cfg.outputs.mode == 'build'" in wf
     assert "TOOLCHAIN_REF=${{ steps.cfg.outputs.toolchain_ref }}" in wf
     assert "steps.thin.outputs.digest" in wf
+
+
+# --- #636: smoke only, on an existing digest, nothing built or pushed ---
+
+WORKER = IMAGE + ":1.1.19@sha256:" + "e" * 64
+
+
+def test_smoke_only_on_an_existing_worker_digest(tmp_path):
+    r, o, probed = run(tmp_path, {WORKER: "exists", IMAGE + ":1.1.19": "exists"}, VER="1.1.19", SMOKE=WORKER)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert o == {"mode": "smoke", "smoke_ref": WORKER}
+    # The version tag existing is fine here: nothing is pushed, so nothing is overwritten.
+    assert probed == [WORKER]
+
+
+def test_smoke_only_refuses_another_image(tmp_path):
+    other = "ghcr.io/skyphusion-labs/vivijure-cf@sha256:" + "e" * 64
+    r, o, probed = run(tmp_path, {other: "exists"}, VER="1.1.19", SMOKE=other)
+    assert r.returncode == 1 and "smoke_ref must be a full digest of" in r.stdout
+    assert o == {} and probed == []
+
+
+def test_smoke_only_refuses_a_tag_without_a_digest(tmp_path):
+    r, o, probed = run(tmp_path, {}, VER="1.1.19", SMOKE=IMAGE + ":1.1.19")
+    assert r.returncode == 1 and o == {} and probed == []
+
+
+def test_smoke_only_refuses_a_digest_not_on_ghcr(tmp_path):
+    r, o, _ = run(tmp_path, {WORKER: "missing"}, VER="1.1.19", SMOKE=WORKER)
+    assert r.returncode == 1 and "cannot be read on GHCR" in r.stdout and o == {}
+
+
+def test_smoke_only_with_a_toolchain_ref_is_refused(tmp_path):
+    r, o, probed = run(tmp_path, {WORKER: "exists", BASE: "exists"}, VER="1.1.20", SMOKE=WORKER, REF=BASE)
+    assert r.returncode == 1 and "together" in r.stdout and o == {} and probed == []
+
+
+def test_the_workflow_smokes_on_the_scratch_disk_and_skips_the_build_in_smoke_mode():
+    wf = (ROOT / ".github" / "workflows" / "thin-image.yml").read_text()
+    assert "smoke_ref:" in wf and "SMOKE: ${{ inputs.smoke_ref }}" in wf
+    thin = wf.split("- name: Build and push thin worker", 1)[1].split("- name:", 1)[0]
+    assert "if: steps.cfg.outputs.mode != 'smoke'" in thin
+    pushed = wf.split("- name: Pushed digest", 1)[1].split("- name:", 1)[0]
+    assert "if: steps.cfg.outputs.mode != 'smoke'" in pushed
+    room = wf.split("- name: Move Docker storage to the scratch disk", 1)[1].split("- name: CPU import smoke", 1)[0]
+    assert '"data-root"]="/mnt/docker"' in room
+    assert "deploy/image_bytes.py" in room
+    assert "cannot hold the image" in room
+    smoke = wf.split("- name: CPU import smoke", 1)[1]
+    assert "${{ steps.room.outputs.img }}" in smoke
+    assert 'docker pull "${IMG}"' in smoke
+    # The smoke must come after the move, never before it.
+    assert wf.index("Move Docker storage to the scratch disk") < wf.index("- name: CPU import smoke")

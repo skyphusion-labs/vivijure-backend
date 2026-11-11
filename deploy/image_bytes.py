@@ -1,0 +1,52 @@
+"""Print the compressed size in bytes of an image's linux/amd64 manifest (#636).
+
+    IMG=ghcr.io/skyphusion-labs/vivijure-backend@sha256:<64 hex> python3 deploy/image_bytes.py
+
+thin-image.yml uses it before the CPU import smoke, to refuse a pull that the runner disk cannot
+hold instead of filling the disk and losing the runner. It reads the registry manifest only (the
+config blob plus every layer), never a layer.
+
+INSPECT is the raw-manifest probe, default "docker buildx imagetools inspect --raw" (needs the
+GHCR login first); tests/test_image_bytes.py replaces it. An index picks its linux/amd64 entry.
+Fails (exit 1) on a manifest with no layers or no linux/amd64 entry: an unknown size is never 0.
+"""
+import json
+import os
+import shlex
+import subprocess
+import sys
+
+INDEX_TYPES = {
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+}
+
+
+def raw(ref: str) -> dict:
+    cmd = shlex.split(os.environ.get("INSPECT", "docker buildx imagetools inspect --raw")) + [ref]
+    out = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=120).stdout
+    return json.loads(out)
+
+
+def manifest_bytes(ref: str) -> int:
+    m = raw(ref)
+    if m.get("mediaType") in INDEX_TYPES or "manifests" in m:
+        pick = [
+            d for d in m.get("manifests", [])
+            if (d.get("platform") or {}).get("os") == "linux" and (d.get("platform") or {}).get("architecture") == "amd64"
+        ]
+        if not pick:
+            raise SystemExit(f"{ref}: the index has no linux/amd64 manifest")
+        repo = ref.split("@", 1)[0]
+        m = raw(f"{repo}@{pick[0]['digest']}")
+    layers = m.get("layers") or []
+    if not layers:
+        raise SystemExit(f"{ref}: the manifest lists no layers")
+    return int((m.get("config") or {}).get("size", 0)) + sum(int(x["size"]) for x in layers)
+
+
+if __name__ == "__main__":
+    ref = os.environ.get("IMG", "")
+    if "@sha256:" not in ref:
+        sys.exit(f"IMG must be a digest ref (got {ref!r})")
+    print(manifest_bytes(ref))

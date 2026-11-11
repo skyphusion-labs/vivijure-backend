@@ -22,6 +22,12 @@
 # - the registry cannot tell whether IMAGE:VER exists (an error other than
 #   "not found"): that is never read as "free".
 #
+# SMOKE (the workflow's smoke_ref, #636) is a full digest of an EXISTING worker
+# image, IMAGE[:tag]@sha256:<64 hex>. With it, nothing is built or pushed: the
+# workflow only runs the CPU import smoke on that digest (mode=smoke). It is how a
+# published version is smoked again without a re-push, which the version-tag
+# check refuses by design. SMOKE with REF is refused (one run, one job).
+#
 # INSPECT is the registry probe, default "docker buildx imagetools inspect"
 # (needs the GHCR login first). tests/test_thin_image_resolve.py replaces it.
 # Output: version=, mode= (prebuilt or build) and toolchain_ref= lines, to
@@ -41,6 +47,19 @@ probe() {
   echo "probe of $1 failed (exit $rc): $(printf '%s' "$err" | head -c 300)" >&2
   return 2
 }
+
+if [ -n "${SMOKE:-}" ]; then
+  [ -z "${REF:-}" ] || fail "smoke_ref and toolchain_ref together: a smoke-only run builds nothing, so set one"
+  img_re=$(printf '%s' "$IMAGE" | sed 's/[.]/\\./g')
+  printf '%s' "$SMOKE" | grep -Eqx "${img_re}(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}" \
+    || fail "smoke_ref must be a full digest of ${IMAGE}: ${IMAGE}[:tag]@sha256:<64 hex> (got '$SMOKE')"
+  rc=0; probe "$SMOKE" || rc=$?
+  [ "$rc" = 0 ] || fail "smoke_ref $SMOKE cannot be read on GHCR (probe $rc); nothing was smoked"
+  out "mode=smoke"
+  out "smoke_ref=$SMOKE"
+  echo "Smoke only: $SMOKE (nothing is built or pushed)." >&2
+  exit 0
+fi
 
 printf '%s' "${VER:-}" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' || fail "version must be X.Y.Z (got '${VER:-}')"
 
@@ -67,4 +86,5 @@ esac
 out "version=$VER"
 out "mode=$mode"
 out "toolchain_ref=$tref"
+out "smoke_ref="
 echo "Building $IMAGE:$VER from $tref ($mode)." >&2
