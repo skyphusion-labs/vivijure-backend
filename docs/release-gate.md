@@ -7,7 +7,7 @@
 > drives the @event verify over the run-scoped R2 `summary.json` channel, and tears the pod down
 > (DELETE on every path -- PASS and FAIL both end at delete + list-confirm zero; a FAIL captures its
 > evidence to the R2 channel + a workflow artifact first) with an always-run reap backstop. PROMOTE
-> (repin prod `t9wcvlxh8rc5la`) is OFF by default -- a proof run validates up|verify|down without
+> (repin the endpoint the dispatch names in `promote_endpoint`, which has no default, #629) is OFF by default -- a proof run validates up|verify|down without
 > touching prod; a real release turns it on. The job is deliberately NOT a required check (see below),
 > and there is no manual `:version` pin path to prod: the only path is the verified promote in the
 > Doctrine section.
@@ -31,15 +31,17 @@ intended to enforce it. ICD-grade: the contract is reproducible from this doc al
   gives no insight. Any investigation happens on a pod built from the same image.
 - **An image reaches the serverless endpoint ONLY by passing the automated pod-staging verify.**
   There is no manual "pin it and see" path to prod. Build -> pod-verify (staging) -> promote (prod).
-- **The promote is a TEMPLATE repin, in code, only inside a green verify.** The one and only path
+- **The promote is an ENDPOINT image repin, in code, only inside a green verify.** The one and only path
   to prod is `promote_image()` in `deploy/runpod_verify.py`, and it fires ONLY when a `runpod-verify`
-  dispatch runs with `live=true promote=true` AND every verify check passes. It repins the `imageName`
-  on the production endpoint's TEMPLATE (endpoint `t9wcvlxh8rc5la` -> template `pdc3fsdqbc`), reads the
-  template back to prove the repin landed, **flushes the warm worker pool** so the new image lands on
-  the running workers (see the next bullet), then **smokes a freshly-provisioned worker** to prove it
-  serves the new image before reporting success. There is NO manual template repin, no dashboard pin,
-  no direct endpoint `imageName` PATCH -- RunPod rejects an endpoint-level `imageName` with a 400 (the
-  image lives on the template).
+  dispatch runs with `live=true promote=true promote_endpoint=<id>` AND every verify check passes.
+  There is no default endpoint (#629): the old one, `t9wcvlxh8rc5la`, was retired, and the current
+  backend endpoint is in `docs/runpod-endpoint-config.md`. The workflow and the script both refuse a
+  promote with no endpoint before the verify pod starts. On RunPod REST v2 the endpoint carries its own
+  `image` (fleet-chezmoi#2085), so the promote PATCHes `/v2/serverless/{id}` with `{image}`, reads it
+  back to prove the repin landed, **flushes the warm worker pool** so the new image lands on the
+  running workers (see the next bullet), then **smokes a freshly-provisioned worker** to prove it serves
+  the new image before reporting success. (Under v1 the image lived on a template, `pdc3fsdqbc`; that is
+  history.)
 - **A template repin does NOT recycle an already-warm worker pool (the #209 correction).** The earlier
   doctrine assumed "the scale-to-zero endpoint provisions fresh workers on the new `:version` tag" --
   true ONLY when the endpoint is actually at zero. On a busy endpoint (an active warm pool from ongoing
