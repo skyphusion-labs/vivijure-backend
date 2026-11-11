@@ -20,9 +20,8 @@ on:
         required: true
         default: 't1'
         type: string
-  push:
-    branches:
-      - ci/530-thin-gha
+# Dispatch only. The push trigger on ci/530-thin-gha is gone with that branch: a branch build must not
+# publish a release-shaped tag (X.Y.Z, toolchain-tN) to the package RunPod pulls from.
 
 permissions:
   contents: read
@@ -44,21 +43,34 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Publish only reviewed code: the dispatched commit must be on main, as in runtime-build.yml.
+      - name: Assert commit is on main (no publish of an unreviewed build)
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::commit $GITHUB_SHA is not on origin/main; refusing to publish ${WORKER_IMAGE} tags from it"
+            exit 1
+          fi
 
       - name: Disk before build
         run: df -h /
 
+      # Inputs arrive through env and are checked against their shape before any tag is built.
       - name: Resolve tags
         id: cfg
+        env:
+          VER: ${{ inputs.version }}
+          TOOL: ${{ inputs.toolchain_tag }}
         run: |
           set -eu
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            VER="${{ inputs.version }}"
-            TOOL="${{ inputs.toolchain_tag }}"
-          else
-            VER="1.1.0"
-            TOOL="t1"
-          fi
+          printf '%s' "${VER}" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' \
+            || { echo "::error::version must be X.Y.Z"; exit 1; }
+          printf '%s' "${TOOL}" | grep -Eqx 't[0-9]+' \
+            || { echo "::error::toolchain_tag must be t<N>"; exit 1; }
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "toolchain=toolchain-${TOOL}" >> "$GITHUB_OUTPUT"
           echo "Building ${WORKER_IMAGE}:${VER} from toolchain-${TOOL}."
