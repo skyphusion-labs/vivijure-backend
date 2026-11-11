@@ -391,7 +391,7 @@ expensive choice for a GPU-bound job.
 
 ### 1. The render backend basically REQUIRES the high-end card
 
-The SDXL keyframe gen + i2v + LoRA training are heavy on both VRAM and compute,
+The SDXL keyframe work is heavy on both VRAM and compute,
 and the backend images are built `cu128` / torch 2.8 for the Blackwell line
 (`sm_120`). It is not a preference; the workload needs the silicon. Running it on
 anything lower either will not fit in VRAM or will not run the compiled kernels.
@@ -445,6 +445,10 @@ exist, and their IDs are history. Read `GET /v2/serverless` rather than this pag
 
 ## Deploy constraint 1: pin by `:version`, never `:sha`
 
+> **Today:** the operated endpoints are pinned by `:version@sha256:<digest>` (the table at the top
+> of this page), and the promote path PATCHes the endpoint image on RunPod REST v2. The rule below
+> is about RunPod's old `:sha-<digest>` TAG form, which does not resolve; a digest pin does.
+
 Pin each endpoint's template image to its **`:version` tag** (e.g.
 `ghcr.io/skyphusion-labs/vivijure-upscale:0.1.0`). RunPod's immutable
 `:sha-<digest>` pin does **not** work for these endpoints; the version tag is
@@ -465,8 +469,8 @@ Keep a test endpoint until its logs are read. A worker's logs go when the endpoi
 ## Deploy constraint 2: the account worker quota
 
 **The quota is 50 `workers.max` across all endpoints** (measured 2026-10-30: `POST /v2/serverless` refused
-with "Max workers across all endpoints must not exceed your workers quota (50)" when the sum was 50). The
-sum now is **40** (30 + 10). The old figures on this page (30 cap, 25 plan, 19 sum) no longer hold.
+with "Max workers across all endpoints must not exceed your workers quota (50)" when the sum was 50). The two
+endpoints in the table at the top sum to **22** (12 + 10). The old figures on this page (30 cap, 25 plan, 19 sum) no longer hold.
 
 Consequence: **adding an endpoint, or raising `workers.max`, can be refused at create or update.** Check
 the sum first. Lower another endpoint deliberately if needed, and read the result back.
