@@ -73,11 +73,15 @@ weight-digest miss). Superseded by the 2026-07-22 line above.
 next release tag is `backend-v0.4.8`, NOT `backend-v0.4.5` (0.4.5 / 0.4.6 / 0.4.7 are taken).
 (Historical; superseded by the 2026-07-15 line above.)
 
-**The 1.1.x line is GHCR tags only, with no git tag (2026-11-04 to 2026-11-11, 1.1.5 through 1.1.19).** 1.1.19 is the first of the line with an assembled CHANGELOG section (`[1.1.19]`, which covers everything since 1.0.16). Like the others it gets no `backend-v1.1.19` tag: `release.yml` is disabled and fails closed (it needs a GPU runner), so a tag push builds nothing. These images are thin builds made
-on the Vultr bake box ([docs/bake-box.md](docs/bake-box.md)), because Actions does not start jobs on this account. Each pushes
-`vivijure-backend:<X.Y.Z>` from the box and is pinned by digest.
+**The 1.1.x line is GHCR tags only, with no git tag (2026-11-04 to 2026-11-11, 1.1.5 through 1.1.19).** 1.1.19 is the first of the line with an assembled CHANGELOG section (`[1.1.19]`, which covers everything since 1.0.16). Like the others it gets no `backend-v1.1.19` tag: `release.yml` is disabled and fails closed (it needs a GPU runner), so a tag push builds nothing. 1.1.5 through 1.1.18 are thin builds made
+on the Vultr bake box ([docs/bake-box.md](docs/bake-box.md)), when Actions did not start jobs on this account. Each pushed
+`vivijure-backend:<X.Y.Z>` from the box and is pinned by digest. **From 1.1.19 there is no bake box:** the image is built on
+GitHub-hosted `ubuntu-latest` by `thin-image.yml`, dispatched from main with `toolchain_ref` set to the full digest of an
+existing base (for 1.1.19, `vivijure-backend:stills-t1-m1@sha256:6d0e19bd...`). With `toolchain_ref`, the workflow builds no
+toolchain and pushes no toolchain tag, refuses a version tag that already exists on GHCR, and prints the pushed digest. The
+digest is recorded in `docs/runpod-endpoint-config.md`, and the endpoint is repinned by that digest.
 
-**Do NOT push `backend-v<X.Y.Z>` for a semver the box already published.** That tag push triggers `release.yml`, which would build and push `:<X.Y.Z>` and `:latest` again, the collision this file forbids. The record of each 1.1.x image is in [docs/runpod-endpoint-config.md](docs/runpod-endpoint-config.md) (commit, digest, rollback). The GHCR check above still picks the next free semver.
+**Do NOT push `backend-v<X.Y.Z>` for a semver GHCR already has.** That tag push triggers `release.yml`, which would build and push `:<X.Y.Z>` and `:latest` again, the collision this file forbids. The record of each 1.1.x image is in [docs/runpod-endpoint-config.md](docs/runpod-endpoint-config.md) (commit, digest, rollback). The GHCR check above still picks the next free semver.
 
 ## Release contract (#537: the seed -> runtime -> backend chain)
 
