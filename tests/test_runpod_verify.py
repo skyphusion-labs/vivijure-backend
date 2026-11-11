@@ -5,6 +5,7 @@ no-available-GPU no-spend abort."""
 import importlib.util
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -535,7 +536,8 @@ def test_promote_image_repins_the_endpoint_image_on_v2():
                            transport=transport, flush=False, smoke=False)
     assert calls[0] == ("PATCH", "https://api.runpod.io/v2/serverless/t9wcvlxh8rc5la", {"image": "ghcr.io/x:2"})
     assert calls[1] == ("GET", "https://api.runpod.io/v2/serverless/t9wcvlxh8rc5la", None)
-    assert not any("/templates/" in u or "rest.runpod.io" in u for _, u, _ in calls)
+    assert not any("/templates/" in u for _, u, _ in calls)
+    assert {urlsplit(u).hostname for _, u, _ in calls} == {"api.runpod.io"}
     assert out["image"] == "ghcr.io/x:2" and out["imageName"] == "ghcr.io/x:2"
     assert "template_id" not in out
 

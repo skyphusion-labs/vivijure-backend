@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -80,7 +81,7 @@ def test_first_time_create_posts_a_v2_endpoint_with_everything_on_it(tmp_path):
     assert calls[0] == "GET https://api.runpod.io/v2/serverless?limit=1000"
     assert calls[1] == "POST https://api.runpod.io/v2/serverless"
     assert not any("/templates" in c for c in calls), "v2 deploy makes no template"
-    assert not any("rest.runpod.io" in c for c in calls)
+    assert {urlsplit(c.split(" ", 1)[1]).hostname for c in calls} == {"api.runpod.io"}
     body = sent[0]
     assert body["name"] == "vivijure-backend"
     assert body["image"].startswith("ghcr.io/skyphusion-labs/vivijure-backend:")
