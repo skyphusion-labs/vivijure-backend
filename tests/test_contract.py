@@ -357,6 +357,7 @@ def _tar_with_storyboard_and(tmp_path, extra: tarfile.TarInfo, payload: bytes | 
 def test_bundle_accepts_a_directory_entry(tmp_path):
     directory = tarfile.TarInfo("characters")
     directory.type = tarfile.DIRTYPE
+    directory.mode = 0o755
     tar = _tar_with_storyboard_and(tmp_path, directory)
     bundle = Bundle.extract(tar, tmp_path / "out")
     assert (tmp_path / "out" / "characters").is_dir()
