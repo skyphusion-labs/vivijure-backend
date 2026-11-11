@@ -11,13 +11,13 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 **Do not pin `:1.0.1`** (t2 weight-digest rewrite; RunPod `unexpected EOF`). Incident:
 [`runpod-1.0.1-weight-digest-eof.md`](runpod-1.0.1-weight-digest-eof.md).
 
-## Current state (backend read from `GET /v2/serverless` on 2026-11-04, upscale on 2026-10-30)
+## Current state (both read with `get-endpoint` on 2026-11-11; backend pools as changed by #625)
 
 | | `vivijure-backend-hosted` | `vivijure-upscale-hosted` |
 |---|---|---|
 | id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
-| Image | `vivijure-backend:1.1.17@sha256:2269c849c72f4f293ee6954765c8c6a98cc44a5f9aa27dd37be9b7c551332393` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
-| Pools | `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141`, `BLACKWELL_180`, `BLACKWELL_288` | `BLACKWELL_96` |
+| Image | `vivijure-backend:1.1.18@sha256:3ec3849279aa18e6c58ba0716bd768366162a70d8a6d61e9bdde2254ee4e049a` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
+| Pools | `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141` | `BLACKWELL_96` |
 | `workers` min / max | 0 / 12 | 0 / 10 |
 | Idle timeout | 60 s | 10 s |
 | Scaler | `QUEUE_DELAY` 4 | `QUEUE_DELAY` 4 |
@@ -26,6 +26,13 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 | Mounts | none | none |
 | Execution timeout | 3600 s | 900 s |
 | Min CUDA | 12.8 | 12.0 |
+
+**B200 and B300 dropped from the backend pools (#625, decision on #606, 2026-11-11).** Before: `BLACKWELL_96`,
+`ADA_80_PRO`, `HOPPER_141`, `BLACKWELL_180`, `BLACKWELL_288`. RunPod serves SDXL keyframes only. Keyframe jobs
+complete on the 96 GB RTX PRO 6000 and on an 80 GB H100 (measured below), so the 180 GB and 288 GB cards add
+VRAM the workload does not use, at 3.1x and 3.4x the RTX PRO 6000 per-second price. Under concurrency, jobs
+were reaching them: the 4-in-flight run of 2026-11-06 billed $0.0023 per runtime-second, above the H200 rate.
+Rollback: `update-endpoint` with the five-pool list above, in that order.
 
 Backend env: `HF_HOME=/opt/models/hf-cache`, `VJ_MODELS_ROOT=/opt/models`, `VJ_MODEL_VERSION=1`,
 `HF_HUB_OFFLINE=1`. `VJ_VOLUME_ROOT` and `VJ_VOLUME_KIND` are not set on the endpoint. The thin image
@@ -368,8 +375,11 @@ L4 / L40S tiers.**
 
 Realized across the fleet as two tiers, both Blackwell-line:
 
-- **Heavy render backend** (`vivijure-backend`: SDXL keyframes, i2v, LoRA
-  training) -> **datacenter top tier, B200 / H200.**
+- **Render backend** (`vivijure-backend`): **RTX PRO 6000 first, then H100 and H200; no B200 / B300**
+  (#625). This line used to read "SDXL keyframes, i2v, LoRA training -> datacenter top tier, B200 / H200".
+  i2v and LoRA training no longer run on RunPod (SDXL keyframes only, Conrad 2026-10-30; Wan training
+  retired, cp#589). Keyframes are proven on 96 GB and 80 GB cards, so the B-class cards bought VRAM nothing
+  used, at about three times the price.
 - **Finish-chain endpoints** (upscale; audio-upscale and musetalk are both RETIRED, see below) ->
   **RTX PRO 6000 Blackwell (96 GB).**
 
