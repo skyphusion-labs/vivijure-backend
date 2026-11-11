@@ -116,7 +116,7 @@ jobs:
           exit 1
 
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -129,8 +129,15 @@ jobs:
             exit 1
           fi
 
+      # Dispatch inputs arrive through env, never interpolated into the script text, and every one is
+      # checked against the shape it must have before anything uses it.
       - name: Resolve config
         id: cfg
+        env:
+          IN_PRECISION: ${{ github.event.inputs.precision }}
+          IN_MODEL_VERSION: ${{ github.event.inputs.model_version }}
+          IN_TOOLCHAIN_VERSION: ${{ github.event.inputs.toolchain_version }}
+          IN_OVERLAY_FROM: ${{ github.event.inputs.overlay_from }}
         run: |
           set -eu
           if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
@@ -146,14 +153,20 @@ jobs:
             OVERLAY=""
             echo "Scheduled CVE-refresh re-bake of the shipped runtime: ${TAG} (same tag, fresh layers)."
           else
-            PREC='${{ github.event.inputs.precision }}'
-            MVER='${{ github.event.inputs.model_version }}'
-            TVER='${{ github.event.inputs.toolchain_version }}'
-            OVERLAY='${{ github.event.inputs.overlay_from }}'
+            PREC="${IN_PRECISION}"
+            MVER="${IN_MODEL_VERSION}"
+            TVER="${IN_TOOLCHAIN_VERSION}"
+            OVERLAY="${IN_OVERLAY_FROM}"
           fi
           case "${PREC}" in bf16) ;; *) echo "::error::precision must be bf16"; exit 1;; esac
           case "${MVER}" in ''|*[!0-9]*) echo "::error::model_version must be a positive integer"; exit 1;; esac
           case "${TVER}" in ''|*[!0-9]*) echo "::error::toolchain_version must be a positive integer"; exit 1;; esac
+          # overlay_from is free text: accept only a digest-pinned runtime ref in this package.
+          if [ -n "${OVERLAY}" ] && ! printf '%s' "${OVERLAY}" \
+              | grep -Eqx 'ghcr\.io/skyphusion-labs/vivijure-backend:runtime-[0-9]+-bf16-t[0-9]+@sha256:[0-9a-f]{64}'; then
+            echo "::error::overlay_from must be ghcr.io/skyphusion-labs/vivijure-backend:runtime-<N>-bf16-t<N>@sha256:<64 hex>"
+            exit 1
+          fi
           TAG="runtime-${MVER}-${PREC}-t${TVER}"
           if [ -n "${OVERLAY}" ]; then
             FILE="deploy/runtime-overlay.Dockerfile"
@@ -179,13 +192,13 @@ jobs:
       # local hit for `FROM seed` instead of a re-pull. Same pull-half fix release.yml uses.
       # Single-platform amd64 needs no docker-container features (#537 pull win).
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           driver: docker
 
       # GHCR auth: pull the (public) seed / base runtime + push the runtime image. GITHUB_TOKEN, least-privilege.
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -195,9 +208,10 @@ jobs:
       # RootFS digests are inspectable for the weight-dedup gate.
       - name: Pull overlay base runtime
         if: steps.cfg.outputs.mode == 'overlay'
+        env:
+          BASE: ${{ steps.cfg.outputs.overlay_from }}
         run: |
           set -eu
-          BASE='${{ steps.cfg.outputs.overlay_from }}'
           echo "Pulling overlay base ${BASE}"
           docker pull "${BASE}"
 
@@ -205,7 +219,7 @@ jobs:
       # --from into /opt/models, then sha256 + assert gates. Load into the local daemon (not pushed
       # yet) so the per-layer + shared-diff-id gates run before publish.
       - name: Build runtime base image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ${{ steps.cfg.outputs.dockerfile }}
@@ -232,10 +246,11 @@ jobs:
       # Weight-dedup gate (overlay required; catches the t2 ~101 GB digest rewrite).
       - name: Assert weight layers shared with overlay base
         if: steps.cfg.outputs.mode == 'overlay'
+        env:
+          BASE: ${{ steps.cfg.outputs.overlay_from }}
         run: |
           set -eu
           IMG="${REGISTRY}/${OWNER}/${RUNTIME_IMAGE}:${{ steps.cfg.outputs.tag }}"
-          BASE='${{ steps.cfg.outputs.overlay_from }}'
           python deploy/bake_layers.py assert-shared-diff-ids --image "${IMG}" --base "${BASE}" --min-shared-gb 90
 
       # Toolchain import smoke (no app): catch a torch/CUDA ABI break in the runtime here, in seconds,

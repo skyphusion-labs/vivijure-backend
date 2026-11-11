@@ -12,8 +12,9 @@ borrowed implementation. The backend is a clean-sheet implementation written aga
 ## The project bundle
 
 The control plane writes a gzipped tar to R2 and passes its key as `bundle_key`. The backend
-extracts it (rejecting symlinks, hardlinks, and path-traversal entries) into the project
-working tree.
+extracts it into the project working tree. Only regular files and directories are
+accepted. A link is refused, including one whose target resolves outside that tree.
+Absolute paths and paths with a `..` component are refused.
 
 ```
 bundle.tar.gz
@@ -394,7 +395,7 @@ audio track is returned unchanged (no audio step, no failure).
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `action` | str | -- | Must be `"finish_clip"`. |
-| `output_key` | str | `renders/<project>/clips/<shot_id>_finished.mp4` | Where to write the clip, so one film cannot replace another film's clip (vivijure-core#379). Must be an `.mp4` under this project's `clips/`. A key that does not qualify is logged and the default is used, so the job does not fail. With an `output_hash`, a non-default key also writes `<shot_id>_finished.latest.json`, naming the clip and hash, last. |
+| `output_key` | str | `renders/<project>/clips/<shot_id>_finished.mp4` | Where to write the clip, so one film cannot replace another film's clip (vivijure-core#379). Must be an `.mp4` under this project's `clips/`. A key that does not qualify is logged and the default is used, so the job does not fail. No reuse pointer is written for a finished clip (#613). |
 | `project` | str | `"untitled"` | Keys the output clip. |
 | `shot_id` | str | `"shot"` | Identifies the clip; part of the output key. |
 | `clip_key` | str | (required) | R2 key of the clip to finish. |
