@@ -16,7 +16,7 @@ name: RunPod verify harness
 # the R2 channel + a workflow artifact FIRST), and an always() backstop reaps (stop then DELETE) any
 # pod the run created even if the job is cancelled/killed -- a stopped pad is never an exit state.
 #
-# PROMOTE (repin the PROD serverless endpoint t9wcvlxh8rc5la) is OFF by default: a proof run validates
+# PROMOTE (repin the serverless endpoint named in `promote_endpoint`; no default, #629) is OFF by default: a proof run validates
 # up|verify|down without ever touching prod. A real release turns `promote` on. Verify-before-require:
 # this job goes REQUIRED in branch protection only AFTER a real dispatch has passed green end to end.
 #
@@ -55,6 +55,10 @@ on:
         description: "On PASS, repin the PROD serverless endpoint to the image (leave OFF for a proof run)."
         type: boolean
         default: false
+      promote_endpoint:
+        description: "REQUIRED with promote: the serverless endpoint id to repin (current one: docs/runpod-endpoint-config.md). No default (#629)."
+        type: string
+        default: ""
       data_center_id:
         description: "Ordered SECURE data-center affinity, comma-separated (e.g. EU-RO-1,EU-SE-1). Pins the verify pod to a machine warm on this image's weight layers to skip the ~87GB cold pull; each is tried in turn, then UNPINNED last so a capacity miss never fails the gate. Empty = RunPod picks. Set it to the data_center_landed of the last good run report."
         type: string
@@ -138,8 +142,14 @@ jobs:
       - name: Live verify gate (SECURE pod -> @event verify -> delete+confirm-zero; promote gated)
         env:
           IMAGE: ${{ inputs.image }}
+          PROMOTE: ${{ inputs.promote }}
+          PROMOTE_ENDPOINT: ${{ inputs.promote_endpoint }}
         run: |
           test -n "${IMAGE}" || { echo "::error::image input is required (no :latest default); pass an explicit X.Y.Z or digest ref"; exit 1; }
+          # #629: a promote names its endpoint, checked BEFORE the pod spends. runpod_verify.py refuses it too.
+          if [ "${PROMOTE}" = "true" ] && ! printf "%s" "${PROMOTE_ENDPOINT}" | grep -Eq "^[a-z0-9]{8,32}$"; then
+            echo "::error::promote=true needs promote_endpoint (a RunPod endpoint id); there is no default (#629)"; exit 1
+          fi
           # SHARPNESS CALIBRATION (option 1, 2026-07-03) -- baseline 75.0, NOT the old 100.0 placeholder.
           # Measured Laplacian 77.5 on the visually-confirmed-good draft-fp8 clip from run 28624514409
           # (2026-07-03; lead eyeballed full.mp4: crisp rack edges, readable panel labels, in focus). So
@@ -159,7 +169,7 @@ jobs:
             --bundle-key "${{ inputs.bundle_key }}" \
             --sharpness-baseline 75.0 \
             ${{ inputs.data_center_id != '' && format('--data-center-id {0}', inputs.data_center_id) || '' }} \
-            ${{ inputs.promote && '--promote' || '' }}
+            ${{ inputs.promote && '--promote --promote-endpoint "${PROMOTE_ENDPOINT}"' || '' }}
 
       - name: Upload verify evidence (always)
         if: always()

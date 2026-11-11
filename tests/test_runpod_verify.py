@@ -551,7 +551,7 @@ def test_promote_image_raises_on_readback_mismatch():
         raise AssertionError("unexpected call")
 
     with pytest.raises(RuntimeError):
-        rv.promote_image("ghcr.io/x:2", endpoint_id="e", api_key="k-1", transport=transport)
+        rv.promote_image("ghcr.io/x:2", endpoint_id="eptest0001", api_key="k-1", transport=transport)
 
 
 def test_build_verify_pod_env_sends_secret_references_not_raw_r2_values():
@@ -584,7 +584,7 @@ def test_build_verify_pod_env_sends_secret_references_not_raw_r2_values():
 def test_promote_image_requires_key(monkeypatch):
     monkeypatch.delenv("RUNPOD_API_KEY", raising=False)
     with pytest.raises(RuntimeError):
-        rv.promote_image("ghcr.io/x:2", transport=lambda *a, **k: {})
+        rv.promote_image("ghcr.io/x:2", endpoint_id="t9wcvlxh8rc5la", transport=lambda *a, **k: {})
 
 
 def test_r2_summary_event_reader_reads_the_frozen_contract(monkeypatch):
@@ -1061,7 +1061,7 @@ def test_promote_image_drains_restores_and_smokes_the_warm_pool():
                      "unhealthy": 0}],  # drain poll 2: fully drained
         status_seq=[{"status": "IN_PROGRESS"}, {"status": "COMPLETED", "delayTime": 67300,
                                                 "executionTime": 41000}])
-    out = rv.promote_image("ghcr.io/x:2", api_key="k-1", transport=fake, clock=_mk_clock(),
+    out = rv.promote_image("ghcr.io/x:2", endpoint_id=fake.endpoint_id, api_key="k-1", transport=fake, clock=_mk_clock(),
                            poll_sleep=lambda _s: None)
     # waited for the in-flight job to finish (running->0) BEFORE any drain PATCH
     assert out["flush"]["quiesce"]["quiesced"] is True
@@ -1167,7 +1167,7 @@ def test_smoke_fresh_worker_raises_when_the_proof_job_fails():
 def test_promote_image_skips_flush_and_smoke_when_disabled():
     # flush=False + smoke=False: ONLY the repin legs fire; the endpoint is never PATCHed, /run never hit.
     fake = _PromoteFake("ghcr.io/x:2")
-    out = rv.promote_image("ghcr.io/x:2", api_key="k-1", transport=fake, flush=False, smoke=False)
+    out = rv.promote_image("ghcr.io/x:2", endpoint_id=fake.endpoint_id, api_key="k-1", transport=fake, flush=False, smoke=False)
     assert out["imageName"] == "ghcr.io/x:2" and "flush" not in out and "smoke" not in out
     assert fake.endpoint_patches == []
     assert not any(c[0] == "POST" for c in fake.calls)
@@ -1181,7 +1181,7 @@ def test_promote_smoke_uses_a_train_free_bundle_not_the_verify_render_bundle():
     # preview fits the window.
     assert rv.SMOKE_BUNDLE_KEY != "bundles/Packet_Chase.tar.gz"
     fake = _PromoteFake("ghcr.io/x:2")
-    out = rv.promote_image("ghcr.io/x:2", api_key="k-1", transport=fake, clock=_mk_clock(),
+    out = rv.promote_image("ghcr.io/x:2", endpoint_id=fake.endpoint_id, api_key="k-1", transport=fake, clock=_mk_clock(),
                            poll_sleep=lambda _s: None)
     run_calls = [c for c in fake.calls if c[0] == "POST" and c[1].endswith("/run")]
     assert run_calls, "smoke never submitted a /run job"
@@ -1195,7 +1195,7 @@ def test_promote_smoke_uses_a_train_free_bundle_not_the_verify_render_bundle():
 def test_promote_smoke_bundle_and_project_are_overridable():
     # An operator can still point the smoke elsewhere (a scratch bundle) without editing the prod default.
     fake = _PromoteFake("ghcr.io/x:2")
-    rv.promote_image("ghcr.io/x:2", api_key="k-1", transport=fake, clock=_mk_clock(),
+    rv.promote_image("ghcr.io/x:2", endpoint_id=fake.endpoint_id, api_key="k-1", transport=fake, clock=_mk_clock(),
                      poll_sleep=lambda _s: None,
                      smoke_bundle_key="bundles/other_smoke.tar.gz", smoke_project="scratch")
     submitted = [c for c in fake.calls if c[0] == "POST" and c[1].endswith("/run")][0][2]["input"]
@@ -1265,10 +1265,51 @@ def test_promote_image_surfaces_partial_pin_when_smoke_stays_paused():
         "ghcr.io/x:2", workers_max=8,
         health_seq=[{"idle": 0, "ready": 0, "running": 0, "initializing": 0, "throttled": 0, "unhealthy": 0}])
     with pytest.raises(rv.PromoteError) as ei:
-        rv.promote_image("ghcr.io/x:2", api_key="k-1", transport=fake, clock=_mk_clock(),
+        rv.promote_image("ghcr.io/x:2", endpoint_id=fake.endpoint_id, api_key="k-1", transport=fake, clock=_mk_clock(),
                          poll_sleep=lambda _s: None)
     err = ei.value
     assert err.partial["imageName"] == "ghcr.io/x:2"
     assert "template_id" not in err.partial
     assert "flush" in err.partial
 
+
+
+# ---- #629: there is no default promote endpoint -----------------------------------------------------
+
+def test_promote_image_has_no_default_endpoint():
+    with pytest.raises(TypeError):
+        rv.promote_image("ghcr.io/x:2", api_key="k-1", transport=lambda *a, **k: {})  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("bad", ["", "  ", None, "e", "BAD-ID!", "x" * 40])
+def test_promote_image_refuses_a_missing_or_malformed_endpoint_before_any_call(bad):
+    calls = []
+    with pytest.raises(RuntimeError, match="explicit RunPod endpoint id"):
+        rv.promote_image("ghcr.io/x:2", endpoint_id=bad, api_key="k-1",
+                         transport=lambda *a, **k: calls.append(a) or {})
+    assert calls == []
+
+
+def test_cli_promote_without_an_endpoint_refuses_before_anything_runs(monkeypatch, capsys):
+    ran = []
+    monkeypatch.setattr(rv, "run_verify", lambda *a, **k: ran.append(1) or {})
+    with pytest.raises(SystemExit) as e:
+        rv.main(["--image", "img:dry", "--promote"])
+    assert e.value.code == 2
+    assert "explicit RunPod endpoint id" in capsys.readouterr().err
+    assert ran == []
+
+
+def test_cli_promote_with_an_endpoint_passes_it_through(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(rv, "run_verify", lambda *a, **k: {"passed": True, "signal": "promote"})
+    monkeypatch.setattr(rv, "promote_image", lambda image, **k: seen.update(k) or {})
+    rv.main(["--image", "img:dry", "--promote", "--promote-endpoint", "xe5d1ivs40ohjo"])
+    assert seen["endpoint_id"] == "xe5d1ivs40ohjo"
+
+
+def test_no_retired_endpoint_is_a_default_anywhere():
+    root = Path(__file__).resolve().parent.parent
+    for f in [root / "deploy/runpod_verify.py", root / ".github/workflows/runpod-verify.yml"]:
+        text = f.read_text()
+        assert "t9wcvlxh8rc5la" not in text, f
