@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import tarfile
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -258,21 +258,76 @@ class Bundle:
         return cls(root=dest, storyboard=storyboard, cast=cast)
 
 
-def _safe_extract(tf: tarfile.TarFile, dest: Path) -> None:
-    """Reject path traversal and symlink/hardlink escapes before extracting an untrusted tar.
+def _stored_name_refused(name: str) -> bool:
+    """True for an absolute name or a name with a `..` component.
 
-    `str.startswith` has a sibling-prefix bug (/tmp/proj matches /tmp/proj-evil); use
-    Path.is_relative_to (Python 3.9+) for a correct parent-dir check. Symlinks and hardlinks
-    are rejected outright: they can escape dest even when the stored name is safe.
+    The check is on the stored text. A name that normalizes back inside the destination
+    is still refused when it contains `..` or is absolute.
+    """
+    if not name or name.startswith(("/", "\\")) or "\\" in name:
+        return True
+    if len(name) >= 2 and name[1] == ":" and name[0].isalpha():
+        return True
+    path = PurePosixPath(name)
+    if path.is_absolute():
+        return True
+    return ".." in path.parts
+
+
+def _absolute_stored_name(name: str) -> bool:
+    if name.startswith(("/", "\\")) or "\\" in name:
+        return True
+    if len(name) >= 2 and name[1] == ":" and name[0].isalpha():
+        return True
+    return PurePosixPath(name).is_absolute()
+
+
+def _link_resolves_outside(dest: Path, member: tarfile.TarInfo) -> bool:
+    """True when a symlink or hardlink target resolves outside `dest`."""
+    linkname = member.linkname or ""
+    if not linkname or _absolute_stored_name(linkname):
+        return True
+    if member.islnk():
+        # A hardlink target is another member name. `..` in that name is refused.
+        if ".." in PurePosixPath(linkname).parts:
+            return True
+        try:
+            return not (dest / linkname).resolve().is_relative_to(dest)
+        except (OSError, ValueError):
+            return True
+    # A relative symlink is resolved from the member's directory. `..` may still
+    # land inside dest; the resolved path is what decides.
+    parent = dest / PurePosixPath(member.name).parent
+    try:
+        return not (parent / linkname).resolve().is_relative_to(dest)
+    except (OSError, ValueError):
+        return True
+
+
+def _safe_extract(tf: tarfile.TarFile, dest: Path) -> None:
+    """Extract only regular files and directories into `dest`.
+
+    Absolute names and names with a `..` component are refused. A link whose target
+    resolves outside `dest` is refused. Any other entry kind (fifo, device, and a link
+    that stays inside) is refused as well: only a regular file or a directory is written.
+    `Path.is_relative_to` is the parent check, so a sibling prefix cannot pass.
     """
     dest = dest.resolve()
+    accepted: list[tarfile.TarInfo] = []
     for member in tf.getmembers():
+        if _stored_name_refused(member.name):
+            raise ValueError(f"unsafe path in bundle: {member.name}")
         if member.issym() or member.islnk():
-            raise ValueError(f"unsafe link in bundle: {member.name}")
+            if _link_resolves_outside(dest, member):
+                raise ValueError(f"unsafe link in bundle: {member.name}")
+            raise ValueError(f"bundle entry must be a regular file or directory: {member.name}")
+        if not (member.isfile() or member.isdir()):
+            raise ValueError(f"bundle entry must be a regular file or directory: {member.name}")
         target = (dest / member.name).resolve()
         if not target.is_relative_to(dest):
             raise ValueError(f"unsafe path in bundle: {member.name}")
-    tf.extractall(dest)
+        accepted.append(member)
+    tf.extractall(dest, members=accepted)
 
 
 # --------------------------------------------------------------------------- render job

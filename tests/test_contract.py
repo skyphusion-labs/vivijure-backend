@@ -337,3 +337,100 @@ def test_bundle_rejects_hardlink(tmp_path):
         dest.mkdir()
         with tf_mod.open(tar, "r:gz") as tff:
             _safe_extract(tff, dest)
+
+
+def _tar_with_storyboard_and(tmp_path, extra: tarfile.TarInfo, payload: bytes | None = None):
+    tar = tmp_path / "bundle.tar.gz"
+    with tarfile.open(tar, "w:gz") as tf:
+        info = tarfile.TarInfo("storyboard.yaml")
+        data = b"title: t\nscenes:\n- prompt: hi\n"
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+        if payload is None:
+            tf.addfile(extra)
+        else:
+            extra.size = len(payload)
+            tf.addfile(extra, io.BytesIO(payload))
+    return tar
+
+
+def test_bundle_accepts_a_directory_entry(tmp_path):
+    directory = tarfile.TarInfo("characters")
+    directory.type = tarfile.DIRTYPE
+    tar = _tar_with_storyboard_and(tmp_path, directory)
+    bundle = Bundle.extract(tar, tmp_path / "out")
+    assert (tmp_path / "out" / "characters").is_dir()
+    assert bundle.storyboard.title == "t"
+    assert (tmp_path / "out" / "storyboard.yaml").is_file()
+
+
+def test_bundle_rejects_fifo(tmp_path):
+    """A fifo entry is refused. Extracting one would leave a pipe in the work tree."""
+    fifo = tarfile.TarInfo("pipe")
+    fifo.type = tarfile.FIFOTYPE
+    tar = _tar_with_storyboard_and(tmp_path, fifo)
+    dest = tmp_path / "out"
+    with pytest.raises(ValueError, match="regular file or directory"):
+        Bundle.extract(tar, dest)
+    assert not (dest / "pipe").exists()
+
+
+def test_bundle_rejects_character_device(tmp_path):
+    dev = tarfile.TarInfo("chardev")
+    dev.type = tarfile.CHRTYPE
+    dev.devmajor = 1
+    dev.devminor = 3
+    tar = _tar_with_storyboard_and(tmp_path, dev)
+    with pytest.raises(ValueError, match="regular file or directory"):
+        Bundle.extract(tar, tmp_path / "out")
+
+
+def test_bundle_rejects_block_device(tmp_path):
+    dev = tarfile.TarInfo("blockdev")
+    dev.type = tarfile.BLKTYPE
+    dev.devmajor = 1
+    dev.devminor = 0
+    tar = _tar_with_storyboard_and(tmp_path, dev)
+    with pytest.raises(ValueError, match="regular file or directory"):
+        Bundle.extract(tar, tmp_path / "out")
+
+
+def test_bundle_rejects_symlink_whose_target_stays_inside(tmp_path):
+    link = tarfile.TarInfo("alias.yaml")
+    link.type = tarfile.SYMTYPE
+    link.linkname = "storyboard.yaml"
+    tar = _tar_with_storyboard_and(tmp_path, link)
+    with pytest.raises(ValueError, match="regular file or directory"):
+        Bundle.extract(tar, tmp_path / "out")
+
+
+def test_bundle_rejects_symlink_whose_target_resolves_outside(tmp_path):
+    link = tarfile.TarInfo("sub/link.txt")
+    link.type = tarfile.SYMTYPE
+    link.linkname = "../../outside.txt"
+    tar = _tar_with_storyboard_and(tmp_path, link)
+    with pytest.raises(ValueError, match="unsafe link"):
+        Bundle.extract(tar, tmp_path / "out")
+
+
+def test_bundle_rejects_hardlink_whose_target_stays_inside(tmp_path):
+    link = tarfile.TarInfo("alias.yaml")
+    link.type = tarfile.LNKTYPE
+    link.linkname = "storyboard.yaml"
+    tar = _tar_with_storyboard_and(tmp_path, link)
+    with pytest.raises(ValueError, match="regular file or directory"):
+        Bundle.extract(tar, tmp_path / "out")
+
+
+def test_bundle_rejects_absolute_member_name(tmp_path):
+    info = tarfile.TarInfo("/tmp/abs.txt")
+    tar = _tar_with_storyboard_and(tmp_path, info, b"x")
+    with pytest.raises(ValueError, match="unsafe path"):
+        Bundle.extract(tar, tmp_path / "out")
+
+
+def test_bundle_rejects_parent_segment_even_when_it_would_land_inside(tmp_path):
+    info = tarfile.TarInfo("characters/../storyboard.yaml")
+    tar = _tar_with_storyboard_and(tmp_path, info, b"title: other\nscenes:\n- prompt: hi\n")
+    with pytest.raises(ValueError, match="unsafe path"):
+        Bundle.extract(tar, tmp_path / "out")
