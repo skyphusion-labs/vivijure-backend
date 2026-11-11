@@ -60,16 +60,16 @@ That is it.
 You do not have to click through the RunPod dashboard. The script:
 
 1. Reads your keys from `deploy.env` and checks that nothing needed is blank.
-2. Creates a RunPod **template** (the recipe: which image to run, and your R2 keys as the
-   endpoint's settings). If a template with this name already exists, it updates it instead.
-3. Creates a RunPod **Serverless endpoint** from that template, on the GPU you chose, set to
-   **scale to zero** so an idle endpoint costs you nothing. If the endpoint already exists, it
-   updates it in place.
-4. Prints the **endpoint id** you paste into the Studio.
+2. Creates a RunPod **Serverless endpoint** that carries the image to run and your R2 keys, on
+   the GPU you chose, set to **scale to zero** so an idle endpoint costs you nothing. If an
+   endpoint with this name already exists, it updates that one in place. (It uses RunPod's REST
+   v2 API. On v2 the endpoint holds its own settings, so no separate template is made. An older
+   deploy left a `<name>-template` behind; it is no longer used, and you may delete it.)
+3. Prints the **endpoint id** you paste into the Studio.
 
 If anything is missing or wrong, it **stops right there** and tells you, so you never end up with
-a half-built endpoint. Re-running after a fix is safe: it changes the same template and endpoint,
-it does not pile up new ones.
+a half-built endpoint. Re-running after a fix is safe: it changes the same endpoint, it does not
+pile up new ones.
 
 ## Picking a GPU
 
@@ -108,13 +108,14 @@ why it exists, and an example.
 | `R2_ENDPOINT` | The web address of your R2 storage. | Tells the GPU where your bucket lives. Leave blank to build it from your account id. | `https://<accountid>.r2.cloudflarestorage.com` |
 | `CLOUDFLARE_ACCOUNT_ID` | Your Cloudflare account id. | Only used to build `R2_ENDPOINT` for you when you leave that blank. Not a secret. | `0123456789abcdef...` |
 | `BACKEND_IMAGE` | The published render image to run. | This is the ready-made image with models baked in. Leave as-is unless you forked the code. | `ghcr.io/skyphusion-labs/vivijure-backend:0.4.9` |
-| `GPU_TYPE_IDS` | The GPU card(s) allowed, comma-separated. | Lets the scheduler pick whichever big card has stock. See [Picking a GPU](#picking-a-gpu). | `NVIDIA H200,NVIDIA B200` |
+| `GPU_TYPE_IDS` | The GPU card(s) allowed, comma-separated, in quotes. | Lets the scheduler pick whichever big card has stock. `deploy.sh` turns each card into its RunPod pool. See [Picking a GPU](#picking-a-gpu). | `"NVIDIA H200,NVIDIA B200"` |
+| `GPU_POOLS` | Optional: RunPod GPU pools, comma-separated, instead of cards. | RunPod schedules by pool. A pool holds several cards of one class, so this admits any of them. Use it for a card `deploy.sh` does not know. | `HOPPER_141,BLACKWELL_180` |
 | `ENDPOINT_NAME` | The name shown in your RunPod dashboard. | Lets the script find and update the same endpoint on a re-run. | `vivijure-backend` |
 | `WORKERS_MAX` | The most workers that can run at once. | Each render holds one worker until it finishes; this caps how many renders run in parallel. | `3` |
 | `WORKERS_MIN` | The fewest workers kept always-on. | Keep it `0` so an idle endpoint costs nothing. | `0` |
 | `CONTAINER_DISK_GB` | Scratch disk per worker, in GB. | The image is large, so the worker needs room. `500` is a safe floor. | `500` |
 | `IDLE_TIMEOUT` | Seconds a warm worker waits for the next job before shutting down. | A small buffer so back-to-back renders reuse a warm worker. | `5` |
-| `EXECUTION_TIMEOUT_MS` | Optional hard stop for a single job, in milliseconds. | A stuck job would otherwise hold a paid worker forever; this kills it. Leave blank for no limit. | `1800000` (30 min) |
+| `EXECUTION_TIMEOUT_MS` | Hard stop for a single job, in milliseconds. | A stuck job would otherwise hold a paid worker; this kills it. Blank means one hour: RunPod's v2 API has no "no limit", and its default is far shorter than a render. | `3600000` (1 h) |
 
 ### Settings the GPU worker reads at runtime
 
@@ -167,7 +168,8 @@ you also add a RunPod container-registry credential; that path is covered in
   RunPod rejected.
 - Re-running is safe. Fix the value in `deploy.env` and run `./deploy.sh` again.
 - A wrong GPU id is the most common trip-up. Open the RunPod dashboard's GPU picker and copy the
-  exact name into `GPU_TYPE_IDS`.
+  exact name into `GPU_TYPE_IDS` (in quotes). If the script says it knows no pool for that card,
+  set `GPU_POOLS` instead.
 - For the deeper operator view (the object-key map, the progress channel, failure modes), see
   [operations.md](operations.md); for GPU sizing and the account worker cap, see
   [runpod-endpoint-config.md](runpod-endpoint-config.md).

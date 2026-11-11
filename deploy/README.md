@@ -125,15 +125,15 @@ pass, then rebuild.
   suspect the account quota and read the v1 error body, not the v2 500. (Seen S32, 2026-07-11:
   the account sat at 30/30, so the musetalk verify-rig endpoint create 500d until a slot was freed.)
 
-- **Direct `update-endpoint` mutations 500 on the v2 REST/MCP path (image AND scaling), and this is
-  NOT quota-masked.** Seen S32 (2026-07-11): repointing the prod musetalk endpoint image, and
-  separately raising its `workersMax` while inside quota (29 -> 30), BOTH returned bare 500s. Two
-  working paths instead: (a) **repoint the IMAGE by updating the endpoint's bound TEMPLATE**
-  (`update-template imageName`, digest-pin OK as `:<ver>@sha256:...`) -- it propagates to the running
-  endpoint, and that is how the prod pin actually lands; (b) **worker-count / scaling changes have no
-  template escape hatch** and must go through the **v1 REST API** (`RUNPOD_REST_VERSION=v1`), same as
-  the create path. Diagnostic tell: `update-template` on the same image SUCCEEDS while `update-endpoint`
-  500s -> it is the v2 endpoint-mutation fault, not your payload and not quota.
+- **v2 endpoint mutations: the July 500 is superseded (2026-11-11).** On 2026-07-11 (S32) `update-endpoint`
+  on the v2 REST/MCP path 500'd for both an image repoint and a `workersMax` change, and the workaround was
+  to repoint the endpoint's TEMPLATE and to scale through REST v1. REST v1 retired on 2026-11-15
+  (fleet-chezmoi#2085), and on v2 a template no longer propagates: an endpoint carries its own `image`,
+  `env` and `workers` (a v2 template is applied once at create and keeps no link). So `deploy.sh` and
+  `deploy/runpod_verify.py` now PATCH the endpoint itself (`PATCH /v2/serverless/{id}`). A scaling-class v2
+  PATCH was recorded working on 2026-11-11 (CR vivijure-backend#625, `gpu.pools`, read back). An `image`
+  PATCH has not been re-recorded since July: the first promote after this change is that recording, and
+  `promote_image` reads the image back and fails loud on a mismatch.
 
 ## See also
 

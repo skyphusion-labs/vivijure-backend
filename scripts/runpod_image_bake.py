@@ -35,10 +35,12 @@ import urllib.parse
 import urllib.request
 from typing import NamedTuple
 
-# v1 is the live REST base. https://rest.runpod.io/v2/... is not an API path: it
-# 301-redirects to the docs site, so every call failed before a pod was created.
-# Measured 2026-10-19: GET /v1/pods is 200, GET /v2/pods is 301 to docs.runpod.io.
-API = "https://rest.runpod.io/v1"
+# RunPod REST v2 (REST v1 retired 2026-11-15; fleet-chezmoi#2085). v2 is a DIFFERENT HOST from v1:
+# https://api.runpod.io/v2. The 2026-10-19 measurement that "/v2/pods is 301 to the docs" was of the
+# v1 host with a v2 path, which is not an API path; that stays true. Shapes are from RunPod's v2
+# OpenAPI (https://api.runpod.io/v2/openapi.json): pods are `status`, `cost`, `disk`, `image`, and
+# every list is cursor-paginated.
+API = "https://api.runpod.io/v2"
 GHCR = "https://ghcr.io"
 
 # urllib sends "Python-urllib/3.x" by default and the RunPod edge answers that UA
@@ -106,25 +108,22 @@ def disk_gb(value: str) -> int:
 
 
 def _cpu_pod(name: str, image: str, disk: int, vcpus: int, script: str, env: dict) -> dict:
-    """A CPU pod body in live v1 field names.
+    """A CPU pod body in v2 field names.
 
-    computeType is not optional in practice. Nothing in this schema is required,
-    and computeType defaults to GPU, so an incomplete body does not fail: it
-    rents a GPU pod. Measured 2026-10-19, a body of only {"name": ...} created a
-    $2.49 per hour GPU pod. volumeInGb defaults to 20, which is a billed pod
-    volume, so it is pinned to 0 to keep the claim that terminate ends the bill.
+    The `cpu` object is what makes this a CPU pod, so it is never omitted: on v1 an
+    incomplete body did not fail, it rented a GPU pod (measured 2026-10-19, a body of
+    only {"name": ...} created a $2.49 per hour GPU pod). A v2 pod has no separate
+    billed volume field; with no `mounts` it has only its container disk, so
+    terminate still ends the bill.
     """
     return {
         "name": name,
-        "computeType": "CPU",
-        "cloudType": "SECURE",
-        "cpuFlavorIds": [CPU_ID],
-        "vcpuCount": vcpus,
-        "imageName": image,
-        "containerDiskInGb": disk,
-        "volumeInGb": 0,
-        "dockerEntrypoint": ["/bin/sh", "-c"],
-        "dockerStartCmd": [script],
+        "cloud": "SECURE",
+        "cpu": {"id": CPU_ID, "vcpuCount": vcpus},
+        "image": image,
+        "disk": disk,
+        "entrypoint": ["/bin/sh", "-c"],
+        "cmd": [script],
         "env": env,
         "ports": [],
     }
@@ -145,7 +144,7 @@ def create_body(args: argparse.Namespace) -> dict:
         args.name, BUILDER_IMAGE, args.disk_gb or DISK_MIN, VCPU_COUNT, POD_SCRIPT, env
     )
     # The kaniko debug image carries busybox sh at this path, not /bin/sh.
-    body["dockerEntrypoint"] = ["/busybox/sh", "-c"]
+    body["entrypoint"] = ["/busybox/sh", "-c"]
     return body
 
 
@@ -331,7 +330,7 @@ def pods_named(name: str, token: str) -> list[str]:
 # question the other way for create_pod, which scrubs; pods_named_detail cannot
 # scrub even in principle, because it holds the RunPod token and not the GHCR one.
 # So the fix is not to redact a row, it is never to render one: name the fields.
-SAFE_POD_FIELDS = ("id", "name", "desiredStatus", "costPerHr", "containerDiskInGb")
+SAFE_POD_FIELDS = ("id", "name", "status", "cost", "disk")
 
 
 def pod_summary(row: dict) -> str:
@@ -369,32 +368,54 @@ def pods_named_detail(name: str, token: str) -> PodLookup:
         # main() refuses reap with neither handle; this is the layer underneath.
         print("refusing to list pods with an empty name", file=sys.stderr)
         return PodLookup([], 0, 0, 0, False)
-    code, payload = _request("GET", "/pods?name=%s" % urllib.parse.quote(name, safe=""), token)
-    if code != 200:
-        print("could not list pods named %s: HTTP %s" % (name, code), file=sys.stderr)
-        return PodLookup([], 0, 0, 0, False)
-    try:
-        rows = json.loads(payload)
-    except json.JSONDecodeError:
-        print("pods listing for %s was not JSON" % name, file=sys.stderr)
-        return PodLookup([], 0, 0, 0, False)
-    if isinstance(rows, dict):
-        # This branch exists to survive a response-shape change, and reading a
-        # missing key as an empty list is the one way it would survive one by
-        # silently reporting that nothing is running. Same inversion, one body
-        # shape over, so it gets the same treatment.
-        if not isinstance(rows.get("pods"), list):
-            print("pods listing for %s was a dict with no pods list: keys %r"
-                  % (name, sorted(rows)[:10]), file=sys.stderr)
+    # v2 has no name filter (its `filters` are tag-based), so every page is read and the name is
+    # matched below, row by row, which this function already did rather than trust a server filter.
+    rows: list = []
+    cursor = None
+    for _page in range(1000):
+        path = "/pods?limit=1000" + ("&cursor=%s" % urllib.parse.quote(cursor, safe="") if cursor else "")
+        code, payload = _request("GET", path, token)
+        if code != 200:
+            print("could not list pods named %s: HTTP %s" % (name, code), file=sys.stderr)
             return PodLookup([], 0, 0, 0, False)
-        rows = rows["pods"]
-    if not isinstance(rows, list):
-        # A bare null, number or boolean is ordinary enough as an empty REST reply,
-        # and iterating one raises TypeError. That is loud rather than silent, but
-        # inside run()'s finally it REPLACES the exception that sent us there, so a
-        # create timeout would be reported as a complaint about iteration.
-        print("pods listing for %s was not a list: %r" % (name, type(rows).__name__),
-              file=sys.stderr)
+        try:
+            page = json.loads(payload)
+        except json.JSONDecodeError:
+            print("pods listing for %s was not JSON" % name, file=sys.stderr)
+            return PodLookup([], 0, 0, 0, False)
+        if isinstance(page, dict):
+            # This branch exists to survive a response-shape change, and reading a
+            # missing key as an empty list is the one way it would survive one by
+            # silently reporting that nothing is running. Same inversion, one body
+            # shape over, so it gets the same treatment.
+            if not isinstance(page.get("pods"), list):
+                print("pods listing for %s was a dict with no pods list: keys %r"
+                      % (name, sorted(page)[:10]), file=sys.stderr)
+                return PodLookup([], 0, 0, 0, False)
+            rows.extend(page["pods"])
+            pg = page.get("pagination")
+            if isinstance(pg, dict) and pg.get("hasNextPage") is True:
+                nxt = pg.get("nextCursor")
+                if not isinstance(nxt, str) or not nxt:
+                    # "More pages, no cursor" cannot be walked, and treating it as the end would
+                    # report that nothing is running from a list we know is short.
+                    print("pods listing for %s claimed more pages with no cursor" % name, file=sys.stderr)
+                    return PodLookup([], 0, 0, 0, False)
+                cursor = nxt
+                continue
+            break
+        if not isinstance(page, list):
+            # A bare null, number or boolean is ordinary enough as an empty REST reply,
+            # and iterating one raises TypeError. That is loud rather than silent, but
+            # inside run()'s finally it REPLACES the exception that sent us there, so a
+            # create timeout would be reported as a complaint about iteration.
+            print("pods listing for %s was not a list: %r" % (name, type(page).__name__),
+                  file=sys.stderr)
+            return PodLookup([], 0, 0, 0, False)
+        rows.extend(page)
+        break
+    else:
+        print("pods listing for %s did not end" % name, file=sys.stderr)
         return PodLookup([], 0, 0, 0, False)
     ids: list[str] = []
     mismatched = matched_no_id = unusable = 0
@@ -504,15 +525,20 @@ def terminate(pod_id: str, token: str) -> tuple[bool, bool]:
             return accepted, True
         if code == 200:
             try:
-                state = json.loads(payload).get("desiredStatus")
+                state = _status(json.loads(payload))
             except json.JSONDecodeError:
                 state = None
             if state == "TERMINATED":
-                print("pod %s desiredStatus=TERMINATED" % pod_id)
+                print("pod %s status=TERMINATED" % pod_id)
                 return accepted, True
         time.sleep(5)
     print("::warning::pod %s did not read back as gone. Check it." % pod_id)
     return accepted, False
+
+
+def _status(pod) -> str | None:
+    """A v2 pod's lifecycle `status` (PROVISIONING, STARTING, RUNNING, EXITED, ERROR, TERMINATED)."""
+    return pod.get("status") if isinstance(pod, dict) else None
 
 
 def pod_state(pod_id: str, token: str) -> str | None:
@@ -522,7 +548,7 @@ def pod_state(pod_id: str, token: str) -> str | None:
     if code != 200:
         return None
     try:
-        return json.loads(payload).get("desiredStatus")
+        return _status(json.loads(payload))
     except json.JSONDecodeError:
         return None
 
@@ -545,9 +571,8 @@ def create_pod(body: dict, token: str, secrets: tuple[str, ...]) -> str | None:
     if not pod_id:
         print("create pod returned no id", file=sys.stderr)
         return None
-    print("pod id=%s desiredStatus=%s cost_per_hour=%s disk=%sGB" % (
-        pod_id, created.get("desiredStatus"), created.get("costPerHr"),
-        created.get("containerDiskInGb")))
+    print("pod id=%s status=%s cost_per_hour=%s disk=%sGB" % (
+        pod_id, created.get("status"), created.get("cost"), created.get("disk")))
     return pod_id
 
 
@@ -668,7 +693,7 @@ def selftest(args: argparse.Namespace) -> int:
         deadline = time.time() + args.timeout_minutes * 60
         while time.time() < deadline:
             state = pod_state(pod_id, token)
-            print("  desiredStatus=%s" % state)
+            print("  status=%s" % state)
             seen.append(state)
             if state == "RUNNING":
                 break
