@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Protocol
@@ -1034,7 +1035,19 @@ def run_verify(client: PodClient, cfg: VerifyConfig,
 
 # --------------------------------------------------------------------------- live channel + promote
 
-PROD_ENDPOINT_ID = "t9wcvlxh8rc5la"  # the production serverless endpoint (docs/release-gate.md)
+# There is NO default promote endpoint (vivijure-backend#629). The old default endpoint was retired,
+# so a promote dispatch that named nothing spent on the pod verify and then 404'd at the first PATCH. The
+# endpoint is named on every promote, and the current one is in docs/runpod-endpoint-config.md.
+_ENDPOINT_ID_RE = re.compile(r"^[a-z0-9]{8,32}$")
+
+
+def require_endpoint_id(endpoint_id: "str | None") -> str:
+    """The promote target, or a loud refusal. A RunPod endpoint id is lowercase letters and digits."""
+    eid = (endpoint_id or "").strip()
+    if not _ENDPOINT_ID_RE.match(eid):
+        raise RuntimeError("promote needs an explicit RunPod endpoint id (got %r); there is no default "
+                           "(vivijure-backend#629, docs/runpod-endpoint-config.md)" % (endpoint_id,))
+    return eid
 
 # The post-promote fresh-worker smoke MUST use a TRAIN-FREE bundle. `smoke_fresh_worker` submits an
 # action:preview job (the plan is train -> keyframes) and polls /status to terminal INSIDE
@@ -1378,7 +1391,7 @@ def smoke_fresh_worker(endpoint_id: str, *, transport: "Callable[..., Any]", hea
             poll_sleep(poll_interval_s)
 
 
-def promote_image(image: str, *, endpoint_id: str = PROD_ENDPOINT_ID, api_key: str | None = None,
+def promote_image(image: str, *, endpoint_id: str, api_key: str | None = None,
                   transport: "Callable[..., Any] | None" = None, flush: bool = True, smoke: bool = True,
                   smoke_bundle_key: str = SMOKE_BUNDLE_KEY, smoke_project: str = SMOKE_PROJECT,
                   clock: "Callable[[], float] | None" = None,
@@ -1401,6 +1414,7 @@ def promote_image(image: str, *, endpoint_id: str = PROD_ENDPOINT_ID, api_key: s
     This is the ONLY path an image reaches prod (docs/release-gate.md); the caller gates it behind an
     explicit ``--promote`` go. ``transport``/``clock``/``poll_sleep`` are injected in tests (no network,
     no wall-clock). The RunPod API key is read from RUNPOD_API_KEY and NEVER logged."""
+    endpoint_id = require_endpoint_id(endpoint_id)
     key = _clean_key(api_key or os.environ.get("RUNPOD_API_KEY"))
     if not key:
         raise RuntimeError("promote needs RUNPOD_API_KEY (never hardcode a key)")
@@ -1529,8 +1543,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--promote", action="store_true",
                     help="on a PASS, repin the PROD serverless endpoint to the verified image. OFF by "
                          "default: a proof run validates up|verify|down without ever touching prod")
-    ap.add_argument("--promote-endpoint", default=PROD_ENDPOINT_ID,
-                    help="the production serverless endpoint id to promote onto")
+    ap.add_argument("--promote-endpoint", default=None,
+                    help="the serverless endpoint id to promote onto. REQUIRED with --promote; there is "
+                         "no default (#629). The current one is in docs/runpod-endpoint-config.md")
     ap.add_argument("--skip-flush", action="store_true",
                     help="promote WITHOUT recycling the warm worker pool (#209 drain). Only safe when "
                          "the endpoint is already scaled to zero; a warm pool keeps serving the old image")
@@ -1547,6 +1562,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="print a NO-LEAK shape diagnostic of RUNPOD_API_KEY (regex match, length, "
                          "quote/whitespace edges) and exit; never echoes the value")
     args = ap.parse_args(argv)
+    # #629: refuse a promote with no target BEFORE anything runs, so a live dispatch never spends on the
+    # pod verify only to fail at the first PATCH.
+    if args.promote:
+        try:
+            require_endpoint_id(args.promote_endpoint)
+        except RuntimeError as e:
+            ap.error(str(e))
 
     if args.key_shape:
         import re as _re

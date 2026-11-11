@@ -1,0 +1,3 @@
+**Fix: a promote names its endpoint; there is no default (#629).**
+
+`deploy/runpod_verify.py` defaulted the promote target to an endpoint that has been retired, and `runpod-verify.yml` passed none. So a `live=true promote=true` dispatch would spend on the verify pod and then fail at the first PATCH. There is no default now. `promote_image()` takes `endpoint_id` as a required keyword and refuses an empty or malformed id before any call. `--promote` without `--promote-endpoint` exits 2 before anything runs. The workflow takes a `promote_endpoint` input and refuses `promote=true` without one, before the pod. `docs/release-gate.md` describes the v2 endpoint image repin and points at `docs/runpod-endpoint-config.md` for the current endpoint.
