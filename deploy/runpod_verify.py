@@ -1050,9 +1050,31 @@ SMOKE_PROJECT = "verify-smoke"
 
 # The image + endpoint config live on the RunPod REST v1 control plane; the run/status/health job API
 # lives on the v2 endpoint host. Both authenticate with the same Bearer RUNPOD_API_KEY.
-RUNPOD_REST_BASE = "https://rest.runpod.io/v1"  # promote/flush: v2 endpoint mutations 500 (deploy/README.md)
-RUNPOD_REST_V2 = "https://api.runpod.io/v2"     # pod create: v2 (image/registry/gpu/args/disk)
+RUNPOD_REST_V2 = "https://api.runpod.io/v2"     # pod create, endpoint read/patch: v2 (REST v1 retired 2026-11-15)
 RUNPOD_RUN_BASE = "https://api.runpod.ai/v2"
+
+
+# RunPod REST v2 endpoint helpers (fleet-chezmoi#2085). On v2 an endpoint is `/v2/serverless/{id}`, its
+# worker bounds are nested (`workers.max`, `workers.min`) and it carries its own `image` (a v2 template is
+# applied once and keeps no link). These translate at the HTTP boundary, so the gate logic below keeps
+# its workersMax / workersMin vocabulary. A scaling-class v2 PATCH was recorded working on 2026-11-11
+# (vivijure-backend#625), which retires the July note that v2 endpoint mutations 500.
+def _endpoint_url(endpoint_id: str) -> str:
+    return "%s/serverless/%s" % (RUNPOD_REST_V2, endpoint_id)
+
+
+def _v2_workers(payload: dict) -> dict:
+    """{workersMax, workersMin} -> the v2 PATCH body {"workers": {"max", "min"}}."""
+    return {"workers": {"max": payload["workersMax"], "min": payload.get("workersMin", 0)}}
+
+
+def _v1_view(ep: dict) -> dict:
+    """A v2 endpoint read, with workersMax / workersMin lifted out of `workers` for the gate logic."""
+    out = dict(ep or {})
+    workers = out.get("workers") if isinstance(out.get("workers"), dict) else {}
+    out["workersMax"] = workers.get("max")
+    out["workersMin"] = workers.get("min")
+    return out
 # Worker states reported by GET /v2/{id}/health -> "workers". The pool is DRAINED when every one is 0.
 _WORKER_STATES = ("idle", "initializing", "ready", "running", "throttled", "unhealthy")
 # A freshly-provisioned worker that cold-pulls the baked image reports a large delayTime (queue + cold
@@ -1193,9 +1215,9 @@ def restore_endpoint_workers(endpoint_id: str, *, transport: "Callable[..., Any]
         raise RuntimeError("restore: restore_payload missing workersMax")
     last: dict | None = None
     for i in range(attempts):
-        transport("%s/endpoints/%s" % (RUNPOD_REST_BASE, endpoint_id), method="PATCH", headers=headers,
-                  payload=restore_payload)
-        last = transport("%s/endpoints/%s" % (RUNPOD_REST_BASE, endpoint_id), method="GET", headers=headers)
+        transport(_endpoint_url(endpoint_id), method="PATCH", headers=headers,
+                  payload=_v2_workers(restore_payload))
+        last = _v1_view(transport(_endpoint_url(endpoint_id), method="GET", headers=headers))
         got = last.get("workersMax")
         if got == want_max:
             return {"workersMax": got, "workersMin": last.get("workersMin"),
@@ -1254,7 +1276,7 @@ def flush_worker_pool(endpoint_id: str, *, transport: "Callable[..., Any]", head
                                       poll_sleep=poll_sleep, timeout_s=quiesce_timeout_s,
                                       poll_interval_s=poll_interval_s)
     # 2) Record the live config AFTER quiesce, so the restore target is the real pre-drain state.
-    ep = transport("%s/endpoints/%s" % (RUNPOD_REST_BASE, endpoint_id), method="GET", headers=headers)
+    ep = _v1_view(transport(_endpoint_url(endpoint_id), method="GET", headers=headers))
     max_before = ep.get("workersMax")
     if max_before is None:
         raise RuntimeError("flush: endpoint %s has no workersMax; refusing to drain blind" % endpoint_id)
@@ -1265,8 +1287,8 @@ def flush_worker_pool(endpoint_id: str, *, transport: "Callable[..., Any]", head
     drained = False
     restore_info: dict | None = None
     try:
-        transport("%s/endpoints/%s" % (RUNPOD_REST_BASE, endpoint_id), method="PATCH", headers=headers,
-                  payload={"workersMax": 0, "workersMin": 0})
+        transport(_endpoint_url(endpoint_id), method="PATCH", headers=headers,
+                  payload=_v2_workers({"workersMax": 0, "workersMin": 0}))
         while True:
             health = transport("%s/%s/health" % (RUNPOD_RUN_BASE, endpoint_id), method="GET",
                                headers=headers)
@@ -1388,22 +1410,16 @@ def promote_image(image: str, *, endpoint_id: str = PROD_ENDPOINT_ID, api_key: s
         import time
         clock = time.monotonic
     headers = _auth_headers(key)
-    # 1) Resolve the endpoint's templateId at runtime (no hardcode), repin the TEMPLATE's imageName, and
+    # 1) Repin the ENDPOINT's image (v2: the endpoint carries it; a template edit would not reach it), and
     # read it back so a silent no-op (200 that did not take) fails the promote instead of faking success.
-    endpoint = transport("%s/endpoints/%s" % (RUNPOD_REST_BASE, endpoint_id), method="GET", headers=headers)
-    template_id = endpoint.get("templateId")
-    if not template_id:
-        raise RuntimeError("promote: endpoint %s has no templateId; cannot repin image" % endpoint_id)
-    transport("%s/templates/%s" % (RUNPOD_REST_BASE, template_id), method="PATCH", headers=headers,
-              payload={"imageName": image})
-    after = transport("%s/templates/%s" % (RUNPOD_REST_BASE, template_id), method="GET", headers=headers)
-    landed = after.get("imageName")
+    transport(_endpoint_url(endpoint_id), method="PATCH", headers=headers, payload={"image": image})
+    after = transport(_endpoint_url(endpoint_id), method="GET", headers=headers)
+    landed = (after or {}).get("image")
     if landed != image:
-        raise RuntimeError("promote read-back mismatch: template %s imageName=%r, expected %r"
-                           % (template_id, landed, image))
-    result = {"endpoint_id": endpoint_id, "template_id": template_id, "image": image,
-              "imageName": landed, "response": after}
-    # 2) The repin is on the template; recycle the running pool so the new image actually serves (#209).
+        raise RuntimeError("promote read-back mismatch: endpoint %s image=%r, expected %r"
+                           % (endpoint_id, landed, image))
+    result = {"endpoint_id": endpoint_id, "image": image, "imageName": landed, "response": after}
+    # 2) The repin lands on new workers; recycle the running pool so the new image actually serves (#209).
     restore_payload: dict | None = None
     try:
         if flush:

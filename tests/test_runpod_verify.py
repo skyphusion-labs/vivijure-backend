@@ -5,6 +5,7 @@ no-available-GPU no-spend abort."""
 import importlib.util
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -518,39 +519,35 @@ def test_run_verify_calls_on_pod_created_with_id():
     assert seen == ["pod-xyz"]                            # id captured for the always-run stop backstop
 
 
-def test_promote_image_repins_the_endpoints_template_not_the_endpoint():
+def test_promote_image_repins_the_endpoint_image_on_v2():
+    # fleet-chezmoi#2085: a v2 endpoint carries its own image and keeps no link to a template, so the
+    # repin is a PATCH of the ENDPOINT at /v2/serverless/{id}, then a read-back of that endpoint.
     calls = []
 
     def transport(url, *, method="PATCH", headers, payload=None):
         calls.append((method, url, payload))
-        if method == "GET" and "/endpoints/" in url:
-            return {"id": "t9wcvlxh8rc5la", "templateId": "tpl-1"}
-        if method == "PATCH" and "/templates/" in url:
+        if method == "PATCH" and url.endswith("/serverless/t9wcvlxh8rc5la"):
             return {}
-        if method == "GET" and "/templates/" in url:
-            return {"imageName": "ghcr.io/x:2"}  # read-back: repin took
+        if method == "GET" and url.endswith("/serverless/t9wcvlxh8rc5la"):
+            return {"id": "t9wcvlxh8rc5la", "image": "ghcr.io/x:2"}  # read-back: repin took
         raise AssertionError("unexpected promote call: %s %s" % (method, url))
 
     out = rv.promote_image("ghcr.io/x:2", endpoint_id="t9wcvlxh8rc5la", api_key="k-1",
                            transport=transport, flush=False, smoke=False)
-    # resolved the endpoint's template, then PATCHed the TEMPLATE image -- never the endpoint (that 400s)
-    assert ("GET", "https://rest.runpod.io/v1/endpoints/t9wcvlxh8rc5la", None) in calls
-    patch = [c for c in calls if c[0] == "PATCH"][0]
-    assert "/templates/tpl-1" in patch[1]
-    assert patch[2] == {"imageName": "ghcr.io/x:2"}
-    assert not any(m == "PATCH" and "/endpoints/" in u for m, u, _ in calls)
-    assert out["image"] == "ghcr.io/x:2" and out["template_id"] == "tpl-1"
-    assert out["imageName"] == "ghcr.io/x:2"
+    assert calls[0] == ("PATCH", "https://api.runpod.io/v2/serverless/t9wcvlxh8rc5la", {"image": "ghcr.io/x:2"})
+    assert calls[1] == ("GET", "https://api.runpod.io/v2/serverless/t9wcvlxh8rc5la", None)
+    assert not any("/templates/" in u for _, u, _ in calls)
+    assert {urlsplit(u).hostname for _, u, _ in calls} == {"api.runpod.io"}
+    assert out["image"] == "ghcr.io/x:2" and out["imageName"] == "ghcr.io/x:2"
+    assert "template_id" not in out
 
 
 def test_promote_image_raises_on_readback_mismatch():
     def transport(url, *, method="PATCH", headers, payload=None):
-        if method == "GET" and "/endpoints/" in url:
-            return {"templateId": "tpl-1"}
         if method == "PATCH":
             return {}
-        if method == "GET" and "/templates/" in url:
-            return {"imageName": "ghcr.io/x:OLD"}  # repin silently did not take
+        if method == "GET" and "/serverless/" in url:
+            return {"image": "ghcr.io/x:OLD"}  # repin silently did not take
         raise AssertionError("unexpected call")
 
     with pytest.raises(RuntimeError):
@@ -1017,28 +1014,30 @@ class _PromoteFake:
         self._status = list(status_seq or [{"status": "COMPLETED", "delayTime": 67300,
                                             "executionTime": 41000}])
         self.calls = []
-        self.endpoint_patches = []  # payloads sent to PATCH /endpoints/{id}, in order
+        self.endpoint_patches = []  # WORKER payloads sent to PATCH /v2/serverless/{id}, in order
+        self.image_patches = []     # IMAGE payloads sent to PATCH /v2/serverless/{id} (the promote repin)
 
     def _next(self, seq):
         return seq.pop(0) if len(seq) > 1 else seq[0]
 
     def __call__(self, url, *, method="GET", headers=None, payload=None):
         self.calls.append((method, url, payload))
-        if method == "GET" and url.endswith("/endpoints/%s" % self.endpoint_id):
-            return {"id": self.endpoint_id, "templateId": self.template_id,
-                    "workersMax": self.workers_max, "workersMin": self.workers_min}
-        if method == "PATCH" and url.endswith("/endpoints/%s" % self.endpoint_id):
+        if method == "GET" and url.endswith("/serverless/%s" % self.endpoint_id):
+            return {"id": self.endpoint_id, "image": self.image,
+                    "workers": {"max": self.workers_max, "min": self.workers_min}}
+        if method == "PATCH" and url.endswith("/serverless/%s" % self.endpoint_id):
+            if isinstance(payload, dict) and "image" in payload:
+                self.image_patches.append(payload)
+                self.image = payload["image"]
+                return {}
             self.endpoint_patches.append(payload)
-            # Mirror REST: PATCH updates the control-plane workersMax the next GET will read (#305).
-            if isinstance(payload, dict) and "workersMax" in payload:
-                self.workers_max = payload["workersMax"]
-            if isinstance(payload, dict) and "workersMin" in payload:
-                self.workers_min = payload["workersMin"]
+            # Mirror REST: PATCH updates the control-plane workers the next GET will read (#305).
+            workers = (payload or {}).get("workers") or {}
+            if "max" in workers:
+                self.workers_max = workers["max"]
+            if "min" in workers:
+                self.workers_min = workers["min"]
             return {}
-        if method == "PATCH" and "/templates/" in url:
-            return {}
-        if method == "GET" and "/templates/" in url:
-            return {"imageName": self.image}
         if method == "GET" and url.endswith("/%s/health" % self.endpoint_id):
             return {"workers": self._next(self._health)}
         if method == "POST" and url.endswith("/%s/run" % self.endpoint_id):
@@ -1068,8 +1067,8 @@ def test_promote_image_drains_restores_and_smokes_the_warm_pool():
     assert out["flush"]["quiesce"]["quiesced"] is True
     assert len(out["flush"]["quiesce"]["timeline"]) == 2
     # drained to zero, then workersMax restored to the recorded 14 (both endpoint PATCHes, in order)
-    assert fake.endpoint_patches[0] == {"workersMax": 0, "workersMin": 0}
-    assert fake.endpoint_patches[-1] == {"workersMax": 14, "workersMin": 0}
+    assert fake.endpoint_patches[0] == {"workers": {"max": 0, "min": 0}}
+    assert fake.endpoint_patches[-1] == {"workers": {"max": 14, "min": 0}}
     assert out["flush"]["drained"] is True
     assert out["flush"]["workers_max_before"] == 14
     assert len(out["flush"]["timeline"]) == 2  # one busy sample, one drained sample
@@ -1091,8 +1090,8 @@ def test_flush_worker_pool_restores_workers_max_on_drain_timeout():
                              headers={"Authorization": "Bearer k"}, clock=_mk_clock(step=1000.0),
                              poll_sleep=lambda _s: None, timeout_s=5.0)
     # restore ran in the finally: the LAST endpoint PATCH put workersMax back to 14, not left at 0
-    assert fake.endpoint_patches[0] == {"workersMax": 0, "workersMin": 0}
-    assert fake.endpoint_patches[-1] == {"workersMax": 14, "workersMin": 0}
+    assert fake.endpoint_patches[0] == {"workers": {"max": 0, "min": 0}}
+    assert fake.endpoint_patches[-1] == {"workers": {"max": 14, "min": 0}}
 
 
 def test_flush_worker_pool_restores_even_when_a_poll_raises():
@@ -1100,9 +1099,9 @@ def test_flush_worker_pool_restores_even_when_a_poll_raises():
     calls = {"n": 0}
 
     def transport(url, *, method="GET", headers=None, payload=None):
-        if method == "GET" and url.endswith("/endpoints/t9wcvlxh8rc5la"):
-            return {"templateId": "t", "workersMax": 14, "workersMin": 0}
-        if method == "PATCH" and url.endswith("/endpoints/t9wcvlxh8rc5la"):
+        if method == "GET" and url.endswith("/serverless/t9wcvlxh8rc5la"):
+            return {"workers": {"max": 14, "min": 0}}
+        if method == "PATCH" and url.endswith("/serverless/t9wcvlxh8rc5la"):
             transport.patches.append(payload)
             return {}
         if url.endswith("/health"):
@@ -1117,8 +1116,8 @@ def test_flush_worker_pool_restores_even_when_a_poll_raises():
         rv.flush_worker_pool("t9wcvlxh8rc5la", transport=transport,
                              headers={"Authorization": "Bearer k"}, clock=_mk_clock(),
                              poll_sleep=None, timeout_s=100.0)
-    assert transport.patches[0] == {"workersMax": 0, "workersMin": 0}
-    assert transport.patches[-1] == {"workersMax": 14, "workersMin": 0}  # restored despite the fault
+    assert transport.patches[0] == {"workers": {"max": 0, "min": 0}}
+    assert transport.patches[-1] == {"workers": {"max": 14, "min": 0}}  # restored despite the fault
 
 
 def test_flush_worker_pool_refuses_to_drain_without_a_recorded_workers_max():
@@ -1126,8 +1125,8 @@ def test_flush_worker_pool_refuses_to_drain_without_a_recorded_workers_max():
     def transport(url, *, method="GET", headers=None, payload=None):
         if url.endswith("/health"):
             return {"workers": {"running": 0}}  # quiesced, so the blind-drain guard is what fires
-        if method == "GET" and url.endswith("/endpoints/e"):
-            return {"templateId": "t"}  # no workersMax
+        if method == "GET" and url.endswith("/serverless/e"):
+            return {"id": "e"}  # no workers.max
         raise AssertionError("must not PATCH before knowing workersMax: %s %s" % (method, url))
 
     with pytest.raises(RuntimeError, match="no workersMax"):
@@ -1208,14 +1207,14 @@ def test_restore_endpoint_workers_retries_until_readback_matches():
     state = {"max": 0, "patches": 0}
 
     def transport(url, *, method="GET", headers=None, payload=None):
-        if method == "PATCH" and "/endpoints/" in url:
+        if method == "PATCH" and "/serverless/" in url:
             state["patches"] += 1
             # First PATCH is a no-op on the lying control plane; second lands.
             if state["patches"] >= 2:
-                state["max"] = payload["workersMax"]
+                state["max"] = payload["workers"]["max"]
             return {}
-        if method == "GET" and "/endpoints/" in url:
-            return {"workersMax": state["max"], "workersMin": 0}
+        if method == "GET" and "/serverless/" in url:
+            return {"workers": {"max": state["max"], "min": 0}}
         raise AssertionError("unexpected %s %s" % (method, url))
 
     out = rv.restore_endpoint_workers(
@@ -1250,7 +1249,7 @@ def test_smoke_retries_endpoint_paused_then_completes():
     assert out["status"] == "COMPLETED"
     assert out["paused_recoveries"] == 1 and out["submit_attempts"] == 2
     # re-restore PATCHed workersMax back to 8
-    assert {"workersMax": 8, "workersMin": 0} in fake.endpoint_patches
+    assert {"workers": {"max": 8, "min": 0}} in fake.endpoint_patches
 
 
 def test_promote_image_surfaces_partial_pin_when_smoke_stays_paused():
@@ -1270,6 +1269,6 @@ def test_promote_image_surfaces_partial_pin_when_smoke_stays_paused():
                          poll_sleep=lambda _s: None)
     err = ei.value
     assert err.partial["imageName"] == "ghcr.io/x:2"
-    assert err.partial["template_id"] == "tpl-1"
+    assert "template_id" not in err.partial
     assert "flush" in err.partial
 

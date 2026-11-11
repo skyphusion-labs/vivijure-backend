@@ -48,9 +48,10 @@ def _args(**overrides):
 
 # ----------------------------------------------------------------- the endpoint
 
-def test_the_api_base_is_v1():
-    """/v2 is not an API path. It 301s to docs.runpod.io, so every call failed."""
-    assert bake.API == "https://rest.runpod.io/v1"
+def test_the_api_base_is_v2_on_its_own_host():
+    """fleet-chezmoi#2085: REST v1 retired 2026-11-15. v2 is api.runpod.io, not the v1 host with /v2
+    (that path 301s to docs.runpod.io, measured 2026-10-19)."""
+    assert bake.API == "https://api.runpod.io/v2"
 
 
 def test_a_redirect_is_never_followed():
@@ -78,48 +79,46 @@ def test_every_request_names_the_client():
 
 # --------------------------------------------------------------- the pod body
 
-def test_body_is_a_cpu_pod_in_live_field_names():
+def test_body_is_a_cpu_pod_in_v2_field_names():
     body = bake.create_body(_args())
-    assert body["computeType"] == "CPU"
-    assert body["cloudType"] == "SECURE"
-    assert body["cpuFlavorIds"] == [bake.CPU_ID]
-    assert body["vcpuCount"] == bake.VCPU_COUNT
-    assert body["imageName"] == bake.BUILDER_IMAGE
-    assert body["containerDiskInGb"] == 40
+    assert body["cloud"] == "SECURE"
+    assert body["cpu"] == {"id": bake.CPU_ID, "vcpuCount": bake.VCPU_COUNT}
+    assert body["image"] == bake.BUILDER_IMAGE
+    assert body["disk"] == 40
     assert body["ports"] == []
-    assert body["dockerEntrypoint"] == ["/busybox/sh", "-c"]
-    assert "BAKE_OK digest=" in body["dockerStartCmd"][0]
-    assert "not-a-real-token" not in body["dockerStartCmd"][0]
-    assert "$GHCR_TOKEN" in body["dockerStartCmd"][0]
+    assert body["entrypoint"] == ["/busybox/sh", "-c"]
+    assert "BAKE_OK digest=" in body["cmd"][0]
+    assert "not-a-real-token" not in body["cmd"][0]
+    assert "$GHCR_TOKEN" in body["cmd"][0]
 
 
-def test_body_uses_no_field_the_api_rejects():
-    """These five keys were in the first version. The API refuses all of them."""
+def test_body_uses_no_v1_field_name():
+    """v2 renamed every one of these; a v1 name in a v2 body is at best ignored."""
     body = bake.create_body(_args())
-    for dead in ("disk", "args", "cloud", "cpu", "image"):
-        assert dead not in body, "%r is not in the v1 input schema" % dead
+    for dead in ("computeType", "cloudType", "cpuFlavorIds", "vcpuCount", "imageName",
+                 "containerDiskInGb", "volumeInGb", "dockerEntrypoint", "dockerStartCmd"):
+        assert dead not in body, "%r is a v1 field name" % dead
 
 
 def test_body_never_lets_the_gpu_default_through():
-    """computeType defaults to GPU, so omitting it rents a $2.49 per hour pod."""
+    """On v1 an incomplete body rented a $2.49 per hour GPU pod. v2: the cpu object is always sent."""
     for body in (bake.create_body(_args()), bake.selftest_body("n")):
-        assert body.get("computeType") == "CPU"
-        assert "gpuTypeIds" not in body
-        assert "gpuCount" not in body
+        assert isinstance(body.get("cpu"), dict) and body["cpu"]["id"] == bake.CPU_ID
+        assert "gpu" not in body
 
 
 def test_no_volume_is_attached_so_terminate_ends_the_bill():
-    """volumeInGb defaults to 20, which is a billed pod volume."""
+    """A v2 pod's only extra storage is `mounts`; with none, terminate ends the bill."""
     for body in (bake.create_body(_args()), bake.selftest_body("n")):
-        assert body["volumeInGb"] == 0
+        assert "mounts" not in body and "volumeInGb" not in body
         assert "networkVolumeId" not in body
 
 
 def test_selftest_body_is_the_cheapest_pod_and_carries_no_registry_token():
     body = bake.selftest_body("bake-selftest")
-    assert body["imageName"] == bake.SELFTEST_IMAGE
-    assert body["vcpuCount"] == 2
-    assert body["containerDiskInGb"] == bake.DISK_MIN
+    assert body["image"] == bake.SELFTEST_IMAGE
+    assert body["cpu"]["vcpuCount"] == 2
+    assert body["disk"] == bake.DISK_MIN
     assert body["env"] == {}
 
 
@@ -262,7 +261,7 @@ def test_terminate_does_not_believe_the_delete_response(monkeypatch):
         calls.append((method, path))
         if method == "DELETE":
             return 200, "{}"
-        return 200, json.dumps({"desiredStatus": "RUNNING"})
+        return 200, json.dumps({"status": "RUNNING"})
 
     monkeypatch.setattr(bake, "_request", fake)
     monkeypatch.setattr(bake.time, "sleep", lambda _s: None)
@@ -284,7 +283,7 @@ def test_terminate_confirms_on_a_terminated_status(monkeypatch):
     def fake(method, path, token, body=None):
         if method == "DELETE":
             return 200, "{}"
-        return 200, json.dumps({"desiredStatus": "TERMINATED"})
+        return 200, json.dumps({"status": "TERMINATED"})
 
     monkeypatch.setattr(bake, "_request", fake)
     assert bake.terminate("pod-1", "t") == (True, True)
@@ -294,7 +293,7 @@ def test_a_refused_delete_is_reported_as_not_accepted(monkeypatch):
     def fake(method, path, token, body=None):
         if method == "DELETE":
             return 500, "boom"
-        return 200, json.dumps({"desiredStatus": "RUNNING"})
+        return 200, json.dumps({"status": "RUNNING"})
 
     monkeypatch.setattr(bake, "_request", fake)
     monkeypatch.setattr(bake.time, "sleep", lambda _s: None)
@@ -435,16 +434,31 @@ def test_pods_named_is_empty_on_a_non_200(monkeypatch):
     assert bake.pods_named("bake-1", "t") == []
 
 
-def test_pods_named_url_encodes_the_name(monkeypatch):
-    seen = {}
+def test_pods_named_walks_every_page_and_matches_the_name_locally(monkeypatch):
+    """v2 cannot filter pods by name (its filters are tags), so every page is read and the name is
+    matched row by row. The name never goes into the URL."""
+    seen = []
 
     def fake(method, path, token, body=None):
-        seen["path"] = path
-        return 200, "[]"
+        seen.append(path)
+        if "cursor=" not in path:
+            return 200, json.dumps({"pods": [{"id": "a", "name": "other"}],
+                                    "pagination": {"nextCursor": "c 2", "hasNextPage": True}})
+        return 200, json.dumps({"pods": [{"id": "mine", "name": "bake 1&x=2"}],
+                                "pagination": {"nextCursor": None, "hasNextPage": False}})
 
     monkeypatch.setattr(bake, "_request", fake)
-    bake.pods_named("bake 1&x=2", "t")
-    assert " " not in seen["path"] and "&" not in seen["path"].split("name=")[1]
+    assert bake.pods_named("bake 1&x=2", "t") == ["mine"]
+    assert seen == ["/pods?limit=1000", "/pods?limit=1000&cursor=c%202"]
+    assert all("bake" not in p for p in seen)
+
+
+def test_pods_named_refuses_a_list_that_claims_more_with_no_cursor(monkeypatch):
+    def fake(method, path, token, body=None):
+        return 200, json.dumps({"pods": [], "pagination": {"nextCursor": None, "hasNextPage": True}})
+
+    monkeypatch.setattr(bake, "_request", fake)
+    assert bake.pods_named_detail("bake-1", "t").answered is False
 
 
 def test_reap_takes_a_name_when_there_is_no_id(monkeypatch):
@@ -625,8 +639,8 @@ def test_a_match_is_still_reaped_alongside_every_rejection_kind(monkeypatch):
 
 CANARY = "ghs_CANARY_do_not_print_me"
 FAT_ROW = {
-    "name": "bake-99", "desiredStatus": "RUNNING", "costPerHr": 0.12,
-    "containerDiskInGb": 120,
+    "name": "bake-99", "status": "RUNNING", "cost": 0.12,
+    "disk": 120,
     "env": {"GHCR_TOKEN": CANARY, "BAKE_REPO": "o/r"},
     "dockerStartCmd": ["sh", "-c", "auth=$(printf %s:%s $GHCR_USER " + CANARY + ")"],
     "machineId": "mach-1", "publicIp": "203.0.113.9",
@@ -639,8 +653,8 @@ def test_pod_summary_renders_only_the_allowlisted_fields():
     for leaky in (CANARY, "GHCR_TOKEN", "env", "machineId", "mach-1", "203.0.113.9",
                   "dockerStartCmd"):
         assert leaky not in line, "%r reached the summary" % leaky
-    assert "desiredStatus='RUNNING'" in line
-    assert "costPerHr=0.12" in line
+    assert "status='RUNNING'" in line
+    assert "cost=0.12" in line
 
 
 def test_the_matched_no_id_branch_never_prints_the_row(capsys):
