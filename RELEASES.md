@@ -73,7 +73,7 @@ weight-digest miss). Superseded by the 2026-07-22 line above.
 next release tag is `backend-v0.4.8`, NOT `backend-v0.4.5` (0.4.5 / 0.4.6 / 0.4.7 are taken).
 (Historical; superseded by the 2026-07-15 line above.)
 
-**The 1.1.x line is GHCR tags only, with no git tag (2026-11-04 to 2026-11-06, 1.1.5 through 1.1.12).** These images are thin builds made
+**The 1.1.x line is GHCR tags only, with no git tag (2026-11-04 to 2026-11-11, 1.1.5 through 1.1.19).** 1.1.19 is the first of the line with an assembled CHANGELOG section (`[1.1.19]`, which covers everything since 1.0.16). Like the others it gets no `backend-v1.1.19` tag: `release.yml` is disabled and fails closed (it needs a GPU runner), so a tag push builds nothing. These images are thin builds made
 on the Vultr bake box ([docs/bake-box.md](docs/bake-box.md)), because Actions does not start jobs on this account. Each pushes
 `vivijure-backend:<X.Y.Z>` from the box and is pinned by digest.
 

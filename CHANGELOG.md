@@ -11,6 +11,16 @@ folded into a release section by `scripts/changelog-assemble.py` when the releas
 
 ## Unreleased
 
+## [1.1.19] -- 2026-11-11
+
+This is the first assembled section since 1.0.16. The images 1.1.0 to 1.1.18 were published to GHCR with no git tag and no CHANGELOG section (RELEASES.md, "The 1.1.x line"), so every change merged since 1.0.16 is listed here, including the endpoint records of those images. New in the 1.1.19 image against 1.1.18: the `src/` changes merged after GHCR made 1.1.18 (2026-11-06 22:39:39Z; its exact commit is not recorded, so this is by merge time):
+- the keyframe reuse hash covers the LoRA bound to each slot (#612);
+- a warm worker swaps its keyframe base instead of refusing the job (#614);
+- finish stops writing the unread finished-clip pointer (#621);
+- a bundle accepts only regular files and directories (#624).
+
+Repo tooling, not in the image: deploy, promote and the image bake use RunPod REST v2 (fleet-chezmoi#2085), an endpoint create sends its routing type, and a promote names its endpoint with no default (#629).
+
 **Fix: promote proof uses tenant-scoped verify bundle key.**
 
 `SMOKE_BUNDLE_KEY` was `bundles/verify-smoke/...`. Serverless `_job_bundle_key`
@@ -22,6 +32,548 @@ Stops Dependabot re-proposing the bump that broke Wan i2v in 1.0.15 (see the 1.0
 below). `deploy/smoke_imports.py` now also lists `torchao`, and `tests/test_torchao_pin.py`
 covers the pin, the Dependabot ignore and the smoke-import list. Merged after the
 `backend-v1.0.16` tag.
+
+**Fix: deploy, promote and image-bake move to RunPod REST v2 (fleet-chezmoi#2085).**
+
+RunPod REST v1 retired on 2026-11-15. v2 lives on its own host, `https://api.runpod.io/v2`, and every list there is cursor-paginated.
+
+- **`deploy.sh` creates or updates one endpoint, with no template.** On v2 an endpoint carries its own `image`, `env` and `disk`; a v2 template is applied once at create and keeps no link to the endpoint. The script finds the endpoint by name across every page, then PATCHes or POSTs `/v2/serverless`.
+  - GPUs are chosen by `gpu.pools`. `GPU_TYPE_IDS` still works, mapped to pools from RunPod's GPU catalog; the new `GPU_POOLS` names pools directly.
+  - `EXECUTION_TIMEOUT_MS` blank now means one hour. v2 has no "no limit", and its own default is far shorter than a render.
+  - `flashboot` is set to `FLASHBOOT`. A leftover `<name>-template` from an older deploy is no longer used.
+- **`deploy/runpod_verify.py`:** promote re-pins the ENDPOINT image and reads it back. Flush and restore PATCH `workers.max` and `workers.min` on `/v2/serverless/{id}`.
+- **`scripts/runpod_image_bake.py`:** the CPU pod body uses v2 names (`cpu`, `image`, `disk`, `entrypoint`, `cmd`). A pod's state is read from `status`. Pods-by-name lists every page and matches the name locally, because v2's filters are tag-based.
+- **`deploy.env.example`:** `GPU_TYPE_IDS` is quoted. Unquoted, the file stopped `deploy.sh` with "command not found" when it was sourced.
+- `tests/test_no_rest_v1_2085.py` fails if a shipped file names the v1 host again.
+
+**Fix: `deploy.sh` sends the v2 routing type on a first create (fleet-chezmoi#2085).**
+
+A v2 endpoint create requires `type` (`QUEUE` here), along with `name` and `scaling`, so the first run of `deploy.sh` on an account with no endpoint was refused. The create body now carries it. The in-place update takes no type and is unchanged.
+
+**Fix: `finish_clip` writes to the `output_key` it is given (vivijure-core#379).**
+
+One film can no longer replace another film's finished clip, once core sends a film-scoped key. With no `output_key` the shared per-project key is used, as before. A key that is not an `.mp4` under this project's `clips/` is logged and the shared key is used, so the job does not fail.
+
+`docs/runpod-endpoint-config.md` records the live pools and their serverless prices.
+
+**Fix: the network-volume readiness gate asks what THIS job needs, and names what it found (#453).**
+
+`_resolve_volume` required both the base and the i2v sentinel unconditionally. Conrad retired the
+local i2v path on 2026-09-26, so a volume preloaded with the honest post-ruling corpus (keyframes,
+no Wan; the i2v repos were 60% of the 107.8 GB weight set) has no i2v sentinel. That volume was
+therefore refused on every call, forever: no error, every worker falling back to the R2 mirror, and
+the only symptom a cold-start cost that reads as a volume nobody configured.
+
+The i2v sentinel is now required only when the job's action can actually reach the Wan i2v stage
+(`models_mirror.i2v_stage_possible`, fed by `handler` from the job's own action; no new endpoint
+knob). The base sentinel is still always required, and a volume missing a sentinel the job NEEDS
+still degrades WHOLESALE to the R2 mirror rather than being repointed -- the guard against a
+half-preloaded volume producing mysterious i2v failures is unchanged, only its premise moved.
+
+`_resolve_volume` now returns a named `VolumeState` (`ABSENT`, `READY`, `READY_NO_I2V`,
+`INCOMPLETE`) instead of a bare bool, so a monitor can tell "the i2v corpus was deliberately
+retired" from "the preload did not finish" without parsing the log line; the two are identical on
+disk and used to render as one reassuring reading. The structured skip event carries the same
+split (`"reason": "volume"` vs `"reason": "volume_no_i2v"`).
+
+Because readiness is now a per-job question while the `HF_HOME` / `VJ_MODELS_ROOT` repoint is
+process-global, a decline also takes back a repoint an earlier job on the same warm worker made;
+otherwise a `render` following a `preview` would inherit the keyframe-only volume, skip the R2 pull
+and try to mirror Wan onto the shared volume at i2v time.
+
+NOT settled here, and it needs spend, not code: whether a RunPod global network volume preserves
+the symlinks the HF cache corpus is built from (`deploy/bake_layers.py`). The vendor docs enumerate
+the POSIX semantics a network volume lacks and say nothing about symlinks. That needs one real
+volume and one probe; tracked on `skyphusion-labs/fleet-chezmoi#2087`.
+
+**Fix: `R2.exists()` returns False only for a real not-found (#460).**
+
+It caught every `ClientError` and returned False, so an authorization or expired-credential error
+read as "object absent". Now only `404`, `NoSuchKey` and `NotFound` return False; any other error
+propagates out of `exists()`. Classification is duck-typed on `ClientError.response`, so no botocore
+import is needed.
+
+**Fix: `finish_clip` forwards its Deadline to `run_finish_job` (#462).**
+
+`handler()` built the Deadline and checked it before dispatch but did not pass it on, so the
+fetch, upload and in-engine checks in `run_finish_job` were skipped and a stalled encode was bounded
+only by the platform ceiling. The Deadline is now forwarded.
+
+**Fix: a stored LoRA the planner counts as trained is now staged for keyframing (#464).**
+
+The planner skips training a slot whose adapter exists at `lora_key(project, slot)`, but only
+`pretrained_loras` were staged into the pipeline, so on a later render the stored adapter was
+counted as reused and never loaded. `run_job` now stages those stored adapters (SDXL family only)
+when a keyframe will be drawn; an unfetchable adapter fails fast. A `pretrained_loras` entry for
+the same slot supersedes the stored one.
+
+**Fix: `face_restore: true` selects the default backend in `finish_clip` (#466).**
+
+The backend name was derived with `str(cfg.get("face_restore") or "gfpgan")`, so `true` became
+`"True"` and `FaceRestore("true")` raised `ValueError`. Only a string now names a backend; `true`
+selects the default (`gfpgan`). The off values (`None`, `False`, `"none"`, `""`) still disable it.
+
+**Fix: a failed standalone job is recorded on the progress channel (#468).**
+
+`run_finish_job` and `run_i2v_clip_job` now record the failure (`progress.error(<action>, e)`, then
+re-raise), matching `run_job`. Previously a failed standalone job left the snapshot at `running`.
+The wall-clock degrade path (`FinishDeadlineExceeded`) is unchanged and still ends `complete`.
+
+**Fix: `face_restored` is reported only when a frame was actually restored (#470).**
+
+`finish_clip` set it True unconditionally, even when the restorer failed on every frame (each
+failure passes the raw frame through by design), so the result, `applied` list and regression
+checks claimed a restore that did not happen. `face_restored` is now true only if at least one
+frame was restored, and an all-failed clip prints an `@event face_restore_degraded` line. Per-frame
+best-effort behaviour is unchanged.
+
+**Fix: a stored-state existence error aborts the job instead of retraining (#475).**
+
+Since #460 `R2.exists()` raises on anything but a real not-found, but `_restore_prior_state` still
+absorbed the error and treated it as "nothing stored", so every LoRA was retrained and every
+keyframe redrawn on a paid GPU before the same error failed the final upload. Any store error
+during the existence probes now fails the job with a `HarnessError` before GPU work starts; a
+genuine not-found still restores to empty and renders fresh. Failing to fetch a keyframe or its
+hash sidecar after existence is confirmed keeps its best-effort behaviour (regenerate).
+`docs/operations.md` and `docs/architecture.md` updated to match.
+
+**Fix: `finish_clip` and `i2v_clip` use the process-global ModelServer; a diverging `i2v_clip` model config is now refused (#476).**
+
+`run_finish_job` and `run_i2v_clip_job` built a fresh `ModelServer()` per job, so a warm worker
+reloaded its models on every standalone job (paid GPU time), and `i2v_clip` ignored its
+`config.model` / `distill_model`. Both now take the warm process-global server via
+`worker.standalone_server()`. `i2v_clip`'s model config now takes effect on a cold worker.
+
+**Behaviour change, an `i2v_clip` that used to succeed now fails.** On a warm worker whose loaded
+i2v models differ from the job's `config.model` / `distill_model`, the job is refused with
+`ModelDivergenceError`, the same refusal a render already got. Previously the foreign
+`config.model` was silently ignored and the clip rendered on the loaded set. A refusal the caller
+sees is deliberate: it beats a substitution the caller cannot see. Likewise a job-supplied i2v repo
+id now passes `validate_repo_id` before use, so an invalid id is rejected where it used to be
+parsed and dropped. `finish_clip` names no models and just reuses the singleton.
+
+**Fix: `kf_hash` covers scheduler, identity scales, distill and distill_model (#479).**
+
+`kf_hash` omitted `scheduler`, `ip_adapter_scale`, `instantid_ip_adapter_scale`, `distill` and
+`distill_model`. Each changes the drawn keyframe (or the few-step path that draws it), so changing
+only one of them reused the old PNG; `distill=False, steps=8` and `distill=True, distill_steps=8`
+also hashed the same. All five are now in the hash.
+
+**One-time cost.** The hash payload changed, so every keyframe cached before this change no longer
+matches and is redrawn once on its next render (GPU seconds, once per cached shot). The bound
+character LoRA is still not in the hash (#478).
+
+**Fix: a still is redrawn when the character LoRA bound to its slot changes (#478)**
+
+The keyframe reuse hash (`kf_hash`) covered the render params, the prompts and the cast, but not which LoRA each slot binds. So a shot drawn with one adapter was reused after `pretrained_loras` repointed that slot, or after a LoRA was added or removed. Now `kf_hash` takes `bound_loras`, a `{slot: adapter key}` map, narrowed to the shot's own slots. A new helper, `bound_lora_keys`, builds it once: `pretrained_loras` first, then the project key for a slot trained this run or reused from R2. The planner hashes with it and stores it on the plan (`RenderPlan.bound_loras`), and the pipeline's sidecar writer reads it from there, so the hash a still is stored with and the hash it is checked against cannot differ. A still with no LoRA bound for its slots keeps its exact old hash (pinned against main), so it stays reusable. A still drawn with a LoRA before this change is redrawn once. Limit, accepted: a retrain at the same key is not seen, because the key is unchanged. Use a new project or new shot ids to redraw after a retrain.
+
+**Fix: `regen_shot` trains no LoRAs, per the contract (#482).**
+
+`docs/contract.md` says `regen_shot` trains no LoRAs, but the planner trained every slot that was
+neither pretrained nor already trained, on a paid GPU, before redrawing keyframes. It now zeroes
+`to_train` for `regen_shot` (as it already does for `finalize`) and records the skip.
+
+**Behaviour change.** A `regen_shot` on a project whose slot has no adapter available now draws
+that shot without the character LoRA (IP-Adapter identity fallback, recorded on the
+`keyframe_done` event) instead of training one first. A LoRA trained by an earlier render is used
+as before.
+
+**Fix: `ensure_models` carries the network-volume repoint to the real environment (#484).**
+
+`ensure_models` repointed `VJ_MODELS_ROOT` and `HF_HOME` on a copy of the environment, so the
+deferred model loads (which read `HF_HOME` at call time) never used the volume. When a volume
+resolves, both keys are now written back to the environment it was asked to use (the caller's dict
+when `env` is passed, `os.environ` otherwise). No change when no volume resolves; latent today
+because no endpoint sets `VJ_VOLUME_ROOT`.
+
+**Fix: `deploy.sh` first-time create reads the created template and endpoint ids (#486).**
+
+The template and endpoint POSTs ran `rp` in a pipeline subshell, so its `RP_BODY` assignment was
+lost and `json_field id` read the previous call's body; a first-time create died with "could not
+determine the template id" right after creating the template. Both POSTs now run `rp` in the
+current shell. PATCH branches are unchanged.
+
+**Fix: a still with no hash is redrawn, never reused (#488).**
+
+A job used to reuse any still at the flat key that had no hash sidecar.
+film-a9939630 asked for SDXL, drew nothing, and returned a cloud door's stills as COMPLETED.
+Reuse now needs a matching hash.
+Old GPU stills with no sidecar are redrawn once.
+A reused still is reported with `reused: true`, so the studio can stop stamping it.
+
+**Fix: an unreadable keyframe hash sidecar no longer reads as "no sidecar" (#491).**
+
+`_restore_prior_state` read each stored keyframe's `.hash` sidecar inside a bare `except`, so a 403,
+an expired credential, a throttle or a transport error stored `None`, which the planner reads as
+"reuse the cached keyframe conservatively": a keyframe drawn with different parameters was served
+as current. Only a real not-found (the classification `R2.exists()` uses, now `is_not_found`)
+still means "no sidecar". Any other error now raises `HarnessError`, so the job fails before GPU
+work, as the LoRA and keyframe existence checks already do (#460, #475). Behaviour change: a render
+whose sidecar read fails with anything but not-found previously succeeded (with a possibly stale
+keyframe) and now fails.
+
+**Feat: hosted keyframes are full-step 1280x720 InstantID stills.**
+
+The still the movie keeps is no longer an 8-step square. `KeyframeParams` and
+`KeyframeConfig` (standard and final) are 30 steps, guidance 5.0, 1280x720, InstantID.
+Draft stays the 4-step opt-in. One person takes InstantID even when scene lock is on.
+Two people stay on masked IP-Adapter. A `lora_only` still is refused before it is saved.
+The bake manifest drops Wan2.2-I2V and Wan2.2-Lightning. The image-to-video code path
+stays; this change does not rebuild the image. A baked image that does not hold the
+selected image-to-video repo pulls it from the model mirror before the offline load.
+
+### Fixed
+
+- `bake`: the pod reap no longer reports success for any listing that cannot
+  establish what is running. "Nothing is running", "pods came back and none
+  matched", and "the listing failed" had the same shape and the same exit code;
+  only the first may report success. A failed listing is the likelier of the two
+  unanswerable cases, since a 429 or 5xx on a list endpoint is ordinary.
+- `bake`: each rejection reason is reported separately, because one counter made
+  four different facts print one sentence and in one reachable case that sentence
+  was false. A pod carrying the name we asked for but no usable id is not a
+  name-filter problem; it is the pod we wanted, arriving unaddressable.
+- `bake`: a row with a real, different name is reported as the measurement it is.
+  It can only come back if RunPod's `name` filter is not exact, which is the
+  question a live read could not settle against an empty account.
+- `bake`: a pods listing that is a bare `null`, number, boolean or non-JSON body
+  no longer raises `TypeError` out of the reap. Inside `run()`'s `finally` that
+  exception replaced the one that sent us there, so a create timeout was reported
+  as a complaint about iteration.
+- `bake`: the reap never renders a pod row. A Pod response carries 34 properties
+  including `env`, and the branch that printed a row fires only for a row whose
+  name is ours, so it was the one branch guaranteed to print our own bake pod and
+  its `GHCR_TOKEN`. It now prints an allowlist of identifying fields, so a new
+  response property cannot leak by default.
+- `bake`: a dict listing body with no `pods` list is no longer read as an empty
+  account. That branch exists to survive a response-shape change, and reading a
+  missing key as `[]` was the one way it would survive one by reporting that
+  nothing is running.
+
+**Feat: anime stills may use Animagine XL 4.0 (#524).**
+
+A job may set the keyframe base to `cagliostrolab/animagine-xl-4.0`.
+The allowlist accepts that namespace.
+LoRA train uses the job base.
+A missing checkpoint fails with a clear error.
+Animagine stays out of the default bake.
+
+**Fix: anime `final` no longer auto-enables GFPGAN (#526).**
+
+`FinishConfig.for_tier(final)` still turns GFPGAN on for photoreal.
+Anime reads `style` from the finish or keyframe override.
+No restorer pick keeps restore off.
+An explicit restorer still wins.
+
+**Fix: scene-lock Canny loads from a local snapshot and moves to CUDA (#528).**
+
+`bake_hf_configs` writes a Canny config snapshot and can point `refs/main` at it.
+`from_pretrained(..., local_files_only=True)` then raises `OSError` even when the
+weight snapshot is on disk, or when only the stub is present.
+The loader now picks a snapshot that holds tensors.
+It loads from that path, not the hub id.
+It then moves the ControlNet to CUDA.
+If no tensors exist, it pulls `xinsir/controlnet-canny-sdxl-1.0` from the model
+mirror, then from Hub.
+`scene_lock` stays on. Off remains a debug hatch.
+
+**Feat: thin image reads stills from a global volume (#530).**
+
+The keyframe worker skips the bake and the cold pull.
+A mounted `/runpod-volume` is the default weight root.
+`VJ_VOLUME_KIND=global` refuses first-worker lock.
+`--preload --stills --flatten` stages the base set as real files.
+`deploy/Dockerfile.thin` FROMs the toolchain stage only.
+This PR does not create, fill, or attach a volume.
+
+**Feat: thin keyframe image builds on GitHub Actions (#530).**
+
+The bake job stays disabled.
+`thin-image.yml` builds `--target toolchain` and `Dockerfile.thin`.
+It pushes to GHCR.
+It does not pull the seed.
+It does not need a GPU runner.
+
+**Fix: concurrent renders of one project keep their own keyframes (#534).**
+
+A render now writes `renders/<project>/keyframes/<job_id>/<shot>.png`.
+Reuse now reads `<shot>.latest.json`, one object with the key and the param hash.
+A reused still is copied to the new job's key.
+A project from before this change is still read from the flat key.
+Nothing new is written at the flat key.
+This needs vivijure-core 1.27.0 for `own-gpu` clip submits and lost-poll recovery.
+
+**Fix: stills load from container disk, and say what they are loading.**
+
+A stills job on a global volume now copies the weights it reads to container disk once per worker.
+The volume read was about 26 MB/s, and one job read the UNet twice.
+Each file reports its MB/s.
+Each model load now emits `load_start`, `load_heartbeat` and `load_done` with elapsed seconds.
+
+**Feat: a stills job pulls only what it loads.**
+
+`preview`, `regen_shot` and `train_lora` now pull 25.75 GB from R2 instead of 52.29 GB, plus `antelopev2`.
+The list is `harness/stills_manifest.json`, by exact blob at the pinned revisions.
+The volume hydrate reads the same list.
+A missing file fails the job at the mirror, naming the file.
+Other actions keep the full mirror. `VJ_STILLS_MIRROR=0` restores it for all.
+
+**Fix: a cold `finish_clip` job pulls only the models its step loads, and a finished pull no longer costs the job.**
+
+A RIFE step now pulls the 11.6 MiB `rife` leg instead of 53 GB. Each pulled leg has its own sentinel, so a warm worker does not copy it again, and a later job that needs the rest still pulls the rest.
+The mirror has its own budget, `VJ_FINISH_MIRROR_MAX_SECONDS` (default 120). The 420 s budget starts when the mirror returns.
+A hung `rclone` is killed at the mirror budget and the job soft-degrades at stage `model_mirror`.
+
+**Fix: a warm worker swaps to a job's keyframe base instead of refusing it, and a base not on disk no longer poisons the worker (#559).**
+
+The process-global `ModelServer` froze the first job's keyframe base, so `_check_model_divergence`
+refused every later job with another `style` or `base_model` for the life of the worker. A cold
+anime job (animagine is not on the GPU image, #557) also failed on missing weights while leaving
+its spec loaded, so that worker then refused every photoreal job after it.
+
+`build_pipeline` now calls `ModelServer.swap_keyframe_specs` first. A new base that is on local disk
+swaps in: only the `keyframe` and `instantid` pipes are dropped, they reload on the next draw, and
+`@event keyframe_model_swap` names the change. A new base that is not on disk raises the existing
+missing-weights error before anything changes, so the loaded pipes stay warm. The repo id is
+validated before either. An i2v divergence is still refused with `ModelDivergenceError`.
+
+**Cost:** one SDXL base reload from local disk per change of base on a warm worker, where the job
+used to be refused.
+
+### fix(mirror): the main model pull has a deadline on every action
+
+A cold worker pulled 26 GB for up to 2618 s on the GPU clock, with only the endpoint's 3600 s job timeout to end it. The pull in `ensure_models` outside `finish_clip` now has a budget, `VJ_MIRROR_MAX_SECONDS`, default 3000 s. Past it rclone is killed, the job fails by name, and the worker goes free.
+
+Not covered: `ensure_i2v_models`, `ensure_hub_repos` and the volume self-preload have no deadline.
+
+### feat(bake): a stills weights base, so a cold keyframe worker pulls nothing
+
+A cold keyframe worker pulled the stills set, 26.22 GB, from R2 inside the handler: 104 to 2618 s on the GPU clock per worker, about 20 minutes per job when 15 pulled at once, and again after every release. RunPod pulls image layers before a worker starts, and does not bill that. So the stills set and the finish legs now go into a weights base image below the code layer (`deploy/stills-weights.Dockerfile`, runbook `docs/stills-weights-base.md`). A code-only release changes only the code layer.
+
+`python -m vivijure_backend.harness.models_mirror --stage-stills` fills the tree with the worker's own pull and checks it; `--check-stills` checks a built image. The base carries no `.vj-baked`, so any action other than a stills job or a finish step still pulls what it needs. The warm stills path now checks the files behind its sentinel before it skips, and pulls again if one is missing.
+
+Nothing changes on the endpoint until a base is built and a code image on it is pinned.
+
+### fix(mirror): a model pull is killed on a stall, and reports progress while it runs
+
+The pull budget (#564) bounds a whole pull, so it cannot tell a slow pull from a hung one: a hung pull held its GPU until the 3000 s budget, about $2.90. Every model pull now also ends when rclone's transferred bytes have not moved for `VJ_MIRROR_STALL_SECONDS`, default 300 s (about $0.29 of GPU). A slow pull that still moves is left alone. A stall fails a job by name (`model pull stalled: ...`), and a finish job soft-degrades as it does on its budget.
+
+This covers every pull: the job pull, `ensure_i2v_models`, `ensure_hub_repos`, and the volume self-preload, which falls back to the job's own pull on a stall. While a pull runs, each rclone stats line becomes a `mirror_progress` event with the leg and the bytes moved, so a cold pull no longer looks like a silent job.
+
+**Fix: a stored keyframe is reused only when nothing that draws it has changed.**
+
+The keyframe reuse hash covered the render parameters only. So after a new image changed how prompts are built, a re-render with the same parameters returned the old stills as `reused: true`, and the run read COMPLETED (film-0afa679b on 1.1.6). An edited shot in the same project reused its old still the same way. Each shot's hash now also covers the prompts the engine builds for it (the plate, the identity pass and the plain pass), so an edited shot, a changed cast description, a new `setting` or new prompt-building code redraws, and a `KEYFRAME_ENGINE_VERSION` that is bumped for render changes that leave the prompts the same. Stills stored before this change carry the old hash, so they are redrawn once.
+
+### fix(verify): a verify render removes its temp directory
+
+`verify._pod_draft_render` downloaded the finished clip into a `vj-verify-*` directory from `tempfile.mkdtemp` and never removed it, so every verify run left its clip on the pod's disk and every test run left one in `$TMPDIR` (over 100 found in one account). The directory is now removed in a `finally`, after a normal return and after a failed download alike.
+
+### feat(keyframe): a two-person scene-lock plate draws without the pose skeleton by default
+
+Under the fixed standing skeleton, a two-person scene-lock plate posed the pair for the camera instead of drawing the shot's action, and Pass B kept that pose through canny. On vivijure-cf#1281 (18 jobs, one board, 6 seeds), 2 of 6 stills held the action with the right people at today's default, against 5 of 6 with no skeleton. The plate count guard caught every third person.
+
+So `multi_char.pose_conditioning` now defaults to unset, which means each path's own default:
+- A scene-lock plate for two-plus people draws without the pose ControlNet while the plate count guard runs.
+- With `plate_count_retries` 0, it keeps the pose, so pose off with the guard off is never a default.
+- The plain regional path (scene lock off) keeps its pose.
+- An explicit `true` or `false` sets both paths, so a job can turn the plate's pose back on.
+
+Reuse hash: only a two-plus-person, scene-lock, guarded still with the pose unset gets a new hash and redraws. Every other stored still keeps its hash, held by tests against values computed on the previous code.
+
+### fix(keyframe): `multi_char.ip_adapter_scale_per_slot` reaches the two-person draw
+
+The field was documented (default 0.7), parsed and hashed, but never reached the renderer: both two-person paths (scene-lock Pass B and the plain regional render) drew at `keyframe.ip_adapter_scale`, 0.65. Setting it forced a redraw that drew the same image. It now reaches both paths. Unset, the new default, falls back to `keyframe.ip_adapter_scale`, so a job that does not set it draws and hashes exactly as before and no stored still redraws. A job that sets it draws at that scale, and its stills redraw.
+
+### fix(harness): a worker whose disk cannot hold the job fails that one job by number and is replaced
+
+A worker's model cache persists across jobs on purpose. On the old 80 GB disk, one i2v-capable job's pull (Wan 2.2 I2V plus Lightning, 156.8 GiB measured on 1.1.17) filled it, and every later job on that worker failed within seconds on ENOSPC (vivijure-backend#600). Now a model pull is sized first (`rclone size` over exactly what the copy would copy) and fails its job with the numbers when it cannot fit with the job floor left free. A job also fails by number before it starts when free disk is below the floor (4 GiB, `VJ_MIN_FREE_GB`). Either failure, or an ENOSPC raised anywhere in a job, is returned with RunPod's `refresh_worker`, so the SDK stops that worker and RunPod replaces it instead of it eating the queue. Every job's `started`, `complete` and `error` progress events now carry `disk_free_gb`. The endpoint disk is 300 GB (docs/runpod-endpoint-config.md has the arithmetic).
+
+**Fix: a finish job no longer writes `<shot>_finished.latest.json` (#613).**
+
+Nothing read that object: core does not reuse a finished clip through a pointer (vivijure-core#382). The clip and its `.hash` sidecar are written as before.
+
+**Docs: the hosted backend endpoint drops the B200 and B300 pools (#625, #606).**
+
+`docs/runpod-endpoint-config.md` now records the backend pools as `BLACKWELL_96`, `ADA_80_PRO` and `HOPPER_141`, with the before list and the rollback. The current-state table is re-read on 2026-11-11, and the image row moves from 1.1.17 to 1.1.18@sha256:3ec38492. The Recommendation for the render backend no longer says B200 / H200: RunPod serves SDXL keyframes only, and keyframes are proven on 96 GB and 80 GB cards. This records a live endpoint change that the lead applies under CR #625. No code changes.
+
+**Fix: a promote names its endpoint; there is no default (#629).**
+
+`deploy/runpod_verify.py` defaulted the promote target to an endpoint that has been retired, and `runpod-verify.yml` passed none. So a `live=true promote=true` dispatch would spend on the verify pod and then fail at the first PATCH. There is no default now. `promote_image()` takes `endpoint_id` as a required keyword and refuses an empty or malformed id before any call. `--promote` without `--promote-endpoint` exits 2 before anything runs. The workflow takes a `promote_endpoint` input and refuses `promote=true` without one, before the pod. `docs/release-gate.md` describes the v2 endpoint image repin and points at `docs/runpod-endpoint-config.md` for the current endpoint.
+
+**Fix: a bundle extract accepts only regular files and directories.**
+
+Absolute names and names with a `..` component are refused. A link is refused, including one whose target resolves outside the destination. A fifo, a character device, and a block device are refused.
+
+**Fix: a two-person keyframe keeps both people's hair and clothes, every person is said to be an adult once per shot, and a shot with no place gets the film's setting.**
+
+The keyframe prompt is now encoded in two 75-token chunks, not cut at 77 tokens, so the identity pass of a two-person shot keeps both descriptions (vivijure-cf#1143). A chunk splits at a comma near its end, and a prompt past 150 tokens is cut and reported in a `keyframe.prompt_cut` event, never silently. Each shot with people now says once that they are all adults ("Mara and Dev, both adults"; "two adults" on the plate). That clause is never fitted away, and on a two-person shot it lets each description put hair and clothes ahead of its own age clause. The storyboard's optional `setting` follows any shot whose prompt and style prefix do not already say it, and only when it still fits after the descriptions (vivijure-cf#1145).
+
+**Feat: a diagnostic job flag, `debug_intermediates`, saves the scene-lock plate beside the keyframe.**
+
+A two-person shot sometimes draws a third person, and the knobs measured so far do not move how often (vivijure-cf#1143). To find which pass draws the extra person, a job with the top-level field `debug_intermediates: true` also writes the Pass A pose control, the Pass A plate and the Pass B canny map beside each drawn still, as `renders/<project>/keyframes/<job>/<shot>.<stage>.png`, and lists them under `debug_intermediates` in the result. It is not a generation knob: it is not under `render_overrides`, not in the reuse hash, and the studio never sends it, so only a direct `/run` caller sets it. Off by default, and with it on every input to every pass is unchanged.
+
+**Feat: the scene-lock identity crop padding is a knob, `keyframe.face_crop_pad`.**
+
+Pass B gives each person's IP-Adapter a crop of their cast portrait padded by this fraction of the face box on each side. The default stays 0.35, the crop shipped before, so nothing changes until it is set. Measured at seed 110501 on 1.1.6 (vivijure-cf#1143): the two-shot lost Mara's hair on the scene-lock path, whose 0.35 crop holds little hair, and kept it on the path that takes the whole portrait. The knob lets one image be swept live. It is clamped to 0..2 and is part of the keyframe reuse hash.
+
+**Feat: with per-region text, the band between two people can read a people-free prompt, `keyframe.plate_people_free_background`.**
+
+Off by default. With `plate_regional_text` on, the cells outside both people's regions read only the style and the setting, never the shot text that names them, while each person's region keeps the shot's action and the adult clause. Measured on 1.1.9 (vivijure-cf#1143): under per-region text the band read "Mara and Dev stand ..." and a third person appeared there at 2 of 2 seeds. The pooled text embedding stays the shared prompt's, so the plate is still told to draw the two people.
+
+**Feat: the plate count guard is on by default (`keyframe.plate_count_retries` 3) for two-person-plus shots.**
+
+Measured live on 1.1.13 at six seeds (vivijure-cf#1143): clean two-person stills rose from 2 of 6 to 5 of 6. Every still marked clean had exactly two people, and the one failure was reported as `clean: false`. The cost is about 1.7 extra plates per two-person keyframe, about 23 s on average, at most 3 plates. The value now enters the keyframe reuse hash for two-person-plus shots only, so each existing two-person still redraws once, and one-person and empty shots keep their hash. Set it to 0 to turn the guard off.
+
+**Docs: the cold-start rule after a repin is corrected.** A warm-up batch does not keep workers warm after a new image: every new worker pulls about 24 GB. Keep about 4 to 6 cold workers at once by submitting in small batches, and budget one cold pull per worker (`docs/runpod-endpoint-config.md`, `docs/bake-box.md`).
+
+**Feat: a plate count guard, `keyframe.plate_count_retries`, redraws a two-person plate that holds a third person.**
+
+The scene plate (Pass A) draws a third person at about half of seeds on a two-person shot, and no conditioning lever measured moved that rate; Pass B never adds a person (vivijure-cf#1143). With this set to 1..3, the plate's faces are counted with the insightface analyser the scene-lock path already loads, and while the plate has more faces than the shot has people, only the plate is redrawn with a derived seed. Pass B runs once, on the first passing draw, or on the draw with the fewest faces, which the result's `plate_count` and a `keyframe.plate_count` event then report as `clean: false`. Default 0: no count and the same draw as before, with the reuse hash unchanged. Measured offline on 19 saved plates, the count caught 11 of 12 plates with a third person and read all 7 clean plates as clean; it misses a person facing away from the camera. Also documents the four earlier #1143 knobs in `docs/configuration.md`.
+
+**Feat: a two-person plate can take each person's cast portrait, `keyframe.plate_ip_adapter_scale`.**
+
+Off by default (0), so the plate is unchanged until it is set. When set (0 to 1), Pass A of a two-person shot conditions each region on that person's whole cast portrait through the masked IP-Adapter, using the same region boxes as the pose skeleton and Pass B. A person with no portrait gets scale 0. Measured on 1.1.6 and 1.1.7 (vivijure-cf#1143): the plate draws the two-person hair from shared text, and nothing in Pass B undoes it, while only the whole-portrait path restored the hair. The scale is in the keyframe reuse hash, and the `keyframe.scene_plate` event reports the scale used.
+
+**Feat: a two-person plate can give each person's description to their own region, `keyframe.plate_regional_text`.**
+
+Off by default, so the plate is unchanged until it is set. When on, on a two-person shot each cross-attention layer of Pass A reads the shared prompt (the style, the scene and its action, the setting and the adult clause) everywhere, and each person's own prompt (the shared text plus only their description) inside their region box, the same boxes the pose skeleton and Pass B use. The unconditioned half of guidance and an IP-Adapter's image embeddings are untouched, and the original processors are always put back. Measured on 1.1.8 (vivijure-cf#1143): one shared prompt bound Dev's "grey zip hoodie" to Mara. `scripts/check_regional_text.py` checks, on diffusers' own Attention, that each region reads only its own prompt.
+
+**Feat: `keyframe.multi_char.pose_spread` moves the two pose figures toward the frame centre.**
+
+The 1.1.11 plate diagnostic (vivijure-cf#1143) showed that the third person in a two-shot is drawn by the scene plate, in the empty band the pose skeleton leaves between two figures placed at the centres of the two halves of the frame. Above 0, this value places the figures' centres that fraction of the width apart around the frame centre, clamped so each figure stays inside its own region (the masks, LoRAs and per-region text are unchanged). The default stays 0: the skeleton is byte-identical to before, and the reuse hash is unchanged. A set value is part of the hash.
+
+**Fix: the keyframe identity prompt carries each slot's character description (vivijure-cf#1147).**
+
+The prompt was style, scene and LoRA triggers, so a shot that named only the character lost the hair and wardrobe the cast member is defined with. The description now follows the triggers on the identity pass and is left out of the plate pass.
+
+**Fix: a shot that names only its character keeps that character's hair and clothes (vivijure-cf#1147).**
+
+The scene plate now gets the character description. Rendering a plate alone at the same seed showed the identity pass keeps the plate's hair and outline through canny, so a description added only there came too late. The token budget now keeps a stated adult age first, then hair and garments, then other physical traits, and mood last. A portrait direction in a description, such as a studio background, no longer reaches a shot. The plate gets only the age, hair and garments, and says the scene again after them, so the shot keeps more of its action and its location. A garment named after a place, such as a field jacket, no longer draws that place.
+
+**Fix: character descriptions fit the 77 token limit (vivijure-cf#1147).**
+
+The description came before the location-lock clause and pushed it out of the prompt on long shots, and on a two-person shot the first character took the whole budget. The lock clause now comes first, and what is left is split evenly across the shot's slots, cut at clause boundaries.
+
+**Feat: under per-region plate text, the plate count guard also redraws a plate that is short of a person.**
+
+With `keyframe.plate_regional_text` on, a two-person scene-lock plate drew ONE person on 4 of 6 seeds of a hand-a-mug shot, and the plate count guard passed each of them, because it redraws only for an extra person (vivijure-cf#1281). The same board without per-region text drew one face on 1 of 6. So when per-region text is on and the guard runs (`plate_count_retries` > 0), a plate with fewer faces than people is redrawn as well, up to the same bound. The chosen draw is the first with the exact count, else the one with the most faces not over it, and only with none of those the fewest: a missing person is still preferred to an extra one. The `plate_count` record and event carry `floor: true`, and `clean` is false for a plate that is still short. Every other path is unchanged: a one-face plate can be a person facing away, and the guard accepts it there. Only per-region text stills with the guard on get a new reuse hash; the default still and a per-region text still with the guard off keep theirs (pinned against main 57a0f27).
+
+**CI: dispatch inputs go through env and are validated; thin-image publishes only from main.**
+
+`runtime-build.yml` and `thin-image.yml` read their `workflow_dispatch` inputs through `env` instead of
+placing them in the script text, and check each against its shape: integers for the runtime
+versions, a digest-pinned `ghcr.io/skyphusion-labs/vivijure-backend:runtime-*` ref for
+`overlay_from`, `X.Y.Z` and `t<N>` for the thin image. `thin-image.yml` refuses a commit that is not
+on `main`, as `runtime-build.yml` already does, and its push trigger on the deleted
+`ci/530-thin-gha` branch is removed, so no branch build publishes a release-shaped tag.
+
+**CI: every third-party Action is pinned by commit SHA.**
+
+Each `uses:` reference in `.github/` now names a full commit SHA with the exact release tag as a
+comment (for example `actions/checkout@<sha> # v7.0.1`), resolved from the tag the line used before.
+A moved tag can no longer change what a workflow runs. Dependabot (`github-actions`) keeps proposing
+updates against the pinned form.
+
+**Docs: the backend endpoint runs 1.1.10, with its rollback.**
+
+`docs/runpod-endpoint-config.md` records:
+- the 1.1.10 thin image built from main `1d78182` (#582, `plate_people_free_background`, default OFF);
+- the fresh-draw check;
+- the rollback to 1.1.9.
+
+**Docs: the backend endpoint runs 1.1.12; the repin cold-start rule; the 1.1.x tag decision.**
+
+`docs/runpod-endpoint-config.md`:
+- records the 1.1.11 (#584) and 1.1.12 (#585) pins, with the 1.1.11 rollback;
+- adds a standing repin procedure: wait 65 s after the release, then submit 2 or 3 jobs first because every worker starts cold and pulls about 24 GB.
+
+`docs/bake-box.md` points at that procedure. `RELEASES.md` records that the 1.1.x line is GHCR tags only, with no git tag.
+
+**Docs: the backend endpoint runs 1.1.13, with its rollback.**
+
+`docs/runpod-endpoint-config.md` records:
+- the 1.1.13 thin image built from main `a3d48a6` (#587, `plate_count_retries`, default 0, which is OFF);
+- that its face count uses the antelopev2 analyser already mirrored for stills jobs;
+- the rollback to 1.1.12.
+
+**Docs: the backend endpoint runs 1.1.14, with its rollback.**
+
+`docs/runpod-endpoint-config.md` records:
+- the 1.1.14 thin image built from main `a2f3b18` (#589, `plate_count_retries` default 3 for two-person-plus shots);
+- that the first re-render of each stored two-person still redraws it once;
+- the rollback to 1.1.13.
+
+**Docs: the backend endpoint runs 1.1.15 on the stills weights base; first-bake numbers.**
+
+`docs/runpod-endpoint-config.md` records:
+- the 1.1.15 pin, built from main `82b2324` on `stills-t1-m1@6d0e19bd`, with its in-image checks;
+- the rollback to 1.1.14.
+
+`docs/stills-weights-base.md`:
+- records the first bake (stage size and time, the gates, the bins, the three layer sizes, the push time);
+- corrects step 1: stage with code that has `--stage-stills`, and keep the shell that reads the credential in the foreground.
+
+**Docs: the backend endpoint runs 1.1.16, with its rollback.**
+
+`docs/runpod-endpoint-config.md` records:
+- the 1.1.16 code-only image built from main `6edad52` (#597) on the existing `stills-t1-m1` base, which reused all three weight layers;
+- that two-person scene-lock stills redraw once;
+- the rollback to 1.1.15.
+
+**Docs: the backend endpoint runs 1.1.17, with its rollback; the disk history.**
+
+`docs/runpod-endpoint-config.md` records:
+- the 1.1.17 code-only image built from main `eed4b57` (#601 per-slot ip scale, #602 disk guards) on the existing `stills-t1-m1` base;
+- the rollback to 1.1.16;
+- the container disk raise of 2026-11-06 from the release history: 80 to 200 GB at 15:01:44Z (v41), then 200 to 300 GB at 15:20:17Z (v42), kept at 300 through the repin.
+
+**Docs: the backend endpoint runs 1.1.5, with its rollback.**
+
+`docs/runpod-endpoint-config.md` records the 1.1.5 thin image built on the bake box from main `1ac386e`,
+its proof job, the live worker settings (max 12, idle 60 s), and the rollback image.
+
+**Docs: the backend endpoint runs 1.1.6, with its rollback.**
+
+`docs/runpod-endpoint-config.md` records:
+- the 1.1.6 thin image, built on the bake box from main `67e883e` (#572);
+- its proof, a partial fix for vivijure-cf#1143 (film-1d0dad23);
+- the rollback to 1.1.5.
+
+**Docs: the backend endpoint runs 1.1.7, with its rollback.**
+
+`docs/runpod-endpoint-config.md` records:
+- the 1.1.7 thin image built from main `7f66faa` (#575, #576);
+- that #575 makes every stored still redraw once;
+- the fresh-draw repin check;
+- the rollback to 1.1.6.
+
+**Docs: the backend endpoint runs 1.1.8, with its rollback.**
+
+`docs/runpod-endpoint-config.md` records:
+- the 1.1.8 thin image built from main `957e4ce` (#578, `plate_ip_adapter_scale`, default 0, which is OFF);
+- the 60 s wait after a repin;
+- the fresh-draw check;
+- the rollback to 1.1.7.
+
+**Docs: the backend endpoint runs 1.1.9, with its rollback.**
+
+`docs/runpod-endpoint-config.md` records:
+- the 1.1.9 thin image built from main `c63b76c` (#580, `plate_regional_text`, default OFF);
+- the fresh-draw check, whose two-person still shows a duplicate person;
+- the rollback to 1.1.8.
+
+**Docs: separate the idle timeout from standby in the billing note.**
+
+A worker bills through the idle timeout after a job, by RunPod's rule. A scaled-down worker does not. `docs/runpod-endpoint-config.md` cites that rule, and the hourly buckets for 18:00 to 20:00Z on 2026-10-30 as evidence on standby only. The image line reads 1.1.3.
+
+**Docs: record the endpoint state and the real worker quota.**
+
+`docs/runpod-endpoint-config.md` now states the two live endpoints, read from the API, with measured times.
+The quota is 50, not 30. The serial behaviour of two cold submits is recorded.
+
+**Fix: a slow cold start now names its own stage in the job's progress object.**
+
+`mirror_done` carries the seconds per leg, total seconds, bytes, and the rclone passes that failed and were retried. A failed pull writes `mirror_failed` with the legs it finished. Before this, the numbers were only in the worker's log, which goes when the worker does.
 
 ## [1.0.16] -- 2026-08-20
 
