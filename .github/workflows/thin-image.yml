@@ -20,6 +20,11 @@ on:
         required: false
         default: 't1'
         type: string
+      smoke_ref:
+        description: 'Smoke only (#636): a full digest of an existing worker image, ghcr.io/skyphusion-labs/vivijure-backend[:tag]@sha256:<64 hex>. Set: nothing is built or pushed; only the CPU import smoke runs on it.'
+        required: false
+        default: ''
+        type: string
       toolchain_ref:
         description: 'A full digest of an existing base, ghcr.io/skyphusion-labs/<image>[:tag]@sha256:<64 hex>. Set: no toolchain build, no toolchain tag pushed; the worker is built FROM it.'
         required: false
@@ -83,6 +88,7 @@ jobs:
           VER: ${{ inputs.version }}
           TOOL: ${{ inputs.toolchain_tag }}
           REF: ${{ inputs.toolchain_ref }}
+          SMOKE: ${{ inputs.smoke_ref }}
           IMAGE: ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WORKER_IMAGE }}
         run: bash deploy/thin-image-resolve.sh
 
@@ -104,6 +110,7 @@ jobs:
 
       - name: Build and push thin worker
         id: thin
+        if: steps.cfg.outputs.mode != 'smoke'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -119,6 +126,7 @@ jobs:
       # The digest the push returned, read back from GHCR by tag: they must be the same image.
       - name: Pushed digest
         id: pushed
+        if: steps.cfg.outputs.mode != 'smoke'
         env:
           DIGEST: ${{ steps.thin.outputs.digest }}
           IMG: ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WORKER_IMAGE }}:${{ steps.cfg.outputs.version }}
@@ -132,16 +140,47 @@ jobs:
           echo "Pushed ${IMG}@${DIGEST} (from ${FROM})."
           printf 'Pushed %s@%s from %s.\n' "${IMG}" "${DIGEST}" "${FROM}" >> "$GITHUB_STEP_SUMMARY"
 
+      # #636: the image is the full base plus the thin layers (the stills base alone is 29 GiB
+      # compressed). The build never unpacks it (Dockerfile.thin is FROM + COPY, so BuildKit pushes
+      # by layer reference), but a pull and run must, and the runner root disk cannot hold it: the
+      # 1.1.19 run died in this step with no conclusion. So Docker moves to the runner's scratch
+      # disk (/mnt) first, and the step refuses LOUDLY when even that is too small, instead of
+      # filling the disk and losing the runner.
+      - name: Move Docker storage to the scratch disk
+        id: room
+        env:
+          SMOKE_REF: ${{ steps.cfg.outputs.smoke_ref }}
+          DIGEST: ${{ steps.pushed.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ -n "${SMOKE_REF}" ]; then IMG="${SMOKE_REF}"; else IMG="${REGISTRY}/${OWNER}/${WORKER_IMAGE}@${DIGEST}"; fi
+          printf '%s' "${IMG}" | grep -Eq '@sha256:[0-9a-f]{64}$' || { echo "::error::no digest to smoke (got '${IMG}')"; exit 1; }
+          echo "img=${IMG}" >> "$GITHUB_OUTPUT"
+          # Compressed size of the linux/amd64 image, from the registry manifest.
+          bytes=$(IMG="${IMG}" python3 deploy/image_bytes.py)
+          need=$(( bytes * 5 / 2 ))   # compressed plus unpacked, with margin
+          sudo systemctl stop docker.socket docker
+          sudo mkdir -p /mnt/docker
+          sudo python3 -c 'import json,os; p="/etc/docker/daemon.json"; d=json.load(open(p)) if os.path.exists(p) else {}; d["data-root"]="/mnt/docker"; json.dump(d, open(p,"w"))'
+          sudo systemctl start docker
+          [ "$(docker info --format '{{.DockerRootDir}}')" = /mnt/docker ] || { echo "::error::docker did not move to /mnt/docker"; exit 1; }
+          df -h / /mnt
+          avail=$(( $(df --output=avail -B1 /mnt | tail -1) ))
+          echo "image ${bytes} bytes compressed; need about ${need}; /mnt has ${avail}"
+          [ "${avail}" -ge "${need}" ] || { echo "::error::/mnt has ${avail} bytes free, the smoke needs about ${need}: this runner cannot hold the image"; exit 1; }
+
       - name: CPU import smoke
+        env:
+          IMG: ${{ steps.room.outputs.img }}
         run: |
           set -eu
-          IMG="${REGISTRY}/${OWNER}/${WORKER_IMAGE}@${{ steps.pushed.outputs.digest }}"
           docker pull "${IMG}"
           docker run --rm "${IMG}" \
             conda run --no-capture-output -n vivijure \
             python /opt/vivijure/smoke_imports.py
           echo "Smoked ${IMG} (thin). CUDA EP smoke needs a GPU pod."
+          printf 'Smoked %s (CPU imports).\n' "${IMG}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Disk after build
         if: always()
-        run: df -h /
+        run: df -h / /mnt
