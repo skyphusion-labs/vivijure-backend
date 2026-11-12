@@ -2,6 +2,8 @@
 
     IMG=ghcr.io/skyphusion-labs/vivijure-backend@sha256:<64 hex> python3 deploy/image_bytes.py
 
+MODE=max-layer prints the largest compressed layer instead (stills-base.yml, the GHCR layer limit).
+
 thin-image.yml uses it before the CPU import smoke, to refuse a pull that the runner disk cannot
 hold instead of filling the disk and losing the runner. It reads the registry manifest only (the
 config blob plus every layer), never a layer.
@@ -28,7 +30,8 @@ def raw(ref: str) -> dict:
     return json.loads(out)
 
 
-def manifest_bytes(ref: str) -> int:
+def image_manifest(ref: str) -> dict:
+    """The linux/amd64 image manifest of `ref` (an index resolves to its linux/amd64 entry)."""
     m = raw(ref)
     if m.get("mediaType") in INDEX_TYPES or "manifests" in m:
         pick = [
@@ -39,14 +42,26 @@ def manifest_bytes(ref: str) -> int:
             raise SystemExit(f"{ref}: the index has no linux/amd64 manifest")
         repo = ref.split("@", 1)[0]
         m = raw(f"{repo}@{pick[0]['digest']}")
-    layers = m.get("layers") or []
-    if not layers:
+    if not (m.get("layers") or []):
         raise SystemExit(f"{ref}: the manifest lists no layers")
-    return int((m.get("config") or {}).get("size", 0)) + sum(int(x["size"]) for x in layers)
+    return m
+
+
+def manifest_bytes(ref: str) -> int:
+    m = image_manifest(ref)
+    return int((m.get("config") or {}).get("size", 0)) + sum(int(x["size"]) for x in m["layers"])
+
+
+def max_layer_bytes(ref: str) -> int:
+    """The largest compressed layer. stills-base.yml checks it against the GHCR layer limit from the
+    registry, because bake_layers.verify-image reads `docker history` of a LOCAL image and the
+    push-only build never loads one (#564, fc#2620)."""
+    return max(int(x["size"]) for x in image_manifest(ref)["layers"])
 
 
 if __name__ == "__main__":
     ref = os.environ.get("IMG", "")
     if "@sha256:" not in ref:
         sys.exit(f"IMG must be a digest ref (got {ref!r})")
-    print(manifest_bytes(ref))
+    # MODE=max-layer prints the largest layer instead of the total (stills-base.yml).
+    print(max_layer_bytes(ref) if os.environ.get("MODE") == "max-layer" else manifest_bytes(ref))
