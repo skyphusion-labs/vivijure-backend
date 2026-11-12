@@ -67,6 +67,7 @@ def keyframe_params_from(config: RenderConfig) -> KeyframeParams:
         controlnet_pose_scale=mc.controlnet_pose_scale,
         region_gutter=mc.region_gutter,
         pose_spread=mc.pose_spread,
+        pose_template=mc.pose_template,
         max_slots=mc.max_slots,
         scene_lock=kc.scene_lock,
         canny_scale=kc.canny_scale,

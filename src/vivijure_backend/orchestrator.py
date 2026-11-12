@@ -230,6 +230,10 @@ def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard
     # still drawn then is still the same image and keeps its hash (no fleet-wide redraw for a no-op).
     if mc.pose_spread:
         payload["pose_spread"] = mc.pose_spread
+    # Same rule (vivijure-cf#1281): "stand" is the figure drawn before this field existed, byte for byte, so it adds
+    # nothing and every stored still keeps its hash. "reach" and "auto" draw a different control, so they say so.
+    if mc.pose_template != "stand":
+        payload["pose_template"] = mc.pose_template
     # Same rule: off draws exactly what it drew before, so the hash stays. And only on a shot the guard can run on
     # (2..max_slots people, keyframe.engine_for): a one-person or empty shot draws the same with it on, so turning
     # the default on must not redraw those stills. With no scene (a config-only hash) it is included when set.

@@ -99,6 +99,7 @@ single-face by nature), so the regional path stays masked-IP-Adapter only.
 | `controlnet_pose_scale` | float | 0.55 | 0-1.5 | OpenPose ControlNet conditioning scale. |
 | `region_gutter` | int | 64 | 0-256 | Dead-band px between masks (anti seam-blend). |
 | `pose_spread` | float | 0 | 0-0.9 | 0 keeps each pose figure at the centre of its region. Above 0, the two figures' centres sit this fraction of the width apart around the frame centre, so the plate leaves no empty band between two people where it can draw a third (vivijure-cf#1143). Each figure is clamped inside its own region. In the reuse hash only when set. |
+| `pose_template` | enum | stand | stand, reach, auto | The figure the pose skeleton draws. `stand`: upright, full length, head-on (the figure drawn before this field). `reach`: waist-up, the arm nearer the partner forward, the head turned toward the partner (far eye and ear dropped), for two people at a shared surface; the figure on the right is the mirror. `auto`: `reach` when the shot text names a hand-off, a handshake or a shared surface (counter, desk, bench, table, board, laptop), else `stand`. Only matters where the skeleton is drawn (`pose_conditioning`). Unknown values read as `stand`. In the reuse hash only when not `stand` (vivijure-cf#1281). |
 
 ## I2VConfig
 

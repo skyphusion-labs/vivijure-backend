@@ -102,6 +102,7 @@ class KeyframeParams:
     controlnet_pose_scale: float = 0.55  # OpenPose ControlNet conditioning scale (regional path)
     region_gutter: int = 64          # px dead band between regional masks so they do not seam-blend
     pose_spread: float = 0.0         # 0 = figures at region centres; else centre-to-centre spacing (cf#1143)
+    pose_template: str = "stand"     # stand | reach | auto: the skeleton's figure (vivijure-cf#1281)
     negative_prompt: str = DEFAULT_NEGATIVE
     max_slots: int = 2               # regional path is tuned for 2; more is future work
 
@@ -810,7 +811,8 @@ def _render_scene_lock(server, scene, cast, storyboard, cfg, loras, pose_image, 
             from PIL import Image
             control = Image.open(pose_image).convert("RGB").resize((cfg.width, cfg.height))
         else:
-            control = _pose_skeleton(cfg.width, cfg.height, boxes, spread=cfg.pose_spread)
+            control = _pose_skeleton(cfg.width, cfg.height, boxes, spread=cfg.pose_spread,
+                                     template=pose_template_for(scene, cfg))
         cn_scale = cfg.controlnet_pose_scale
         if sink is not None:
             sink["pose"] = control
@@ -1076,7 +1078,7 @@ def _render_regional(pipe, prompt, scene, cast, cfg, loras, generator, pose_imag
             from PIL import Image
             control = Image.open(pose_image).convert("RGB").resize((w, h))
         else:
-            control = _pose_skeleton(w, h, boxes, spread=cfg.pose_spread)
+            control = _pose_skeleton(w, h, boxes, spread=cfg.pose_spread, template=pose_template_for(scene, cfg))
         cn_scale = cfg.controlnet_pose_scale
     else:
         control = _blank_control(w, h)
@@ -1332,7 +1334,54 @@ _POSE_COLORS = [(255, 0, 0), (255, 85, 0), (255, 170, 0), (255, 255, 0), (170, 2
                 (255, 0, 255), (255, 0, 170), (255, 0, 85)]
 
 
-def pose_figure_shifts(width: int, boxes, spread: float) -> list[float]:
+# vivijure-cf#1281: the "reach" figure, for two people at a shared surface (a counter, a desk, a bench, a board).
+# Same COCO-18 order as _POSE_KP, (x, y) within the region box, drawn for the figure on the LEFT, which faces right
+# toward its partner. Waist-up: the hips sit at the bottom of the box and the knees and ankles are absent (None).
+# The head is in three-quarter view toward the partner: turning to its own left puts the nose right of the neck and
+# hides the left eye and left ear (None), the COCO convention a pose ControlNet reads as a turned head. The left arm,
+# the one nearer the partner, reaches forward to bench height; the right arm rests forward on the surface.
+# Proportions follow a real upper body in three-quarter view: the shoulder-to-hip drop is about 1.9 times the
+# apparent shoulder width (0.61 of the box height against 0.38 of its width on a 16:9 two-shot's region).
+_POSE_KP_REACH = [
+    (0.62, 0.17), (0.50, 0.30), (0.30, 0.33), (0.34, 0.62), (0.58, 0.72),
+    (0.68, 0.33), (0.84, 0.56), (0.97, 0.66), (0.40, 0.95), None,
+    None, (0.62, 0.95), None, None, (0.58, 0.13),
+    None, (0.44, 0.15), None,
+]
+# A figure's own left and right swap when it is drawn mirrored.
+_COCO_MIRROR = [0, 1, 5, 6, 7, 2, 3, 4, 11, 12, 13, 8, 9, 10, 15, 14, 17, 16]
+_REACH_WORDS = re.compile(
+    r"\b(hand(s|ing|ed)?|pass(es|ing)?|give(s|n)?|giving|offer(s|ing)?|tak(e|es|ing)|reach(es|ing)?|shake|shaking|"
+    r"counter|desk|bench|workbench|table|board|laptop|keyboard)\b", re.IGNORECASE)
+
+
+def pose_keypoints(template: str, *, mirrored: bool) -> list:
+    """The figure's 18 keypoints in its region box, or None where the figure has no such joint. `stand` is
+    _POSE_KP exactly (it is never mirrored: it is symmetric and drawn as it always was). `reach` mirrored is the
+    figure facing left, with its own left and right swapped so the skeleton's limb colours stay anatomical. Pure."""
+    if template != "reach":
+        return list(_POSE_KP)
+    if not mirrored:
+        return list(_POSE_KP_REACH)
+    return [None if _POSE_KP_REACH[j] is None else (1.0 - _POSE_KP_REACH[j][0], _POSE_KP_REACH[j][1])
+            for j in _COCO_MIRROR]
+
+
+def _faces_left(width: int, l: float, r: float, template: str) -> bool:
+    """A reach figure faces the frame centre: the one in a box right of centre faces left. Stand never mirrors."""
+    return template == "reach" and (l + r) / 2 > width / 2
+
+
+def pose_template_for(scene: Scene, cfg: KeyframeParams) -> str:
+    """The figure this shot's skeleton draws: "stand" or "reach". `auto` reads the shot text: a hand-off, a
+    handshake or a shared surface draws "reach", anything else "stand". Pure."""
+    t = cfg.pose_template
+    if t == "auto":
+        return "reach" if _REACH_WORDS.search(scene.prompt or "") else "stand"
+    return "reach" if t == "reach" else "stand"
+
+
+def pose_figure_shifts(width: int, boxes, spread: float, template: str = "stand") -> list[float]:
     """Horizontal shift of each region's pose figure, in pixels (vivijure-cf#1143).
 
     With `spread` 0 (or one box) every shift is 0: each figure stands at the centre of its region, as it always
@@ -1343,10 +1392,10 @@ def pose_figure_shifts(width: int, boxes, spread: float) -> list[float]:
     n = len(boxes)
     if n < 2 or spread <= 0:
         return [0.0] * n
-    xs = [x for x, _ in _POSE_KP]
-    lo, hi = min(xs), max(xs)
     shifts = []
     for i, (l, _t, r, _b) in enumerate(boxes):
+        xs = [p[0] for p in pose_keypoints(template, mirrored=_faces_left(width, l, r, template)) if p is not None]
+        lo, hi = min(xs), max(xs)
         bw = r - l
         target = width * (0.5 + spread * (i / (n - 1) - 0.5))
         centre = l + 0.5 * bw
@@ -1356,7 +1405,7 @@ def pose_figure_shifts(width: int, boxes, spread: float) -> list[float]:
     return shifts
 
 
-def _pose_skeleton(width, height, boxes, *, spread: float = 0.0):
+def _pose_skeleton(width, height, boxes, *, spread: float = 0.0, template: str = "stand"):
     """Render an OpenPose skeleton with ONE standing COCO-18 figure per region box on black, so the
     ControlNet plants exactly that many distinct bodies (the fix for two characters merging into
     one). Each figure scales into its box with a small vertical margin, shifted sideways by
@@ -1365,14 +1414,18 @@ def _pose_skeleton(width, height, boxes, *, spread: float = 0.0):
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (width, height), (0, 0, 0))
     draw = ImageDraw.Draw(img)
-    for (l, t, r, b), dx in zip(boxes, pose_figure_shifts(width, boxes, spread)):
+    for (l, t, r, b), dx in zip(boxes, pose_figure_shifts(width, boxes, spread, template)):
         bw, bh = r - l, b - t
         my = int(bh * 0.04)  # top/bottom margin so head + ankles are not clipped at the box edge
-        pts = [(l + x * bw + dx, t + my + y * (bh - 2 * my)) for (x, y) in _POSE_KP]
+        kp = pose_keypoints(template, mirrored=_faces_left(width, l, r, template))
+        pts = [None if p is None else (l + p[0] * bw + dx, t + my + p[1] * (bh - 2 * my)) for p in kp]
         lw = max(2, bw // 70)
         for i, (a, c) in enumerate(_POSE_LIMBS):
-            draw.line([pts[a], pts[c]], fill=_POSE_COLORS[i % len(_POSE_COLORS)], width=lw)
+            if pts[a] is not None and pts[c] is not None:  # a joint the figure lacks takes its limbs with it
+                draw.line([pts[a], pts[c]], fill=_POSE_COLORS[i % len(_POSE_COLORS)], width=lw)
         rad = max(2, bw // 90)
-        for i, (px, py) in enumerate(pts):
-            draw.ellipse([px - rad, py - rad, px + rad, py + rad], fill=_POSE_COLORS[i % len(_POSE_COLORS)])
+        for i, pt in enumerate(pts):
+            if pt is not None:
+                px, py = pt
+                draw.ellipse([px - rad, py - rad, px + rad, py + rad], fill=_POSE_COLORS[i % len(_POSE_COLORS)])
     return img
