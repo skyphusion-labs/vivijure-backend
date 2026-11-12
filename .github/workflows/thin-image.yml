@@ -143,10 +143,13 @@ jobs:
       # #636: the image is the full base plus the thin layers (the stills base alone is 29 GiB
       # compressed). The build never unpacks it (Dockerfile.thin is FROM + COPY, so BuildKit pushes
       # by layer reference), but a pull and run must, and the runner root disk cannot hold it: the
-      # 1.1.19 run died in this step with no conclusion. So Docker moves to the runner's scratch
-      # disk (/mnt) first, and the step refuses LOUDLY when even that is too small, instead of
-      # filling the disk and losing the runner.
-      - name: Move Docker storage to the scratch disk
+      # 1.1.19 run died in this step with no conclusion. So Docker moves to /mnt first, and the step
+      # refuses LOUDLY when there is not room, instead of filling the disk and losing the runner.
+      # /mnt is NOT a separate scratch disk on the current runner: measured 2026-11-12 (run
+      # 43178431220, ubuntu-latest = Ubuntu 26.04), `df -h / /mnt` prints /dev/root twice, 88 GB free.
+      # The move gains nothing there; the free-space check is what protects the runner
+      # (fleet-chezmoi#2620).
+      - name: Move Docker storage to /mnt (the same disk on ubuntu-26.04)
         id: room
         env:
           SMOKE_REF: ${{ steps.cfg.outputs.smoke_ref }}
