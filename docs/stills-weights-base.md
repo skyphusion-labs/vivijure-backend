@@ -33,8 +33,8 @@ job finds its leg sentinels. Any other action still pulls what it needs from R2.
 
 ## Build
 
-> The current stills base (`stills-t1-m1`, the `toolchain_ref` for 1.1.19) was built on the bake
-> box, which is retired. **The next one is built by Actions:** `.github/workflows/stills-base.yml`
+> `stills-t1-m1`, the `toolchain_ref` for 1.1.19, was built on the bake box, which is retired.
+> `stills-t1-m1-rc1`, the `toolchain_ref` for 1.1.20, is the first built by Actions: `.github/workflows/stills-base.yml`
 > (fleet-chezmoi#2620) runs steps 1 to 4 below on a GitHub-hosted runner.
 
 ### From Actions (the build path)
@@ -48,7 +48,7 @@ repo-level `R2_*` secrets are not used.
 - **Candidate tags only.** `tag` must be `stills-t<T>-m<M>-rc<N>`, with `t` the toolchain's and `m` the
   model version. A final tag such as `stills-t1-m1` is refused, and so is any tag already on GHCR
   (`deploy/stills-base-resolve.sh`, `tests/test_stills_base_resolve.py`). Promoting a proven candidate
-  to a final name is a registry-side copy by the lead (`docker buildx imagetools create`), never a rebuild.
+  to a final name is a registry-side tag by the lead, by digest, never a rebuild ("Promote a proven candidate", below).
 - **Disk.** The job first removes preinstalled SDKs it never uses, and refuses below 100 GiB free. The
   measured start is 88 GB on `ubuntu-latest` (`/mnt` is the same disk), and the worst-case peak is about
   93 GB. If a real run shows it does not fit, the fallback is reproducible bin tarballs appended with
@@ -174,6 +174,39 @@ docker run --rm ghcr.io/skyphusion-labs/vivijure-backend:<version> \
 It must print `complete` and exit 0. Then push, read the digest back, and repin as
 [runpod-endpoint-config.md](runpod-endpoint-config.md) says.
 
+## Promote a proven candidate (registry-side, by digest)
+
+A candidate gets a final name only after the GPU proof below passed on a worker built FROM it. The
+promotion adds a second tag to the SAME manifest. It is never a rebuild, and the digest does not change,
+so every worker already built FROM the candidate digest is built from the promoted base. Keep the `-rc<N>`
+tag as well; a pinned digest with no tag is GC-bait (RELEASES.md).
+
+**Final names.** `stills-t<T>-m<M>` is the first build of a set; `stills-t1-m1` is the bake-box build and
+stays as it is (a GHCR tag is never overwritten). A later build of the same toolchain and model version,
+whose weight layers have new digests, is `stills-t<T>-m<M>-b<N>`, with `stills-t<T>-m<M>` counted as `b1`.
+So the first Actions build is `stills-t1-m1-b2`. The name says the layers differ from `stills-t1-m1`,
+which is the fact a reader needs: a worker moving between them pulls the weight layers again.
+
+The lead runs it, with a GHCR login that can write the package (`docker login ghcr.io`). It refuses
+when the final tag already exists or the registry cannot say, and it proves the digest after:
+
+```
+set -euo pipefail
+R=ghcr.io/skyphusion-labs/vivijure-backend
+D=sha256:9380cc424f8c76eeb1ac6d8ebfb15d98673b26fd0effdced528ddf76d4afd533   # stills-t1-m1-rc1
+T=stills-t1-m1-b2
+test "$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "$R:stills-t1-m1-rc1")" = "\"$D\""
+if out=$(docker buildx imagetools inspect "$R:$T" 2>&1); then echo "REFUSE: $R:$T exists"; exit 1; fi
+printf '%s' "$out" | grep -Eqi 'not found|manifest unknown' || { echo "REFUSE: cannot tell: $out"; exit 1; }
+docker buildx imagetools create -t "$R:$T" "$R@$D"
+test "$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "$R:$T")" = "\"$D\"" && echo "PROMOTED $R:$T@$D"
+```
+
+`imagetools create` from one source manifest with no annotations pushes that manifest as it is. The last
+line is what proves it: if the digest read back is not `$D`, the tag points at a new manifest, so delete
+that tag and use `crane tag "$R@$D" "$T"` (the pinned crane of `stills-base.yml`), which tags the manifest
+bytes as they are. Then record the promotion here, with the digest read back.
+
 ## Proof on the endpoint
 
 The first job on a new worker must show, in its log and progress:
@@ -197,6 +230,29 @@ The first job on a new worker must show, in its log and progress:
   - In total 16.58 GiB.
 - **Push:** 12:57:39Z to 12:58:36Z (57 s). The 23 toolchain layers already existed on GHCR.
 - **Credential:** read-only, scoped to `models/`, 4 h TTL. It was minted from a dedicated read-only parent token, and the parent was deleted after the stage.
+
+**First Actions build, 2026-11-12 (`stills-t1-m1-rc1@sha256:9380cc424f8c76eeb1ac6d8ebfb15d98673b26fd0effdced528ddf76d4afd533`,
+on `toolchain-t1@sha256:456b417b...`).** `stills-base.yml` run 43299859408 at main `9f2505d` (#644), `crane mutate
+--append` of 4 bin tars. Final name after promotion: `stills-t1-m1-b2` (the section above); not promoted as of this record.
+- **Layers added over the toolchain, compressed (GHCR manifest, read 2026-11-12):**
+  - `beda3952af2d`, 5,020,773,145 bytes;
+  - `638d992d951a`, 7,971,655,393 bytes;
+  - `3575d8216c63`, 5,436,649,064 bytes;
+  - `ed5b4e370251`, 126 bytes (the empty fourth bin, a tar of its own, not the shared empty layer).
+  - In total 18,429,077,728 bytes (17.16 GiB). The first 22 layers are the same as `stills-t1-m1`'s; the 4 weight
+    layers are new digests, so a worker that ran a 1.1.19 or older image pulls them once.
+- **Worker:** `vivijure-backend:1.1.20@sha256:961ac67c96e0e971eb3ce90b9f5f9772a3592cf8c7fbdf7a6fd31cbdfa7c985d`, built FROM this
+  digest (thin-image run 43312194021). CPU import smoke without the weight layers: main run 43319368393 (`smoke_ref` 1.1.20,
+  `smoke_base` rc1), success.
+- **GPU proof (lead, scratch endpoint `vj-stills-proof-1113`, H200 `HOPPER_141`, workersMax 1, made from the live endpoint's
+  template with only the image changed, deleted after; the live endpoint was untouched, release v46 before and after).**
+  Job `bd2ffcd4-cd1b-4e11-8726-6f8936be0e5c-u2`, a `preview` replay of studio film `film-63bbaae3` (project
+  `cf1281_hand_mug`, seed 130605). The worker log has `@event mirror_skipped {"reason": "warm_stills"}`, then
+  `@event mirror_done {"pulled": false, ...}`, and no `mirror_complete`. COMPLETED: keyframe
+  `renders/cf1281_hand_mug/keyframes/bd2ffcd4-cd1b-4e11-8726-6f8936be0e5c-u2/shot_01.png`, no `reused`, plate count clean
+  (expected 2, chosen 2), LoRAs A and B trained in the job. `executionTime` 2,271,623 ms, which is two LoRA trainings
+  plus the draw, not a warm-draw figure. `delayTime` 961,769 ms, mostly the image pull; H200 capacity read LOW and 2 extra
+  placements were THROTTLED.
 
 Record for the first bake: each layer's compressed size, the push time, how long a new worker stays
 `INITIALIZING`, and the cold job's `executionTime`. Those are the after numbers for #564.

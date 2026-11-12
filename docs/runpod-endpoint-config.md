@@ -94,6 +94,33 @@ the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 1
 2. Wait 65 s after the release before submitting anything. Renders through the studio got `keyframe /run -> 409` in that window after the 1.1.7 repin.
 3. On a thin image built on the bare toolchain, after a repin, every worker is cold and pulls about 24 GB from R2 (on a code image built on the stills weights base, a stills job pulls nothing: [stills-weights-base.md](stills-weights-base.md), #564), and a warm-up batch does not change that: each NEW worker pulls again. So keep the number of concurrent cold workers small, about 4 to 6, by submitting in small batches, and budget one cold pull per worker. On 2026-11-06, 15 cold workers at once slowed pulls to 2.6 MiB/s and stretched cold jobs to about 20 minutes each; 6 at once pulled normally (cold delay about 2 to 3 minutes). Submitting 2 first and the rest once they ran did NOT help after a new image: the second batch started on new workers, cold.
 
+**Backend 1.1.20, built and GPU-proven 2026-11-12; NOT pinned as of this record.** The code is the same as 1.1.19; the stills base is new.
+
+- **Code:** main `9f2505d` (thin-image run 43312194021, which pushed the image and then refused its smoke for disk, #645).
+  Against 1.1.19 (main `dd3e7fc`) nothing under `src/` changed and `deploy/smoke_imports.py` did not change.
+  The image is built from `deploy/Dockerfile.thin` with `toolchain_ref` = `stills-t1-m1-rc1@sha256:9380cc424f8c76eeb1ac6d8ebfb15d98673b26fd0effdced528ddf76d4afd533`,
+  the first stills base built by Actions (`stills-base.yml` run 43299859408, #644). Its final name after promotion is
+  `stills-t1-m1-b2` ([stills-weights-base.md](stills-weights-base.md), "Promote a proven candidate"); promotion keeps the digest.
+- **Image:** `vivijure-backend:1.1.20@sha256:961ac67c96e0e971eb3ce90b9f5f9772a3592cf8c7fbdf7a6fd31cbdfa7c985d`.
+  An OCI index: the amd64 manifest `sha256:7d5e736a7ce356b57496b7c02b8f13cb36eb859341d1ea40362311c777924b63` plus a buildx attestation manifest.
+  Pin the index digest, as for 1.1.19.
+- **Cold pull:** against 1.1.19 (GHCR manifests, read 2026-11-12), 29 layers each, 23 shared, 6 new: 18,429,278,177 bytes
+  (17.16 GiB), all but 200,449 bytes the three weight bins. So after the repin every worker's first start pulls about
+  17 GiB once, including hosts that ran 1.1.19, whose weight layers have other digests. That pull is not billed, but it is
+  delay: the proof job below waited 961,769 ms (16 min) with the pull dominant. A stills job then pulls nothing from R2.
+- **Checks on the image:** main smoke-only run 43319368393 (`smoke_ref` 1.1.20, `smoke_base` rc1; nothing built or pushed), success.
+- **GPU proof (lead):** scratch endpoint `vj-stills-proof-1113` (H200 `HOPPER_141`, workersMax 1, from the live
+  endpoint's template with only the image changed; deleted after, GET 404). Job `bd2ffcd4-cd1b-4e11-8726-6f8936be0e5c-u2`, a
+  `preview` replay of `film-63bbaae3` (project `cf1281_hand_mug`, seed 130605): `mirror_skipped {"reason": "warm_stills"}`,
+  `mirror_done {"pulled": false}`, no `mirror_complete`; COMPLETED with keyframe `shot_01.png`, no `reused`, plate count 2 of 2,
+  LoRAs A and B trained in the job (`executionTime` 2,271,623 ms). The live endpoint was untouched (release v46 before and after).
+- **Repin:** the lead's, by the standing procedure above. The plan is on the release PR.
+
+**Backend rollback from 1.1.20:** image
+`vivijure-backend:1.1.19@sha256:9c560486fd11fb7c9d899489c3481a5feee0d2ab1813d61f925f1153282bc6ba` (base `stills-t1-m1`), idle timeout 60 s,
+max 12, `QUEUE_DELAY` 4, disk 300 GB. Follow the repinning procedure above. A rollback is also a cold pull: a worker
+that holds only 1.1.20 pulls the `stills-t1-m1` weight layers (about 16.6 GiB) once.
+
 **Backend 1.1.19, pinned 2026-11-12 (release v46, 07:59:49Z).** A code-only release on the existing stills base: no restage.
 
 - **Code:** main `dd3e7fc` (thin-image run 43070289187). Release PR #632.
