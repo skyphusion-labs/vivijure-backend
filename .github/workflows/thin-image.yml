@@ -176,7 +176,10 @@ jobs:
           # What the smoke loads, from the registry manifests: compressed bytes, and the layers left out.
           WORKER="${IMG}" BASE="${SMOKE_BASE}" python3 -I deploy/smoke_image.py plan > "${RUNNER_TEMP}/smoke-plan.json"
           read -r bytes dropped ndrop < <(python3 -I -c 'import json,sys; p=json.load(open(sys.argv[1])); print(p["bytes"], p["dropped_bytes"], len(p["dropped"]))' "${RUNNER_TEMP}/smoke-plan.json")
-          need=$(( bytes * 5 / 2 ))   # compressed plus unpacked, with margin
+          # Compressed plus unpacked, with margin. Measured (run 43315326937, docker 29.4.2, overlayfs):
+          # loading 13,417,590,982 compressed bytes used 33,927,639,040 on disk, 2.53 times; the old 2.5
+          # was BELOW that. 3 times leaves about 19 percent over the measured use.
+          need=$(( bytes * 3 ))
           sudo systemctl stop docker.socket docker
           sudo mkdir -p /mnt/docker
           sudo python3 -c 'import json,os; p="/etc/docker/daemon.json"; d=json.load(open(p)) if os.path.exists(p) else {}; d["data-root"]="/mnt/docker"; json.dump(d, open(p,"w"))'

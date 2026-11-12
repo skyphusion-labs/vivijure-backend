@@ -210,6 +210,8 @@ def test_the_smoke_loads_the_planned_image_and_checks_both_pipe_statuses():
     assert "smoke_base:" in wf and "SMOKE_BASE: ${{ inputs.smoke_base }}" in wf
     room = wf.split("- name: Move Docker storage to /mnt", 1)[1].split("- name: CPU import smoke", 1)[0]
     assert 'BASE="${SMOKE_BASE}"' in room
+    # run 43315326937 measured the load at 2.53 times the compressed size; the guard must sit above it
+    assert "need=$(( bytes * 3 ))" in room and "bytes * 5 / 2" not in room
     smoke = wf.split("- name: CPU import smoke", 1)[1].split("- name:", 1)[0]
     assert 'st=("${PIPESTATUS[@]}")' in smoke
     assert '"${st[0]}" = 0' in smoke and '"${st[1]}" = 0' in smoke
