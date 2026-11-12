@@ -1,6 +1,9 @@
-# The bake box
+# The bake box (retired)
 
-The bake box is a Vultr host that builds vivijure RunPod images. It is a build
+> **Retired.** From 1.1.19 there is no bake box (RELEASES.md "Current build path"). This page is
+> the record of how the box was run. Do not create one from it.
+
+The bake box was a Vultr host that built vivijure RunPod images. It is a build
 host. It is not a crew seat and it is not a CI runner. Crew operate from the
 laptop and reach the box through a tunnel.
 
