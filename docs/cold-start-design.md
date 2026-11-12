@@ -1,5 +1,11 @@
 # Cold-start design (issue #55, Phase B)
 
+> **Current build path:** see [RELEASES.md](../RELEASES.md) "Current build path". In short: the worker image is
+> built by `thin-image.yml` on GitHub-hosted `ubuntu-latest`, from an existing base digest
+> (`toolchain_ref`). `release.yml`, `runtime-build.yml` and `seed-build.yml` are disabled and fail
+> closed. There is no bake box and no self-hosted runner. The text below describes the design decision as made; the `vivijure-bake` runner lane it names is gone.
+
+
 How a cold worker gets its model weights, why that dominates wall-clock under concurrent
 fan-out, and which structural fix to take. This is the decision doc the 0.2.20 telemetry
 (`@event mirror_complete` / `i2v_mirror_complete`, issue #55 Phase A) was built to inform; it

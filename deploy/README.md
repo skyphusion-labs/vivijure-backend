@@ -30,7 +30,12 @@ worker.handler})`. Per job the handler builds a `GpuPipeline` from the request's
 `RenderConfig`, registers it on the harness seam, and delegates to `harness.handler` (baked-model
 load, R2 job I/O, plan, GPU stages, off-GPU finish, results out).
 
-## Build (GitHub Actions, on a git tag)
+## Build (GitHub Actions, on a git tag). Historical
+
+> **Current build path:** see [RELEASES.md](../RELEASES.md) "Current build path". In short: the worker image is
+> built by `thin-image.yml` on GitHub-hosted `ubuntu-latest`, from an existing base digest
+> (`toolchain_ref`). `release.yml`, `runtime-build.yml` and `seed-build.yml` are disabled and fail
+> closed. There is no bake box and no self-hosted runner. The text below describes the earlier `release.yml` tag build, kept as the record.
 
 Build + push happen on a `backend-vX.Y.Z` tag (see `../.github/workflows/release.yml`); a plain
 commit is a no-op. The build runs on the **`vivijure-bake` larger runner** (32-core / 128 GB /

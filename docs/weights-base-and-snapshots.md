@@ -1,5 +1,11 @@
 # Backend image chain: seed -> runtime -> backend + runner snapshots (#537)
 
+> **Current build path:** see [RELEASES.md](../RELEASES.md) "Current build path". In short: the worker image is
+> built by `thin-image.yml` on GitHub-hosted `ubuntu-latest`, from an existing base digest
+> (`toolchain_ref`). `release.yml`, `runtime-build.yml` and `seed-build.yml` are disabled and fail
+> closed. There is no bake box and no self-hosted runner. The text below describes the chain as it was built; its builders are disabled now, and the runner snapshot is retired.
+
+
 How the backend bake stopped re-downloading ~87 GB of weights from R2 on every release, and how a
 custom runner snapshot makes a release bake assemble-and-push only. ICD-grade: reproducible from this
 doc alone.

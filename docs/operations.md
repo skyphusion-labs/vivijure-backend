@@ -44,6 +44,11 @@ delegates to `harness.handler` (mirror, R2 in, plan, GPU stages, off-GPU finish,
 
 ## Build and deploy
 
+> **Current build path:** see [RELEASES.md](../RELEASES.md) "Current build path". In short: the worker image is
+> built by `thin-image.yml` on GitHub-hosted `ubuntu-latest`, from an existing base digest
+> (`toolchain_ref`). `release.yml`, `runtime-build.yml` and `seed-build.yml` are disabled and fail
+> closed. There is no bake box and no self-hosted runner. The text below describes the earlier `release.yml` tag build, kept as the record.
+
 Build and deploy are deliberately separate steps: a build does not touch the live endpoint.
 
 **Build (GitHub Actions, on a git tag).** A pushed `backend-vX.Y.Z` tag triggers
