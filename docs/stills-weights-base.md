@@ -34,7 +34,39 @@ job finds its leg sentinels. Any other action still pulls what it needs from R2.
 ## Build
 
 > The current stills base (`stills-t1-m1`, the `toolchain_ref` for 1.1.19) was built on the bake
-> box, which is retired. A host for the next stills build is not settled in this repo yet.
+> box, which is retired. **The next one is built by Actions:** `.github/workflows/stills-base.yml`
+> (fleet-chezmoi#2620) runs steps 1 to 4 below on a GitHub-hosted runner.
+
+### From Actions (the build path)
+
+Dispatch `stills-base.yml` from `main` with `toolchain_ref` (a full digest of `toolchain-t<N>`), `tag` and
+`model_version`. The job runs in the `stills-bake` environment (a required reviewer, main only), which holds three
+secrets: `STILLS_R2_ENDPOINT`, `STILLS_R2_ACCESS_KEY_ID` and
+`STILLS_R2_SECRET_ACCESS_KEY`, a read-only R2 token with Object Read on bucket `vivijure` only. The
+repo-level `R2_*` secrets are not used.
+
+- **Candidate tags only.** `tag` must be `stills-t<T>-m<M>-rc<N>`, with `t` the toolchain's and `m` the
+  model version. A final tag such as `stills-t1-m1` is refused, and so is any tag already on GHCR
+  (`deploy/stills-base-resolve.sh`, `tests/test_stills_base_resolve.py`). Promoting a proven candidate
+  to a final name is a registry-side copy by the lead (`docker buildx imagetools create`), never a rebuild.
+- **Disk.** The job first removes preinstalled SDKs it never uses, and refuses below 100 GiB free. The
+  measured start is 88 GB on `ubuntu-latest` (`/mnt` is the same disk), and the worst-case peak is about
+  93 GB. If a real run shows it does not fit, the fallback is reproducible bin tarballs appended with
+  `crane`, not a larger runner.
+- **Stage** with the worker's own pull, on the runner's Python, through the mirror's own `MODELS_R2_*`
+  names (handed to rclone as `RCLONE_CONFIG_R2_*` environment variables, never a file). No throwaway
+  image is needed, because the code IS the checked-out commit.
+- **Reproducible layers.** `bin_pack` sorts by (size, path), so the same set always packs the same way,
+  and the build sets `SOURCE_DATE_EPOCH` to the commit time with `rewrite-timestamp=true`. So an unchanged
+  bin rebuilds to the same layer digest.
+- **Push only.** The toolchain is referenced, never pulled or unpacked. The digest the push returned is
+  read back from GHCR by tag, and every layer is checked against the 10 GiB limit from the registry
+  manifest (`deploy/image_bytes.py` with `MODE=max-layer`; `verify-image` needs a local image).
+- **Then** dispatch `thin-image.yml` with `toolchain_ref` = the printed `ref@digest` and the next free
+  `X.Y.Z`. The live worker and its tag are never touched. The GPU proof below runs on a scratch endpoint,
+  never the live one.
+
+### On a host (the bake box record)
 
 It was run on the bake box ([bake-box.md](bake-box.md)). It needs two credentials, both for this run only:
 

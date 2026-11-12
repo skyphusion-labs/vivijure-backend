@@ -1,0 +1,217 @@
+name: Stills weights base (#564)
+
+# Builds the stills weights base (the toolchain plus the stills set and the finish legs, as 4 weight
+# layers) on a GitHub-hosted runner and pushes it to a CANDIDATE tag only (fleet-chezmoi#2620). The
+# live base, stills-t1-m1 under 1.1.19, was built on the retired bake box; Conrad's ruling of
+# 2026-11-12 is that every deployed artifact is built by Actions. The procedure is
+# docs/stills-weights-base.md, and this workflow runs its steps 1 to 4 in order.
+#
+# What it never does: write a final tag (stills-t1-m1 or any stills-t<T>-m<M>), retag the live worker
+# image, or touch a RunPod endpoint. A proven candidate is promoted by the lead, registry-side; the
+# code image is built on it by thin-image.yml (toolchain_ref = this run's ref@digest).
+#
+# DISK (measured 2026-11-12, run 43178431220, ubuntu-latest = 26.04): / has 88 GB free at the start,
+# and /mnt is the same disk. The worst-case peak here is about 93 GB (staged tree 26.7, the build
+# context sent into the builder 24.9, the COPY snapshots up to 24.9, the compressed blobs 16.6; the
+# bins are hardlinks). So the first step reclaims preinstalled SDKs this job never uses and refuses
+# below 100 GiB free, before any credential is read or any byte is pulled. If a real run shows the
+# peak does not fit, the fallback is reproducible bin tarballs appended with crane, not a larger
+# runner (fleet-chezmoi#2620, the lead's ruling).
+#
+# REPRODUCIBLE LAYERS: bake_layers.bin_pack sorts by (size, path), so the same staged set always packs
+# into the same bins, and the build sets SOURCE_DATE_EPOCH to the commit time with rewrite-timestamp,
+# so an unchanged bin rebuilds to the same layer digest. GHCR then stores it once, and a RunPod host
+# that holds the previous base pulls only the bins that changed.
+#
+# CREDENTIAL: a read-only R2 token, Object Read on bucket `vivijure` only, in the `stills-bake`
+# environment (required reviewer, main only). It reaches only the stage step, as the mirror's own
+# MODELS_R2_* names, which harness.models_mirror hands to rclone as RCLONE_CONFIG_R2_* environment
+# variables: never a file, never argv. The repo-level R2_* secrets are NOT used here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      toolchain_ref:
+        description: 'Full digest of the toolchain: ghcr.io/skyphusion-labs/vivijure-backend:toolchain-t<N>@sha256:<64 hex>'
+        required: true
+        type: string
+      tag:
+        description: 'Candidate tag, stills-t<T>-m<M>-rc<N> (t = the toolchain, m = model_version). Never a final tag.'
+        required: true
+        type: string
+      model_version:
+        description: 'VJ_MODEL_VERSION. Must match the endpoint value, or every worker pulls again.'
+        required: true
+        default: '1'
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: stills-base
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/skyphusion-labs/vivijure-backend
+  # 100 GiB: the measured 93 GB worst case plus margin.
+  NEED_FREE_BYTES: '107374182400'
+  # The GHCR layer limit bake_layers.py enforces (GHCR_LAYER_LIMIT_BYTES, 10 GiB).
+  LAYER_LIMIT_BYTES: '10737418240'
+
+jobs:
+  bake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    environment: stills-bake
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Only main, and only a commit on origin/main
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          [ "$REF" = "refs/heads/main" ] || { echo "::error::stills-base runs only from main, not $REF"; exit 1; }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::$GITHUB_SHA is not on origin/main"; exit 1; }
+
+      # First, before any credential or pull: make room, and refuse loudly if there is not enough.
+      - name: Reclaim disk (refuse below 100 GiB free)
+        run: |
+          set -euo pipefail
+          df -h /
+          for d in /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+                   /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/powershell \
+                   /usr/local/share/chromium /usr/local/lib/node_modules /opt/microsoft; do
+            if [ -e "$d" ]; then sudo rm -rf "$d"; fi
+          done
+          docker image prune -af >/dev/null
+          df -h /
+          avail=$(( $(df --output=avail -B1 / | tail -1) ))
+          echo "free on /: ${avail} bytes; need ${NEED_FREE_BYTES}"
+          printf 'Disk after reclaim: %s bytes free (need %s).\n' "${avail}" "${NEED_FREE_BYTES}" >> "$GITHUB_STEP_SUMMARY"
+          [ "${avail}" -ge "${NEED_FREE_BYTES}" ] || { echo "::error::${avail} bytes free after the reclaim, the build needs ${NEED_FREE_BYTES}: this runner cannot hold it (fallback: crane-appended bin tarballs, fleet-chezmoi#2620)"; exit 1; }
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Candidate tag only, not already on GHCR, toolchain digest readable. Tests:
+      # tests/test_stills_base_resolve.py.
+      - name: Resolve and check inputs
+        id: cfg
+        env:
+          TAG: ${{ inputs.tag }}
+          REF: ${{ inputs.toolchain_ref }}
+          MODEL_VERSION: ${{ inputs.model_version }}
+        run: bash deploy/stills-base-resolve.sh
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install the stage's dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          sudo apt-get update -qq && sudo apt-get install -y -qq rclone
+
+      # Step 1 of the doc: the worker's own pull, at this commit. Unpiped, so the exit judged is the
+      # stage's own; it ends with "stills tree at ... is complete" and exits 0, or it fails the job.
+      - name: Stage the stills set and the finish legs (the worker's own pull)
+        env:
+          MODELS_R2_ENDPOINT: ${{ secrets.STILLS_R2_ENDPOINT }}
+          MODELS_R2_ACCESS_KEY_ID: ${{ secrets.STILLS_R2_ACCESS_KEY_ID }}
+          MODELS_R2_SECRET_ACCESS_KEY: ${{ secrets.STILLS_R2_SECRET_ACCESS_KEY }}
+          MODELS_R2_BUCKET: vivijure
+          VJ_MODEL_VERSION: ${{ steps.cfg.outputs.model_version }}
+          PYTHONPATH: src
+        run: |
+          set -euo pipefail
+          for v in MODELS_R2_ENDPOINT MODELS_R2_ACCESS_KEY_ID MODELS_R2_SECRET_ACCESS_KEY; do
+            [ -n "${!v:+SET}" ] || { echo "::error::$v is empty: the stills-bake environment is missing a STILLS_R2_* secret"; exit 1; }
+          done
+          stage="$RUNNER_TEMP/stills/stage"
+          mkdir -p "$stage"
+          VJ_MODELS_ROOT="$stage" HF_HOME="$stage/hf-cache" \
+            python -m vivijure_backend.harness.models_mirror --stage-stills
+          du -sh "$stage"
+
+      # Step 2: gate the staged tree.
+      - name: Gate the staged tree
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/stills/stage"
+          python3 deploy/bake_layers.py assert-no-tree-cache --root "$stage/hf-cache"
+          python3 deploy/bake_layers.py assert-finish-shas --root "$stage"
+
+      # Step 3: pack under the layer limit (hardlinks, so no second copy of the bytes).
+      - name: Pack into 4 bins
+        run: |
+          set -euo pipefail
+          python3 deploy/bake_layers.py bin --src "$RUNNER_TEMP/stills/stage" --out "$RUNNER_TEMP/stills/bins" \
+            --bins 4 --ceiling-gb 9.5 --min-gb 23
+          df -h /
+
+      - name: Commit time for reproducible layers
+        id: epoch
+        run: echo "epoch=$(git log -1 --format=%ct "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
+
+      # Step 4: build and push, to the candidate tag only. Push-only (no load), so the toolchain is
+      # referenced, never pulled or unpacked.
+      - name: Build and push the candidate base
+        id: base
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.epoch.outputs.epoch }}
+        with:
+          context: ${{ runner.temp }}/stills/bins
+          file: deploy/stills-weights.Dockerfile
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+          build-args: |
+            TOOLCHAIN_REF=${{ steps.cfg.outputs.toolchain_ref }}
+          outputs: type=image,name=${{ env.IMAGE }}:${{ steps.cfg.outputs.tag }},push=true,rewrite-timestamp=true
+
+      # The digest the push returned, read back from GHCR by tag: they must be the same image. Then
+      # every layer under the GHCR limit, read from the registry manifest.
+      - name: Pushed digest and layer limit
+        id: pushed
+        env:
+          DIGEST: ${{ steps.base.outputs.digest }}
+          TAGGED: ${{ env.IMAGE }}:${{ steps.cfg.outputs.tag }}
+          FROM: ${{ steps.cfg.outputs.toolchain_ref }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${DIGEST}" | grep -Eqx 'sha256:[0-9a-f]{64}' || { echo "::error::the push returned no digest"; exit 1; }
+          back=$(docker buildx imagetools inspect "${TAGGED}" --format '{{.Manifest.Digest}}')
+          [ "${back}" = "${DIGEST}" ] || { echo "::error::GHCR has ${TAGGED} at ${back}, the push returned ${DIGEST}"; exit 1; }
+          biggest=$(IMG="${IMAGE}@${DIGEST}" MODE=max-layer python3 deploy/image_bytes.py)
+          [ "${biggest}" -lt "${LAYER_LIMIT_BYTES}" ] || { echo "::error::a layer is ${biggest} bytes, at or over the GHCR limit ${LAYER_LIMIT_BYTES}"; exit 1; }
+          total=$(IMG="${IMAGE}@${DIGEST}" python3 deploy/image_bytes.py)
+          ref="${TAGGED}@${DIGEST}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "Pushed ${ref} from ${FROM}: ${total} bytes compressed, largest layer ${biggest}."
+          {
+            echo "Pushed candidate \`${ref}\`"
+            echo "from \`${FROM}\`, ${total} bytes compressed, largest layer ${biggest} bytes."
+            echo "Next: thin-image.yml with toolchain_ref = this ref. Promotion to a final tag is a lead-only registry copy."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Disk after build
+        if: always()
+        run: df -h /

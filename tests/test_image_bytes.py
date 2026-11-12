@@ -24,12 +24,14 @@ print(json.dumps(table[ref]))
 """
 
 
-def run(tmp_path, manifests, img=TOP):
+def run(tmp_path, manifests, img=TOP, mode=None):
     stub = tmp_path / "inspect"
     stub.write_text(STUB)
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
     (tmp_path / "m.json").write_text(json.dumps(manifests))
     env = {"PATH": os.environ["PATH"], "INSPECT": str(stub), "MANIFESTS": str(tmp_path / "m.json"), "IMG": img}
+    if mode:
+        env["MODE"] = mode
     return subprocess.run(["python3", "-I", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=30)
 
 
@@ -69,3 +71,25 @@ def test_a_manifest_with_no_layers_is_never_size_zero(tmp_path):
 def test_a_tag_without_a_digest_is_refused(tmp_path):
     r = run(tmp_path, {}, img=REPO + ":1.1.19")
     assert r.returncode == 1 and "digest ref" in r.stderr
+
+
+def test_max_layer_prints_the_largest_layer(tmp_path):
+    """stills-base.yml (#564, fc#2620) checks the largest pushed layer against the GHCR limit."""
+    r = run(tmp_path, {TOP: image(1000, 9_000_000_000, 2000)}, mode="max-layer")
+    assert r.returncode == 0, r.stderr
+    assert int(r.stdout) == 9_000_000_000
+
+
+def test_max_layer_follows_an_index_to_amd64(tmp_path):
+    index = {"mediaType": "application/vnd.oci.image.index.v1+json", "manifests": [
+        {"digest": ARM, "platform": {"os": "linux", "architecture": "arm64"}},
+        {"digest": AMD, "platform": {"os": "linux", "architecture": "amd64"}},
+    ]}
+    r = run(tmp_path, {TOP: index, f"{REPO}@{AMD}": image(7, 3), f"{REPO}@{ARM}": image(999_999)}, mode="max-layer")
+    assert r.returncode == 0, r.stderr
+    assert int(r.stdout) == 7
+
+
+def test_max_layer_on_a_manifest_without_layers_fails(tmp_path):
+    r = run(tmp_path, {TOP: image()}, mode="max-layer")
+    assert r.returncode != 0

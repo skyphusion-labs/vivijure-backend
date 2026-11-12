@@ -109,6 +109,32 @@ def test_bin_pack_succeeds_above_floor(tmp_path):
 
 # ------------------------------------------------------------------- assert-no-tree-cache (#206)
 
+def _bin_of(out: Path) -> dict:
+    """{relpath: bin dir name} for every regular file the pack placed."""
+    return {str(p.relative_to(b)): b.name
+            for b in sorted(out.iterdir()) if b.is_dir()
+            for p in b.rglob("*") if p.is_file() and not p.is_symlink()}
+
+
+def test_bin_pack_is_independent_of_walk_order(tmp_path, monkeypatch):
+    """Equal-size files must pack the same way whatever order the filesystem lists them in (#564,
+    fc#2620). Three 1 MB files with a 2.5 MB ceiling: two fit bin-00 and the third goes to bin-01.
+    With a size-only sort key the third is whichever the walk listed last, so the same staged set
+    packs differently on two hosts and an unchanged bin rebuilds to a different layer."""
+    src = tmp_path / "src"
+    names = ["a.bin", "b.bin", "c.bin"]
+    for n in names:
+        _mkfile(src / n, 1 * MB)
+    placed = []
+    for order in (names, list(reversed(names))):
+        monkeypatch.setattr(bake_layers, "_walk_regular_files",
+                            lambda root, order=order: ((Path(n), (root / n).stat().st_size) for n in order))
+        out = tmp_path / f"bins-{len(placed)}"
+        bake_layers.bin_pack(src, out, bins=2, ceiling=int(2.5 * MB), min_gb=0.0)
+        placed.append(_bin_of(out))
+    assert placed[0] == placed[1]
+
+
 def _tree_listing(hub: Path, repo: str, commit: str) -> Path:
     """Write a fake hf_hub tree-cache listing at <hub>/<repo>/trees/<commit>.json."""
     p = hub / repo / "trees" / f"{commit}.json"

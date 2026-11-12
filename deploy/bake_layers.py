@@ -118,7 +118,11 @@ def bin_pack(src: Path, out: Path, bins: int, ceiling: int, min_gb: float = 0.5,
     `rclone copy` of an empty R2 prefix exits 0). Returns the plan dict (also written to bake-bins.json)."""
     if ceiling >= GHCR_LAYER_LIMIT_BYTES:
         raise SystemExit("ceiling must be < 10 GB (the GHCR limit); pick e.g. 9.0 GB for headroom")
-    files = sorted(_walk_regular_files(src), key=lambda rs: rs[1], reverse=True)
+    # Key (size, path), not size alone: equal-size files otherwise keep the filesystem's walk order,
+    # so the same staged set could pack into different bins on two hosts, and a rebuild would produce
+    # different weight layers for unchanged bytes. With a total order the same set always packs the
+    # same way, which is what lets an unchanged bin rebuild to the same layer digest (#564, fc#2620).
+    files = sorted(_walk_regular_files(src), key=lambda rs: (rs[1], str(rs[0])), reverse=True)
     over = [(str(r), sz) for r, sz in files if sz >= GHCR_LAYER_LIMIT_BYTES]
     if over:
         for rel, sz in over:
