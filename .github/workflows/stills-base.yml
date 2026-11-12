@@ -11,17 +11,22 @@ name: Stills weights base (#564)
 # code image is built on it by thin-image.yml (toolchain_ref = this run's ref@digest).
 #
 # DISK (measured 2026-11-12, run 43178431220, ubuntu-latest = 26.04): / has 88 GB free at the start,
-# and /mnt is the same disk. The worst-case peak here is about 93 GB (staged tree 26.7, the build
-# context sent into the builder 24.9, the COPY snapshots up to 24.9, the compressed blobs 16.6; the
-# bins are hardlinks). So the first step reclaims preinstalled SDKs this job never uses and refuses
-# below 100 GiB free, before any credential is read or any byte is pulled. If a real run shows the
-# peak does not fit, the fallback is reproducible bin tarballs appended with crane, not a larger
-# runner (fleet-chezmoi#2620, the lead's ruling).
+# and /mnt is the same disk. Option A (a BuildKit build of deploy/stills-weights.Dockerfile, ~93 GB worst
+# case) ran out of space in run 43292232874 even after the reclaim, and is REMOVED, not kept behind an
+# input: it cannot fit this runner, and a default-off path nobody runs is an untested path (git history
+# keeps it). This is option B (fleet-chezmoi#2620): each bin becomes ONE reproducible, uncompressed tar
+# (bake_layers.py layer-tar), the stage's names are deleted once packed and each bin as soon as its tar
+# exists, and a pinned `crane mutate --append` streams the tars onto the toolchain digest, compressing
+# on the fly (no temp copy, no pull or unpack of the toolchain). Peak, estimated from the first bake's
+# sizes: the 26.7 GB stage, then the stage's bytes as remaining bins plus finished tars, plus at most
+# one bin's tar in flight (largest bin 9.49 GiB = 10.2 GB): about 37 GB, plus ~2 GB of Python. The
+# floor is 50 GiB, that peak plus about 35 percent margin.
 #
 # REPRODUCIBLE LAYERS: bake_layers.bin_pack sorts by (size, path), so the same staged set always packs
-# into the same bins, and the build sets SOURCE_DATE_EPOCH to the commit time with rewrite-timestamp,
-# so an unchanged bin rebuilds to the same layer digest. GHCR then stores it once, and a RunPod host
-# that holds the previous base pulls only the bins that changed.
+# into the same bins; layer-tar writes sorted entries with every mtime the commit time, uid/gid 0 and
+# fixed modes, so an unchanged bin gives the same tar (the same diff_id), and the same pinned crane
+# compresses it to the same layer digest. GHCR then stores it once, and a RunPod host that holds the
+# previous base pulls only the bins that changed.
 #
 # CREDENTIAL: a read-only R2 token, Object Read on bucket `vivijure` only, in the `stills-bake`
 # environment (required reviewer, main only). It reaches only the stage step, as the mirror's own
@@ -55,8 +60,15 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/skyphusion-labs/vivijure-backend
-  # 100 GiB: the measured 93 GB worst case plus margin.
-  NEED_FREE_BYTES: '107374182400'
+  # 50 GiB: option B's estimated 37 GB peak (see DISK above) plus about 35 percent margin. Option A's
+  # BuildKit build needed 100 GiB and still ran out (run 43292232874).
+  NEED_FREE_BYTES: '53687091200'
+  # The bin count: bake_layers.py bin --bins, one layer each, and the --bins in docs/stills-weights-base.md.
+  BINS: '4'
+  # crane (go-containerregistry), pinned by release AND by the sha256 of its Linux x86_64 archive, as
+  # published in that release's checksums.txt (read 2026-11-12).
+  CRANE_VERSION: 'v0.22.1'
+  CRANE_SHA256: '0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0'
   # The GHCR layer limit bake_layers.py enforces (GHCR_LAYER_LIMIT_BYTES, 10 GiB).
   LAYER_LIMIT_BYTES: '10737418240'
 
@@ -81,7 +93,7 @@ jobs:
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::$GITHUB_SHA is not on origin/main"; exit 1; }
 
       # First, before any credential or pull: make room, and refuse loudly if there is not enough.
-      - name: Reclaim disk (refuse below 100 GiB free)
+      - name: Reclaim disk (refuse below 50 GiB free)
         run: |
           set -euo pipefail
           df -h /
@@ -95,8 +107,22 @@ jobs:
           avail=$(( $(df --output=avail -B1 / | tail -1) ))
           echo "free on /: ${avail} bytes; need ${NEED_FREE_BYTES}"
           printf 'Disk after reclaim: %s bytes free (need %s).\n' "${avail}" "${NEED_FREE_BYTES}" >> "$GITHUB_STEP_SUMMARY"
-          [ "${avail}" -ge "${NEED_FREE_BYTES}" ] || { echo "::error::${avail} bytes free after the reclaim, the build needs ${NEED_FREE_BYTES}: this runner cannot hold it (fallback: crane-appended bin tarballs, fleet-chezmoi#2620)"; exit 1; }
+          [ "${avail}" -ge "${NEED_FREE_BYTES}" ] || { echo "::error::${avail} bytes free after the reclaim, the bake needs ${NEED_FREE_BYTES}: this runner cannot hold it (fleet-chezmoi#2620)"; exit 1; }
 
+      - name: Install crane (pinned version and sha256)
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/crane"
+          mkdir -p "$d"
+          curl -fsSL --retry 3 -o "$d/crane.tar.gz" \
+            "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "${CRANE_SHA256}  $d/crane.tar.gz" | sha256sum -c -
+          tar -xzf "$d/crane.tar.gz" -C "$d" crane
+          got=$("$d/crane" version)
+          [ "$got" = "${CRANE_VERSION#v}" ] || { echo "::error::crane reports version $got, pinned ${CRANE_VERSION}"; exit 1; }
+          echo "$d" >> "$GITHUB_PATH"
+
+      # The resolve probe and image_bytes.py read the registry with docker buildx imagetools.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -163,33 +189,71 @@ jobs:
         run: |
           set -euo pipefail
           python3 deploy/bake_layers.py bin --src "$RUNNER_TEMP/stills/stage" --out "$RUNNER_TEMP/stills/bins" \
-            --bins 4 --ceiling-gb 9.5 --min-gb 23
+            --bins "$BINS" --ceiling-gb 9.5 --min-gb 23
           df -h /
 
       - name: Commit time for reproducible layers
         id: epoch
         run: echo "epoch=$(git log -1 --format=%ct "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
 
-      # Step 4: build and push, to the candidate tag only. Push-only (no load), so the toolchain is
-      # referenced, never pulled or unpacked.
-      - name: Build and push the candidate base
-        id: base
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      # Step 4a: one reproducible tar per bin. The bins are hardlinks into the stage, so the stage's
+      # names go first (nothing is freed yet: the bins hold the bytes), then each bin goes as soon as
+      # its tar exists. The disk then holds the stage's bytes once, plus one tar in flight.
+      - name: Write the bin layer tars
         env:
-          SOURCE_DATE_EPOCH: ${{ steps.epoch.outputs.epoch }}
-        with:
-          context: ${{ runner.temp }}/stills/bins
-          file: deploy/stills-weights.Dockerfile
-          platforms: linux/amd64
-          provenance: false
-          sbom: false
-          build-args: |
-            TOOLCHAIN_REF=${{ steps.cfg.outputs.toolchain_ref }}
-          outputs: type=image,name=${{ env.IMAGE }}:${{ steps.cfg.outputs.tag }},push=true,rewrite-timestamp=true
+          EPOCH: ${{ steps.epoch.outputs.epoch }}
+        run: |
+          set -euo pipefail
+          bins="$RUNNER_TEMP/stills/bins"
+          layers="$RUNNER_TEMP/stills/layers"
+          mkdir -p "$layers"
+          cp "$bins/bake-bins.json" "$layers/bake-bins.json"
+          rm -rf "$RUNNER_TEMP/stills/stage"
+          : > "$layers/diff-ids"
+          for i in $(seq 0 $((BINS - 1))); do
+            b=$(printf 'bin-%02d' "$i")
+            [ -d "$bins/$b" ] || { echo "::error::$bins/$b is missing; bin packed fewer than $BINS bins"; exit 1; }
+            python3 deploy/bake_layers.py layer-tar --bin "$bins/$b" --out "$layers/$b.tar" --epoch "$EPOCH" >> "$layers/diff-ids"
+            rm -rf "${bins:?}/$b"
+            df -h / | tail -1
+          done
+          [ "$(grep -Ecx 'sha256:[0-9a-f]{64}' "$layers/diff-ids")" = "$BINS" ] || { echo "::error::expected $BINS diff_ids"; exit 1; }
+          cat "$layers/diff-ids"
 
-      # The digest the push returned, read back from GHCR by tag: they must be the same image. Then
-      # every layer under the GHCR limit, read from the registry manifest.
-      - name: Pushed digest and layer limit
+      # Step 4b: append the tars onto the EXACT toolchain digest and push, to the candidate tag only.
+      # crane reads the toolchain's manifest and config, never its layers, and the GHCR login above.
+      # The config (entrypoint, env, cmd, labels) is the toolchain's; four labels are added.
+      - name: Append the bin layers to the toolchain and push the candidate
+        id: base
+        env:
+          FROM: ${{ steps.cfg.outputs.toolchain_ref }}
+          TAGGED: ${{ env.IMAGE }}:${{ steps.cfg.outputs.tag }}
+          MODEL_VERSION: ${{ steps.cfg.outputs.model_version }}
+        run: |
+          set -euo pipefail
+          layers="$RUNNER_TEMP/stills/layers"
+          base="${IMAGE}@${FROM##*@}"
+          stills_set="sha256:$(sha256sum src/vivijure_backend/harness/stills_manifest.json | cut -d' ' -f1)"
+          args=()
+          for i in $(seq 0 $((BINS - 1))); do args+=(--append "$layers/$(printf 'bin-%02d' "$i").tar"); done
+          {
+            echo "org.opencontainers.image.revision=${GITHUB_SHA}"
+            echo "org.skyphusion.vivijure.stills-manifest=${stills_set}"
+            echo "org.skyphusion.vivijure.model-version=${MODEL_VERSION}"
+            echo "org.skyphusion.vivijure.toolchain=${FROM}"
+          } > "$layers/labels"
+          labels=()
+          while IFS= read -r kv; do labels+=(--label "$kv"); done < "$layers/labels"
+          pushed=$(crane mutate "$base" --platform linux/amd64 "${args[@]}" "${labels[@]}" -t "$TAGGED")
+          digest="${pushed##*@}"
+          printf '%s' "$digest" | grep -Eqx 'sha256:[0-9a-f]{64}' || { echo "::error::crane printed no digest (got '$pushed')"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          df -h / | tail -1
+
+      # The digest crane returned, read back from GHCR by tag: they must be the same image. Then the
+      # config: the toolchain's, with exactly this run's tars appended and the labels set. Then every
+      # layer under the GHCR limit, read from the registry manifest.
+      - name: Pushed digest, config and layer limit
         id: pushed
         env:
           DIGEST: ${{ steps.base.outputs.digest }}
@@ -197,9 +261,15 @@ jobs:
           FROM: ${{ steps.cfg.outputs.toolchain_ref }}
         run: |
           set -euo pipefail
-          printf '%s' "${DIGEST}" | grep -Eqx 'sha256:[0-9a-f]{64}' || { echo "::error::the push returned no digest"; exit 1; }
-          back=$(docker buildx imagetools inspect "${TAGGED}" --format '{{.Manifest.Digest}}')
-          [ "${back}" = "${DIGEST}" ] || { echo "::error::GHCR has ${TAGGED} at ${back}, the push returned ${DIGEST}"; exit 1; }
+          layers="$RUNNER_TEMP/stills/layers"
+          back=$(crane digest "${TAGGED}")
+          [ "${back}" = "${DIGEST}" ] || { echo "::error::GHCR has ${TAGGED} at ${back}, crane returned ${DIGEST}"; exit 1; }
+          crane config --platform linux/amd64 "${IMAGE}@${FROM##*@}" > "$layers/base-config.json"
+          crane config "${IMAGE}@${DIGEST}" > "$layers/config.json"
+          label_args=()
+          while IFS= read -r kv; do label_args+=(--label "$kv"); done < "$layers/labels"
+          python3 deploy/bake_layers.py assert-appended --base-config "$layers/base-config.json" \
+            --config "$layers/config.json" --diff-ids "$layers/diff-ids" "${label_args[@]}"
           biggest=$(IMG="${IMAGE}@${DIGEST}" MODE=max-layer python3 deploy/image_bytes.py)
           [ "${biggest}" -lt "${LAYER_LIMIT_BYTES}" ] || { echo "::error::a layer is ${biggest} bytes, at or over the GHCR limit ${LAYER_LIMIT_BYTES}"; exit 1; }
           total=$(IMG="${IMAGE}@${DIGEST}" python3 deploy/image_bytes.py)
@@ -209,6 +279,8 @@ jobs:
           {
             echo "Pushed candidate \`${ref}\`"
             echo "from \`${FROM}\`, ${total} bytes compressed, largest layer ${biggest} bytes."
+            echo "Bin layer diff_ids (reproducible: an unchanged bin gives the same one):"
+            sed 's/^/- /' "$layers/diff-ids"
             echo "Next: thin-image.yml with toolchain_ref = this ref. Promotion to a final tag is a lead-only registry copy."
           } >> "$GITHUB_STEP_SUMMARY"
 

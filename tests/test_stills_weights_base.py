@@ -1,6 +1,8 @@
 """The stills weights base image (#564): what it may hold, how it is staged, and how a worker trusts it.
 
-The image itself is built on the bake box. These tests hold its Dockerfile, its runbook, the stage and
+The image is built by .github/workflows/stills-base.yml: each bin is written as one reproducible tar
+(deploy/bake_layers.py layer-tar, tested in tests/test_bake_layers.py) and appended to the toolchain with
+a pinned crane (option B, fleet-chezmoi#2620). These tests hold that workflow, its runbook, the stage and
 check commands, and the runtime check of the stills sentinel, so a base that would lie fails here first.
 """
 from __future__ import annotations
@@ -15,40 +17,85 @@ from vivijure_backend.harness import models_mirror as mm
 from vivijure_backend.harness import stills_manifest as sm
 
 ROOT = Path(__file__).resolve().parent.parent
-DOCKERFILE = ROOT / "deploy" / "stills-weights.Dockerfile"
+WORKFLOW = ROOT / ".github" / "workflows" / "stills-base.yml"
 RUNBOOK = ROOT / "docs" / "stills-weights-base.md"
 BIG = "a" * 64
 REPO = {"dir": "models--o--r", "repo_id": "o/r", "revision": "rev1", "files": [
     {"path": "unet/m.safetensors", "blob": BIG, "bytes": 5}]}
 
 
-def _instructions() -> list[str]:
-    return [ln.strip() for ln in DOCKERFILE.read_text().splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+def _workflow() -> dict:
+    import yaml
+
+    return yaml.safe_load(WORKFLOW.read_text())
 
 
-# ------------------------------------------------------------------ the Dockerfile
-
-def test_the_base_builds_on_a_named_toolchain_with_no_default():
-    lines = _instructions()
-    assert lines[0] == "ARG TOOLCHAIN_REF"
-    assert lines[1] == "FROM ${TOOLCHAIN_REF}"
+def _steps() -> dict:
+    return {st["name"]: st for st in _workflow()["jobs"]["bake"]["steps"]}
 
 
-def test_the_base_only_copies_bins_into_the_models_root():
-    copies = [ln for ln in _instructions()[2:]]
-    assert copies == [f"COPY bin-{i:02d}/ /opt/models/" for i in range(len(copies))]
-    assert len(copies) >= 1
+def _bins() -> int:
+    return int(_workflow()["env"]["BINS"])
+
+
+# ------------------------------------------------------------------ the workflow (option B)
+
+def test_no_buildkit_build_of_the_weights():
+    # Option A (a BuildKit build of the weights) needed ~93 GB and ran out of disk (run 43292232874).
+    assert not (ROOT / "deploy" / "stills-weights.Dockerfile").exists()
+    uses = [st.get("uses", "") for st in _steps().values()]
+    assert not any("build-push-action" in u for u in uses)
+    assert not any("docker build" in st.get("run", "") or "buildx build" in st.get("run", "")
+                   for st in _steps().values())
+
+
+def test_the_base_is_the_resolved_toolchain_digest_plus_the_tars():
+    run = _steps()["Append the bin layers to the toolchain and push the candidate"]
+    env = run["env"]
+    assert env["FROM"] == "${{ steps.cfg.outputs.toolchain_ref }}"
+    assert env["TAGGED"] == "${{ env.IMAGE }}:${{ steps.cfg.outputs.tag }}"
+    body = run["run"]
+    assert 'base="${IMAGE}@${FROM##*@}"' in body
+    assert 'crane mutate "$base" --platform linux/amd64 "${args[@]}" "${labels[@]}" -t "$TAGGED"' in body
+    # The one write is that mutate, to the resolved candidate tag. Every other crane call in the job is a
+    # read (an allow-list, so a new write verb such as tag, copy, push, append or delete fails here).
+    verbs = [v for st in _steps().values() for v in re.findall(r"(?m)(?:^\s*|\$\(|[|;&]\s*)crane\s+([a-z-]+)", st.get("run", ""))]
+    assert verbs.count("mutate") == 1
+    assert set(verbs) <= {"mutate", "digest", "config", "version"}, verbs
+    assert "docker push" not in WORKFLOW.read_text()
+
+
+def test_the_candidate_is_checked_against_the_toolchain_after_the_push():
+    body = _steps()["Pushed digest, config and layer limit"]["run"]
+    assert "assert-appended" in body and '--diff-ids "$layers/diff-ids"' in body
+    assert "MODE=max-layer" in body
+
+
+def test_crane_is_pinned_by_version_and_checksum():
+    env = _workflow()["env"]
+    assert re.fullmatch(r"v\d+\.\d+\.\d+", env["CRANE_VERSION"])
+    assert re.fullmatch(r"[0-9a-f]{64}", env["CRANE_SHA256"])
+    body = _steps()["Install crane (pinned version and sha256)"]["run"]
+    assert 'echo "${CRANE_SHA256}  $d/crane.tar.gz" | sha256sum -c -' in body
+    assert body.index("sha256sum -c") < body.index("tar -xzf")
+    assert not re.search(r"\|\s*(sudo\s+)?(ba)?sh\b", body)
+
+
+def test_every_bin_becomes_one_reproducible_tar():
+    body = _steps()["Write the bin layer tars"]["run"]
+    assert "bake_layers.py layer-tar" in body and '--epoch "$EPOCH"' in body
+    assert _steps()["Write the bin layer tars"]["env"]["EPOCH"] == "${{ steps.epoch.outputs.epoch }}"
+    assert '--bins "$BINS"' in _steps()["Pack into 4 bins"]["run"]
 
 
 def test_the_base_never_claims_the_full_set():
     # .vj-baked ends every pull for every action; this image holds only the stills set and the legs.
-    assert not any("vj-baked" in ln or ln.startswith("RUN") for ln in _instructions())
+    assert "vj-baked" not in WORKFLOW.read_text()
 
 
-def test_the_runbook_packs_as_many_bins_as_the_dockerfile_copies():
-    copies = len(_instructions()) - 2
+def test_the_runbook_packs_as_many_bins_as_the_workflow_appends():
     bins = re.findall(r"--bins (\d+)", RUNBOOK.read_text())
-    assert bins and all(int(b) == copies for b in bins)
+    assert bins and all(int(b) == _bins() for b in bins)
 
 
 def _ffd_fits(sizes: list[int], bins: int, ceiling: int) -> bool:
@@ -73,7 +120,7 @@ def test_the_stills_set_fits_the_bins_under_the_runbook_ceiling():
     sizes = [f["bytes"] for r in sm.load_manifest() for f in r["files"]]
     assert ceiling < bake_layers.GHCR_LAYER_LIMIT_BYTES
     assert max(sizes) < ceiling, "the largest stills file no longer fits one layer"
-    assert _ffd_fits(sizes, len(_instructions()) - 2, ceiling)
+    assert _ffd_fits(sizes, _bins(), ceiling)
 
 
 def test_the_runbook_floor_sits_below_the_set():

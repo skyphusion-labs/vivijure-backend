@@ -113,25 +113,34 @@ python3 deploy/bake_layers.py assert-finish-shas --root ~/stills/stage
 
 The largest file is the RealVisXL UNet shard 1, 9,988,139,160 bytes (9.30 GiB). The GHCR layer limit
 that `bake_layers.py` enforces is 10 GiB. So the ceiling is 9.5 GiB, and the set fits 3 bins of the 4
-the Dockerfile copies.
+the workflow appends (`BINS` in `stills-base.yml`).
 
 ```
 python3 deploy/bake_layers.py bin --src ~/stills/stage --out ~/stills/bins \
   --bins 4 --ceiling-gb 9.5 --min-gb 23
 ```
 
-### 4. Build and push the base
+### 4. Tar the bins and append them to the toolchain
+
+As `stills-base.yml` runs it, with `EPOCH` the commit time (`git log -1 --format=%ct`) and `crane` the
+pinned release:
 
 ```
-docker buildx build -f deploy/stills-weights.Dockerfile --provenance=false \
-  --build-arg TOOLCHAIN_REF=ghcr.io/skyphusion-labs/vivijure-backend:toolchain-t1@sha256:<digest> \
-  -t ghcr.io/skyphusion-labs/vivijure-backend:stills-t1-m1 --load ~/stills/bins
-python3 deploy/bake_layers.py verify-image --image ghcr.io/skyphusion-labs/vivijure-backend:stills-t1-m1
-docker push ghcr.io/skyphusion-labs/vivijure-backend:stills-t1-m1
+for b in bin-00 bin-01 bin-02 bin-03; do
+  python3 deploy/bake_layers.py layer-tar --bin ~/stills/bins/$b --out ~/stills/layers/$b.tar \
+    --epoch "$EPOCH" >> ~/stills/layers/diff-ids
+done
+crane mutate ghcr.io/skyphusion-labs/vivijure-backend@sha256:<toolchain digest> --platform linux/amd64 \
+  --append ~/stills/layers/bin-00.tar --append ~/stills/layers/bin-01.tar \
+  --append ~/stills/layers/bin-02.tar --append ~/stills/layers/bin-03.tar \
+  --label org.opencontainers.image.revision=<commit> ... \
+  -t ghcr.io/skyphusion-labs/vivijure-backend:stills-t1-m1-rc<N>
 ```
 
-The tag names the toolchain (`t1`) and the model version (`m1`). Read the digest back from GHCR and pin
-that digest.
+The tag names the toolchain (`t1`) and the model version (`m1`); the workflow writes only an `-rc<N>`
+candidate. Read the digest back from GHCR and pin that digest. The first bake (below) was built instead
+with `docker buildx build -f deploy/stills-weights.Dockerfile` (four `COPY bin-NN/ /opt/models/`), on
+the bake box; that Dockerfile was removed when the build moved to `crane`, and is in git history.
 
 ### 5. Build the code image on it
 

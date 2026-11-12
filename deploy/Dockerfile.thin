@@ -6,7 +6,7 @@
 #   docker build -f deploy/Dockerfile.thin --build-arg TOOLCHAIN_REF=vivijure-backend-toolchain .
 #
 # After the first published toolchain tag, pin TOOLCHAIN_REF by tag and digest.
-# TOOLCHAIN_REF may be the stills weights base (deploy/stills-weights.Dockerfile, #564): then a cold
+# TOOLCHAIN_REF may be the stills weights base (.github/workflows/stills-base.yml, #564): then a cold
 # keyframe worker finds the stills set in the image and pulls nothing. See docs/stills-weights-base.md.
 # On the bare toolchain, the worker pulls the stills set from R2 at its first job.
 
