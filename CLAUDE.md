@@ -156,3 +156,11 @@ dispatching `thin-image.yml` from `main` (see RELEASES.md "Current build path");
 which used to run on a `backend-v*` tag, is disabled and fails closed. A release is a PR; an org
 admin tags its merge commit.
 Publishing the image is not the prod pin. Prod is the `runpod-verify.yml` promote path; see `docs/release-gate.md`.
+
+## Release convention (bump-at-release)
+
+One convention for every skyphusion-labs repo (Conrad, ruled 2026-11-10, fleet-chezmoi#1766). A version moves ONLY in a release PR: bump the version, then assemble the changelog. Feature and fix PRs do not bump. Releases go through a PR (fleet-chezmoi#1622) and the tag goes on that PR's merge commit.
+
+- Version of record here: no manifest version: the git tag is the version of record.
+- Tag shape: `backend-v*`.
+- Check before a release PR: does a tag already exist for the version currently in the manifest? Yes means the cycle is closed, so the release PR bumps. No means a bump already landed outside a release PR; stop and read why before bumping again.
