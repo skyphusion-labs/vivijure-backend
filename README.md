@@ -9,8 +9,9 @@ draws a still picture for each shot (an SDXL keyframe), turns each still into mo
 finished video back to the Studio.
 
 **Want to run it? Go straight to [docs/deploy.md](docs/deploy.md).** Supply a couple of keys, run
-one script, done. You do not build anything and you do not download any models; the published
-image already has every model baked in. Deploying from the RunPod Hub listing? The four R2 env
+one script, done. You do not build anything and you do not download models: the keyframe
+weights (the stills set) are layers in the published image (docs/stills-weights-base.md); other
+actions pull what they need from the R2 mirror. Deploying from the RunPod Hub listing? The four R2 env
 names and the `R2_ENDPOINT` vs satellite `R2_ENDPOINT_URL` gotcha are in
 [.runpod/README.md](.runpod/README.md).
 
@@ -42,7 +43,7 @@ flowchart TD
     end
 
     subgraph gpu[The GPU render engines]
-        backend[vivijure-backend<br/>RunPod cloud GPU:<br/>keyframes, image-to-video, LoRA training]
+        backend[vivijure-backend<br/>RunPod cloud GPU:<br/>SDXL keyframes]
         local12[vivijure-local-12gb<br/>your own 12GB card LTX]
         local16[vivijure-local-16gb<br/>your own 16GB card CogVideoX]
     end
@@ -127,7 +128,7 @@ reason about. See [CONTRIBUTING](CONTRIBUTING.md) for the house style and PR pro
 - [docs/contract.md](docs/contract.md) -- the job bundle in, the artifacts out; a worked example.
 - [docs/configuration.md](docs/configuration.md) -- every generation knob, its default and range.
 - [docs/operations.md](docs/operations.md) -- build, deploy, the model mirror, the R2 key map, failure modes.
-- [docs/bake-box.md](docs/bake-box.md) -- the Vultr build host for image bakes: create, use, destroy, cost.
+- [docs/bake-box.md](docs/bake-box.md) -- the retired Vultr build host (history; there is no bake box now).
 - [docs/runpod-endpoint-config.md](docs/runpod-endpoint-config.md) -- GPU sizing and the account worker cap.
 - [docs/development.md](docs/development.md) -- the CPU/GPU split, the test suite, running stages locally.
 - [CONTRIBUTING](CONTRIBUTING.md) -- house style and PR process.
@@ -158,9 +159,9 @@ spine. The full policy is the
 
 ## Who this is for
 
-RunPod operators and Vivijure self-hosters who want datacenter GPU rendering (SDXL keyframes, image-to-video, LoRA training, film assembly) from a release-gated image.
+RunPod operators and Vivijure self-hosters who want SDXL keyframes on a datacenter GPU from a release-gated image.
 
-**Vivijure Studio:** https://vivijure.dev · **Live demo:** https://demo.vivijure.com · **Skyphusion Labs:** https://skyphusion.org
+**Vivijure Studio:** https://vivijure.dev · **Skyphusion Labs:** https://skyphusion.org
 
 ## Support
 

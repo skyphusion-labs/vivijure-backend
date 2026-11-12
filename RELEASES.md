@@ -1,8 +1,31 @@
 # Releases -- vivijure-backend
 
-Render backend for RunPod serverless. A release is an annotated git tag
-`backend-v<semver>` **pushed to origin**; that tag push triggers GitHub Actions
-(`.github/workflows/release.yml`), which builds and pushes a Docker image to
+## Current build path (read first)
+
+- **The worker image** is built by `.github/workflows/thin-image.yml`: `workflow_dispatch` only, on
+  GitHub-hosted `ubuntu-latest`, from a commit on `main`. With `toolchain_ref` set to the full
+  `@sha256` digest of an existing base, it builds no toolchain and pushes no toolchain tag; it
+  pushes `vivijure-backend:<X.Y.Z>` (no `:latest`), refuses a version tag GHCR already has, and
+  prints the pushed digest. The stills weights (keyframes, SDXL LoRA training, the finish legs)
+  are layers of the base below the code layer (`docs/stills-weights-base.md`); other actions pull
+  from the R2 mirror.
+- **Base images:** `runpod-bake.yml` (dispatch, type `bake`) builds the runtime base on a rented
+  RunPod CPU pod and opens a repin PR. `release.yml`, `runtime-build.yml` and `seed-build.yml` are
+  **disabled** and fail closed. There is no bake box (from 1.1.19) and no self-hosted runner.
+- **Promote:** `runpod-verify.yml` (dispatch) checks the image on a pod, then PATCHes the endpoint's
+  image by digest (RunPod REST v2, `PATCH /v2/serverless/{id}`; see `deploy/README.md`).
+- **Source changes** land by PR. A release is a PR; an org admin tags its merge commit.
+- **State on 2026-11-11:** `1.1.19` is built and pushed, not yet smoked or pinned (backend#636);
+  the operated endpoint runs `1.1.18` (`docs/runpod-endpoint-config.md`).
+
+The rest of this file is the record of how releases ran before. Where it says a `backend-v*` tag
+runs `release.yml`, that path is disabled now.
+
+## History
+
+Render backend for RunPod serverless. A release was an annotated git tag
+`backend-v<semver>` **pushed to origin**; that tag push triggered GitHub Actions
+(`.github/workflows/release.yml`), which built and pushed a Docker image to
 `ghcr.io/skyphusion-labs/vivijure-backend:<semver>` (the image tag drops the `backend-v`
 prefix). Through backend-v0.2.24 this build ran on the fleet Jenkins; it was ported to
 GitHub Actions in backend-v0.2.25 (#107) when Jenkins was decommissioned.
@@ -83,7 +106,10 @@ digest is recorded in `docs/runpod-endpoint-config.md`, and the endpoint is repi
 
 **Do NOT push `backend-v<X.Y.Z>` for a semver GHCR already has.** That tag push triggers `release.yml`, which would build and push `:<X.Y.Z>` and `:latest` again, the collision this file forbids. The record of each 1.1.x image is in [docs/runpod-endpoint-config.md](docs/runpod-endpoint-config.md) (commit, digest, rollback). The GHCR check above still picks the next free semver.
 
-## Release contract (#537: the seed -> runtime -> backend chain)
+## Release contract (#537: the seed -> runtime -> backend chain). Historical
+
+> The builders this section names (`release.yml`, `runtime-build.yml`, `seed-build.yml`) are
+> disabled. See "Current build path" at the top.
 
 Since #537 the backend image is the top of a three-image chain, so a release does NOT rebuild the
 world. What you do depends on WHAT changed:

@@ -7,14 +7,14 @@ Guidance for Claude Code (and the crew) working in this repo.
 **The GPU render backend for Vivijure** (RunPod serverless). It consumes a project bundle (a standard
 `storyboard.yaml` plus the cast) from R2, **plans** the whole render on the CPU (what must train, draw,
 animate, what can be reused), then **executes** only that plan on the GPU: trains per-character **SDXL**
-LoRAs, draws SDXL keyframes, animates with Wan image-to-video (consuming Wan cast LoRAs trained by
-`vivijure-wan-train`), runs the finish chain, and assembles the film off-GPU, writing artifacts +
+LoRAs and draws SDXL keyframes. (The code also holds Wan image-to-video, finish and off-GPU
+assembly paths; the published thin image and the operated endpoint serve keyframes.) It writes artifacts +
 progress back to R2 in the shape the studio panels expect. Python; the panel side is `vivijure-cf` /
 `vivijure-local` (not the hub `vivijure` repo). This is the half that turns a storyboard into a film.
 
 **Image line:** GHCR tags / `backend-v*` release process (see `CHANGELOG.md` / `RELEASES.md` / latest
-tags). Do not freeze a version number here as current forever. **Wan cast train** is a separate
-satellite (`vivijure-wan-train`, image `train-*`); this repo no longer owns `:train-*` after decouple.
+tags). Do not freeze a version number here as current forever. **Wan cast train** moved to
+`vivijure-wan-train`, which is now archived: hosted Wan training is retired (self-host only).
 
 ## The Vivijure constellation
 
@@ -25,11 +25,11 @@ satellite (`vivijure-wan-train`, image `train-*`); this repo no longer owns `:tr
    vivijure-cf / vivijure-local  (panels; orchestration: vivijure-core)
             |
             v
-   vivijure-backend (THIS REPO: keyframes -> i2v -> assemble)
+   vivijure-backend (THIS REPO: RunPod SDXL keyframes)
             |
-     +------+--------+----------------+------------------+
-     |      |        |                |                  |
-  upscale  wan-train         local-12/16gb
+     +------+----------------+------------------+
+     |      |                |                  |
+  upscale  cloud motion doors  local-12/16gb
 ```
 
 Panels pin this image on RunPod endpoints. **Never freeze specific endpoint IDs** in this file.
@@ -62,10 +62,9 @@ docker build -f deploy/Dockerfile -t <ghcr-tag> .         # build the serverless
 python scripts/pin-runpod-template.py                     # not a prod path (own or staging endpoint; docs/operations.md)
 ```
 
-The image is baked in `deploy/` (layer baking, HF config baking, fp8 i2v quantize) and pushed to
-**GHCR**; the RunPod template is repinned by the `runpod-verify` promote path. **Registry-auth is MCP/API
-managed** (RunPod MCP v1.4.0+): create the container-registry-auth and attach it via
-`containerRegistryAuthId` on the template, no dashboard step.
+The worker image is built by `thin-image.yml` (see RELEASES.md "Current build path") and pushed
+to **GHCR**; the `runpod-verify` promote path PATCHes the endpoint's image (RunPod REST v2: an
+endpoint carries its own image; a template is applied once at create).
 
 ## Verifying changes
 
@@ -75,8 +74,8 @@ verify harness dry-run (mocked client, no GPU). With `live` true, `live-gate` sp
 pod and tears it down. `promote` defaults off, so a proof run does not repin production. The only
 prod path is `promote_image()` in `deploy/runpod_verify.py`, and it runs only on a dispatch that
 passes with `live` true and `promote` true. Do not pin the template by hand. Never trust the tag
-or our records in place of the artifact. `release.yml` publishes the GHCR image on a `backend-v*`
-tag; `docs/release-gate.md` is the gate contract. For a local stage check, run the `scripts/run_*.py` entries.
+or our records in place of the artifact. `thin-image.yml` publishes the GHCR image (`release.yml` is
+disabled); `docs/release-gate.md` is the gate contract. For a local stage check, run the `scripts/run_*.py` entries.
 
 ## Architecture (load-bearing)
 
@@ -152,9 +151,10 @@ A PR that touches `src/` adds a `changelog.d/<issue>-<slug>.md` fragment (see `c
 
 ## Release / deploy
 
-**Tag-gated image publish.** Merges to `main` run CI only; they do not publish the production image.
-Cut an annotated tag on `main` (`git tag -a backend-vX.Y.Z -m "..." && git push origin backend-vX.Y.Z`).
-`release.yml` triggers on `backend-v*` (a `v*` tag does nothing) and refuses the build unless that commit is an ancestor of `origin/main`.
+**Image publish is a dispatch, not a tag.** Merges to `main` run CI only. The image is built by
+dispatching `thin-image.yml` from `main` (see RELEASES.md "Current build path"); `release.yml`,
+which used to run on a `backend-v*` tag, is disabled and fails closed. A release is a PR; an org
+admin tags its merge commit.
 Publishing the image is not the prod pin. Prod is the `runpod-verify.yml` promote path; see `docs/release-gate.md`.
 
 ## Release convention (bump-at-release)
