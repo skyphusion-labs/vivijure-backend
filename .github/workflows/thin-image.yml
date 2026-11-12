@@ -6,6 +6,8 @@ name: Thin keyframe image (#530)
 # --target toolchain does not pull the seed.
 # Push to GHCR. Do not load the image into the runner daemon first.
 # CPU import smoke runs after push. No GPU. The CUDA EP session is a SKIP.
+# On a worker built FROM the stills weights base, the smoke loads the worker WITHOUT its weight layers
+# (deploy/smoke_image.py, #645): the runner disk cannot hold the full image, and the smoke reads no weight.
 
 on:
   workflow_dispatch:
@@ -27,6 +29,11 @@ on:
         type: string
       toolchain_ref:
         description: 'A full digest of an existing base, ghcr.io/skyphusion-labs/<image>[:tag]@sha256:<64 hex>. Set: no toolchain build, no toolchain tag pushed; the worker is built FROM it.'
+        required: false
+        default: ''
+        type: string
+      smoke_base:
+        description: 'With smoke_ref only (#645): the full digest of the base that worker was built FROM. Its weight layers are left out of the smoke. Empty: the whole worker is smoked.'
         required: false
         default: ''
         type: string
@@ -56,16 +63,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Publish only reviewed code: the dispatched commit must be on main, as in runtime-build.yml.
-      - name: Assert commit is on main (no publish of an unreviewed build)
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::commit $GITHUB_SHA is not on origin/main; refusing to publish ${WORKER_IMAGE} tags from it"
-            exit 1
-          fi
-
       - name: Disk before build
         run: df -h /
 
@@ -89,8 +86,21 @@ jobs:
           TOOL: ${{ inputs.toolchain_tag }}
           REF: ${{ inputs.toolchain_ref }}
           SMOKE: ${{ inputs.smoke_ref }}
+          SMOKE_BASE: ${{ inputs.smoke_base }}
           IMAGE: ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.WORKER_IMAGE }}
         run: bash deploy/thin-image-resolve.sh
+
+      # Publish only reviewed code: the dispatched commit must be on main, as in runtime-build.yml.
+      # A smoke-only run (smoke_ref) builds and pushes nothing, so it may run from a branch (#645).
+      - name: Assert commit is on main (no publish of an unreviewed build)
+        if: steps.cfg.outputs.mode != 'smoke'
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::commit $GITHUB_SHA is not on origin/main; refusing to publish ${WORKER_IMAGE} tags from it"
+            exit 1
+          fi
 
       # Only without toolchain_ref. With it, no toolchain is built and no toolchain tag is pushed.
       - name: Build and push toolchain
@@ -140,50 +150,73 @@ jobs:
           echo "Pushed ${IMG}@${DIGEST} (from ${FROM})."
           printf 'Pushed %s@%s from %s.\n' "${IMG}" "${DIGEST}" "${FROM}" >> "$GITHUB_STEP_SUMMARY"
 
-      # #636: the image is the full base plus the thin layers (the stills base alone is 29 GiB
-      # compressed). The build never unpacks it (Dockerfile.thin is FROM + COPY, so BuildKit pushes
-      # by layer reference), but a pull and run must, and the runner root disk cannot hold it: the
-      # 1.1.19 run died in this step with no conclusion. So Docker moves to /mnt first, and the step
-      # refuses LOUDLY when there is not room, instead of filling the disk and losing the runner.
-      # /mnt is NOT a separate scratch disk on the current runner: measured 2026-11-12 (run
-      # 43178431220, ubuntu-latest = Ubuntu 26.04), `df -h / /mnt` prints /dev/root twice, 88 GB free.
-      # The move gains nothing there; the free-space check is what protects the runner
-      # (fleet-chezmoi#2620).
+      # #636: a worker built FROM the stills base is the toolchain, the weight layers and the thin layers,
+      # 31.8 GB compressed for 1.1.20. The build never unpacks it (Dockerfile.thin is FROM + COPY, so
+      # BuildKit pushes by layer reference), but a pull and run must, and the runner cannot hold it:
+      # run 43312194021 refused 1.1.20 with 43.8 GB free (#645). So the smoke loads the worker WITHOUT
+      # the base's weight layers (deploy/smoke_image.py): the toolchain layers and the worker's own thin
+      # layers, fetched by digest and checked, into `docker load`. Nothing is rebuilt or pushed. That is
+      # a sound smoke because the weight layers add files under /opt/models only (#644 assert-appended)
+      # and smoke_imports.py reads no weight on CPU. The GPU proof stays the check of the full image.
+      # Docker still moves to /mnt (the same disk as / on Ubuntu 26.04, run 43178431220); the free-space
+      # check refuses LOUDLY instead of filling the disk and losing the runner.
       - name: Move Docker storage to /mnt (the same disk on ubuntu-26.04)
         id: room
         env:
           SMOKE_REF: ${{ steps.cfg.outputs.smoke_ref }}
+          SMOKE_BASE: ${{ steps.cfg.outputs.smoke_base }}
           DIGEST: ${{ steps.pushed.outputs.digest }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           if [ -n "${SMOKE_REF}" ]; then IMG="${SMOKE_REF}"; else IMG="${REGISTRY}/${OWNER}/${WORKER_IMAGE}@${DIGEST}"; fi
           printf '%s' "${IMG}" | grep -Eq '@sha256:[0-9a-f]{64}$' || { echo "::error::no digest to smoke (got '${IMG}')"; exit 1; }
           echo "img=${IMG}" >> "$GITHUB_OUTPUT"
-          # Compressed size of the linux/amd64 image, from the registry manifest.
-          bytes=$(IMG="${IMG}" python3 deploy/image_bytes.py)
-          need=$(( bytes * 5 / 2 ))   # compressed plus unpacked, with margin
+          echo "base=${SMOKE_BASE}" >> "$GITHUB_OUTPUT"
+          # What the smoke loads, from the registry manifests: compressed bytes, and the layers left out.
+          WORKER="${IMG}" BASE="${SMOKE_BASE}" python3 -I deploy/smoke_image.py plan > "${RUNNER_TEMP}/smoke-plan.json"
+          read -r bytes dropped ndrop < <(python3 -I -c 'import json,sys; p=json.load(open(sys.argv[1])); print(p["bytes"], p["dropped_bytes"], len(p["dropped"]))' "${RUNNER_TEMP}/smoke-plan.json")
+          # Compressed plus unpacked, with margin. Measured (run 43315326937, docker 29.4.2, overlayfs):
+          # loading 13,417,590,982 compressed bytes used 33,927,639,040 on disk, 2.53 times; the old 2.5
+          # was BELOW that. 3 times leaves about 19 percent over the measured use.
+          need=$(( bytes * 3 ))
           sudo systemctl stop docker.socket docker
           sudo mkdir -p /mnt/docker
           sudo python3 -c 'import json,os; p="/etc/docker/daemon.json"; d=json.load(open(p)) if os.path.exists(p) else {}; d["data-root"]="/mnt/docker"; json.dump(d, open(p,"w"))'
           sudo systemctl start docker
           [ "$(docker info --format '{{.DockerRootDir}}')" = /mnt/docker ] || { echo "::error::docker did not move to /mnt/docker"; exit 1; }
-          df -h / /mnt
+          echo "docker $(docker info --format '{{.ServerVersion}} driver={{.Driver}}')"
+          df -B1 / /mnt
           avail=$(( $(df --output=avail -B1 /mnt | tail -1) ))
-          echo "image ${bytes} bytes compressed; need about ${need}; /mnt has ${avail}"
+          echo "smoke image ${bytes} bytes compressed (${ndrop} weight layers, ${dropped} bytes, left out); need about ${need}; /mnt has ${avail}"
+          printf 'Smoke image: %s bytes compressed, %s weight layers (%s bytes) left out; /mnt had %s free.\n' "${bytes}" "${ndrop}" "${dropped}" "${avail}" >> "$GITHUB_STEP_SUMMARY"
           [ "${avail}" -ge "${need}" ] || { echo "::error::/mnt has ${avail} bytes free, the smoke needs about ${need}: this runner cannot hold the image"; exit 1; }
 
       - name: CPU import smoke
         env:
           IMG: ${{ steps.room.outputs.img }}
+          BASE: ${{ steps.room.outputs.base }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: vj-smoke:${{ github.run_id }}
         run: |
-          set -eu
-          docker pull "${IMG}"
-          docker run --rm "${IMG}" \
+          set -euo pipefail
+          # A pipe reports its LAST command, so both statuses are read: a stream that stops on a bad
+          # blob must fail this step even if docker load accepted what came before.
+          set +e
+          WORKER="${IMG}" BASE="${BASE}" TAG="${TAG}" python3 -I deploy/smoke_image.py stream | docker load
+          st=("${PIPESTATUS[@]}")
+          set -e
+          [ "${st[0]}" = 0 ] && [ "${st[1]}" = 0 ] || { echo "::error::load of the smoke image failed (stream ${st[0]}, docker load ${st[1]})"; exit 1; }
+          df -B1 / /mnt
+          # The loaded rootfs must be exactly the planned one: the toolchain plus the worker's own thin layers.
+          docker image inspect "${TAG}" --format '{{json .RootFS.Layers}}' > "${RUNNER_TEMP}/loaded.json"
+          python3 -I -c 'import json,sys; p=json.load(open(sys.argv[1])); got=json.load(open(sys.argv[2])); sys.exit(0 if got == p["diff_ids"] else "the loaded rootfs is not the planned one")' "${RUNNER_TEMP}/smoke-plan.json" "${RUNNER_TEMP}/loaded.json"
+          docker run --rm "${TAG}" \
             conda run --no-capture-output -n vivijure \
             python /opt/vivijure/smoke_imports.py
-          echo "Smoked ${IMG} (thin). CUDA EP smoke needs a GPU pod."
-          printf 'Smoked %s (CPU imports).\n' "${IMG}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Smoked ${IMG} (thin; weight layers left out: base ${BASE:-none}). CUDA EP smoke needs a GPU pod."
+          printf 'Smoked %s (CPU imports; weight layers of %s left out).\n' "${IMG}" "${BASE:-none}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Disk after build
         if: always()
-        run: df -h / /mnt
+        run: df -B1 / /mnt

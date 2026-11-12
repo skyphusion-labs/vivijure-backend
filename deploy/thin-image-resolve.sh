@@ -28,9 +28,16 @@
 # published version is smoked again without a re-push, which the version-tag
 # check refuses by design. SMOKE with REF is refused (one run, one job).
 #
+# SMOKE_BASE (the workflow's smoke_base, #645), with SMOKE only, is a full digest
+# of the base that worker was built FROM. The smoke then leaves that base's weight
+# layers out (deploy/smoke_image.py). Empty: the whole worker is smoked. Outside
+# smoke mode the smoke base is REF itself (prebuilt), or none (build); a
+# SMOKE_BASE there is refused.
+#
 # INSPECT is the registry probe, default "docker buildx imagetools inspect"
 # (needs the GHCR login first). tests/test_thin_image_resolve.py replaces it.
-# Output: version=, mode= (prebuilt or build) and toolchain_ref= lines, to
+# Output: version=, mode= (prebuilt, build or smoke), toolchain_ref=, smoke_ref=
+# and smoke_base= lines, to
 # $GITHUB_OUTPUT when it is set, else to stdout.
 set -euo pipefail
 : "${IMAGE:?set IMAGE, for example ghcr.io/skyphusion-labs/vivijure-backend}"
@@ -55,11 +62,20 @@ if [ -n "${SMOKE:-}" ]; then
     || fail "smoke_ref must be a full digest of ${IMAGE}: ${IMAGE}[:tag]@sha256:<64 hex> (got '$SMOKE')"
   rc=0; probe "$SMOKE" || rc=$?
   [ "$rc" = 0 ] || fail "smoke_ref $SMOKE cannot be read on GHCR (probe $rc); nothing was smoked"
+  if [ -n "${SMOKE_BASE:-}" ]; then
+    printf '%s' "$SMOKE_BASE" | grep -Eqx 'ghcr\.io/skyphusion-labs/[a-z0-9._-]+(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}' \
+      || fail "smoke_base must be a full digest: ghcr.io/skyphusion-labs/<image>[:tag]@sha256:<64 hex> (got '$SMOKE_BASE')"
+    rc=0; probe "$SMOKE_BASE" || rc=$?
+    [ "$rc" = 0 ] || fail "smoke_base $SMOKE_BASE cannot be read on GHCR (probe $rc); nothing was smoked"
+  fi
   out "mode=smoke"
   out "smoke_ref=$SMOKE"
+  out "smoke_base=${SMOKE_BASE:-}"
   echo "Smoke only: $SMOKE (nothing is built or pushed)." >&2
   exit 0
 fi
+
+[ -z "${SMOKE_BASE:-}" ] || fail "smoke_base is only for a smoke_ref run; a build smokes against its own toolchain_ref"
 
 printf '%s' "${VER:-}" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' || fail "version must be X.Y.Z (got '${VER:-}')"
 
@@ -70,10 +86,12 @@ if [ -n "${REF:-}" ]; then
   [ "$rc" = 0 ] || fail "toolchain_ref $REF cannot be read on GHCR (probe $rc); nothing was built"
   mode=prebuilt
   tref=$REF
+  sbase=$REF
 else
   printf '%s' "${TOOL:-}" | grep -Eqx 't[0-9]+' || fail "toolchain_tag must be t<N> (got '${TOOL:-}')"
   mode=build
   tref="$IMAGE:toolchain-$TOOL"
+  sbase=
 fi
 
 rc=0; probe "$IMAGE:$VER" || rc=$?
@@ -87,4 +105,5 @@ out "version=$VER"
 out "mode=$mode"
 out "toolchain_ref=$tref"
 out "smoke_ref="
+out "smoke_base=$sbase"
 echo "Building $IMAGE:$VER from $tref ($mode)." >&2

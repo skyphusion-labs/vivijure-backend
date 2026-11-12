@@ -65,6 +65,15 @@ repo-level `R2_*` secrets are not used.
 - **Then** dispatch `thin-image.yml` with `toolchain_ref` = the printed `ref@digest` and the next free
   `X.Y.Z`. The live worker and its tag are never touched. The GPU proof below runs on a scratch endpoint,
   never the live one.
+- **The CPU import smoke leaves the weight layers out (#645).** A hosted runner cannot hold the full
+  worker: run 43312194021 refused 1.1.20 (31.8 GB compressed) with 43.8 GB free. `deploy/smoke_image.py`
+  streams the worker into `docker load` without the base's layers above its toolchain: the toolchain
+  layers plus the worker's own thin layers, by digest, each checked against its descriptor, with the
+  worker's config minus those layers. The smoke then checks the loaded rootfs is exactly that and runs
+  `smoke_imports.py`. That is sound because the weight layers add files under `/opt/models` only
+  (`assert-appended`) and the smoke reads no weight on CPU. It is NOT a check of the weights: the GPU proof
+  is. To smoke an existing worker again, dispatch with `smoke_ref` = the worker and `smoke_base` = this
+  base; that run builds and pushes nothing, so it may run from a branch.
 
 ### On a host (the bake box record)
 

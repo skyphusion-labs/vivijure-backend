@@ -47,7 +47,7 @@ def run(tmp_path, table, **env):
 def test_a_prebuilt_digest_builds_no_toolchain(tmp_path):
     r, o, probed = run(tmp_path, {BASE: "exists"}, VER="1.1.19", REF=BASE)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert o == {"version": "1.1.19", "mode": "prebuilt", "toolchain_ref": BASE, "smoke_ref": ""}
+    assert o == {"version": "1.1.19", "mode": "prebuilt", "toolchain_ref": BASE, "smoke_ref": "", "smoke_base": BASE}
     assert probed == [BASE, IMAGE + ":1.1.19"]
 
 
@@ -97,7 +97,7 @@ def test_a_bad_version_is_refused(tmp_path, ver):
 def test_without_a_ref_the_toolchain_tag_path_is_kept(tmp_path):
     r, o, _ = run(tmp_path, {}, VER="1.1.19", TOOL="t2")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert o == {"version": "1.1.19", "mode": "build", "toolchain_ref": IMAGE + ":toolchain-t2", "smoke_ref": ""}
+    assert o == {"version": "1.1.19", "mode": "build", "toolchain_ref": IMAGE + ":toolchain-t2", "smoke_ref": "", "smoke_base": ""}
 
 
 def test_without_a_ref_a_bad_toolchain_tag_is_refused(tmp_path):
@@ -123,7 +123,7 @@ WORKER = IMAGE + ":1.1.19@sha256:" + "e" * 64
 def test_smoke_only_on_an_existing_worker_digest(tmp_path):
     r, o, probed = run(tmp_path, {WORKER: "exists", IMAGE + ":1.1.19": "exists"}, VER="1.1.19", SMOKE=WORKER)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert o == {"mode": "smoke", "smoke_ref": WORKER}
+    assert o == {"mode": "smoke", "smoke_ref": WORKER, "smoke_base": ""}
     # The version tag existing is fine here: nothing is pushed, so nothing is overwritten.
     assert probed == [WORKER]
 
@@ -159,10 +159,61 @@ def test_the_workflow_moves_docker_to_mnt_checks_room_and_skips_the_build_in_smo
     assert "if: steps.cfg.outputs.mode != 'smoke'" in pushed
     room = wf.split("- name: Move Docker storage to /mnt", 1)[1].split("- name: CPU import smoke", 1)[0]
     assert '"data-root"]="/mnt/docker"' in room
-    assert "deploy/image_bytes.py" in room
+    assert "deploy/smoke_image.py plan" in room
     assert "cannot hold the image" in room
     smoke = wf.split("- name: CPU import smoke", 1)[1]
     assert "${{ steps.room.outputs.img }}" in smoke
-    assert 'docker pull "${IMG}"' in smoke
+    assert "deploy/smoke_image.py stream | docker load" in smoke
+    assert "docker pull" not in smoke
     # The smoke must come after the move, never before it.
     assert wf.index("- name: Move Docker storage to /mnt") < wf.index("- name: CPU import smoke")
+
+
+# --- #645: smoke a worker on the stills base without its weight layers ---
+
+def test_smoke_only_with_a_base_passes_it_on(tmp_path):
+    r, o, probed = run(tmp_path, {WORKER: "exists", BASE: "exists"}, SMOKE=WORKER, SMOKE_BASE=BASE)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert o == {"mode": "smoke", "smoke_ref": WORKER, "smoke_base": BASE}
+    assert probed == [WORKER, BASE]
+
+
+@pytest.mark.parametrize("ref", [IMAGE + ":stills-t1-m1", "docker.io/library/ubuntu@sha256:" + "a" * 64, BASE + " x"])
+def test_smoke_base_must_be_a_full_digest(tmp_path, ref):
+    r, o, probed = run(tmp_path, {WORKER: "exists"}, SMOKE=WORKER, SMOKE_BASE=ref)
+    assert r.returncode == 1 and "smoke_base must be a full digest" in r.stdout
+    assert o == {} and probed == [WORKER]
+
+
+def test_smoke_base_not_on_ghcr_is_refused(tmp_path):
+    r, o, _ = run(tmp_path, {WORKER: "exists"}, SMOKE=WORKER, SMOKE_BASE=BASE)
+    assert r.returncode == 1 and "smoke_base" in r.stdout and "cannot be read on GHCR" in r.stdout and o == {}
+
+
+def test_smoke_base_without_smoke_ref_is_refused(tmp_path):
+    r, o, probed = run(tmp_path, {BASE: "exists"}, VER="1.1.21", REF=BASE, SMOKE_BASE=BASE)
+    assert r.returncode == 1 and "only for a smoke_ref run" in r.stdout
+    assert o == {} and probed == []
+
+
+def test_the_main_only_check_runs_after_the_resolve_and_skips_only_a_smoke_run():
+    wf = (ROOT / ".github" / "workflows" / "thin-image.yml").read_text()
+    assert wf.index("- name: Resolve and check inputs") < wf.index("- name: Assert commit is on main")
+    assert wf.index("- name: Assert commit is on main") < wf.index("- name: Build and push toolchain")
+    main = wf.split("- name: Assert commit is on main", 1)[1].split("- name:", 1)[0]
+    assert "if: steps.cfg.outputs.mode != 'smoke'" in main
+    assert "git merge-base --is-ancestor" in main
+
+
+def test_the_smoke_loads_the_planned_image_and_checks_both_pipe_statuses():
+    wf = (ROOT / ".github" / "workflows" / "thin-image.yml").read_text()
+    assert "smoke_base:" in wf and "SMOKE_BASE: ${{ inputs.smoke_base }}" in wf
+    room = wf.split("- name: Move Docker storage to /mnt", 1)[1].split("- name: CPU import smoke", 1)[0]
+    assert 'BASE="${SMOKE_BASE}"' in room
+    # run 43315326937 measured the load at 2.53 times the compressed size; the guard must sit above it
+    assert "need=$(( bytes * 3 ))" in room and "bytes * 5 / 2" not in room
+    smoke = wf.split("- name: CPU import smoke", 1)[1].split("- name:", 1)[0]
+    assert 'st=("${PIPESTATUS[@]}")' in smoke
+    assert '"${st[0]}" = 0' in smoke and '"${st[1]}" = 0' in smoke
+    assert ".RootFS.Layers" in smoke and 'p["diff_ids"]' in smoke
+    assert 'docker run --rm "${TAG}"' in smoke
