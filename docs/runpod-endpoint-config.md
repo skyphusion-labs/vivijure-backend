@@ -11,12 +11,12 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 **Do not pin `:1.0.1`** (t2 weight-digest rewrite; RunPod `unexpected EOF`). Incident:
 [`runpod-1.0.1-weight-digest-eof.md`](runpod-1.0.1-weight-digest-eof.md).
 
-## Current state (both read with `get-endpoint` on 2026-11-11; backend pools as changed by #625)
+## Current state (both read with `get-endpoint` on 2026-11-11; backend pools as changed by #625; backend image as repinned 2026-11-12, v46)
 
 | | `vivijure-backend-hosted` | `vivijure-upscale-hosted` |
 |---|---|---|
 | id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
-| Image | `vivijure-backend:1.1.18@sha256:3ec3849279aa18e6c58ba0716bd768366162a70d8a6d61e9bdde2254ee4e049a` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
+| Image | `vivijure-backend:1.1.19@sha256:9c560486fd11fb7c9d899489c3481a5feee0d2ab1813d61f925f1153282bc6ba` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
 | Pools | `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141` | `BLACKWELL_96` |
 | `workers` min / max | 0 / 12 | 0 / 10 |
 | Idle timeout | 60 s | 10 s |
@@ -93,6 +93,26 @@ the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 1
 1. Drain the pool to 0, repin by digest, then restore max 12 and idle 60 s.
 2. Wait 65 s after the release before submitting anything. Renders through the studio got `keyframe /run -> 409` in that window after the 1.1.7 repin.
 3. On a thin image built on the bare toolchain, after a repin, every worker is cold and pulls about 24 GB from R2 (on a code image built on the stills weights base, a stills job pulls nothing: [stills-weights-base.md](stills-weights-base.md), #564), and a warm-up batch does not change that: each NEW worker pulls again. So keep the number of concurrent cold workers small, about 4 to 6, by submitting in small batches, and budget one cold pull per worker. On 2026-11-06, 15 cold workers at once slowed pulls to 2.6 MiB/s and stretched cold jobs to about 20 minutes each; 6 at once pulled normally (cold delay about 2 to 3 minutes). Submitting 2 first and the rest once they ran did NOT help after a new image: the second batch started on new workers, cold.
+
+**Backend 1.1.19, pinned 2026-11-12 (release v46, 07:59:49Z).** A code-only release on the existing stills base: no restage.
+
+- **Code:** main `dd3e7fc` (thin-image run 43070289187). Release PR #632.
+  The image is built from `deploy/Dockerfile.thin` with `toolchain_ref` = `stills-t1-m1`, the base 1.1.17 uses.
+- **Image:** `vivijure-backend:1.1.19@sha256:9c560486fd11fb7c9d899489c3481a5feee0d2ab1813d61f925f1153282bc6ba`.
+  This is an OCI index: the amd64 manifest `sha256:7e5a2ec3e317d60d1d10190246e023040ea2e218f2f7e5a10e08f8060b094349` plus a buildx attestation manifest.
+  1.1.18 was a single manifest. The endpoint is pinned by the index digest.
+  Against 1.1.18 (GHCR manifests, read 2026-11-12), 26 of 29 layers are shared, 29.08 GiB in total, and 2 code layers under 1 MB are new.
+- **Checks on the image:** thin-image run 43178431220 (`smoke_ref`, main `d8dfba4`; nothing built or pushed, backend#636).
+  `All 8 finish-stage imports OK`, and onnxruntime 1.26.0 exposes `CUDAExecutionProvider`.
+  The session-level CUDA EP check is a SKIP, because a hosted runner has no GPU.
+- **Repin (lead):** before the drain, 0 jobs were in progress and 0 queued.
+  The pool was drained to 0, repinned by digest, and restored to min 0, max 12, idle 60 s, `QUEUE_DELAY` 4.
+  The disk stayed at 300 GB and the three pools are unchanged. The image read back as `1.1.19@sha256:9c56...`.
+  With min 0, the rollout reads 0 of 0 workers until a job starts one.
+
+**Backend rollback from 1.1.19:** image
+`vivijure-backend:1.1.18@sha256:3ec3849279aa18e6c58ba0716bd768366162a70d8a6d61e9bdde2254ee4e049a` (same stills base), idle timeout 60 s,
+max 12, disk 300 GB. Follow the repinning procedure above.
 
 **Backend 1.1.17, pinned 2026-11-06 (release v43, 16:05:16Z).** A code-only release on the existing stills base: no restage.
 
