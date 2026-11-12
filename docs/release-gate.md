@@ -3,7 +3,7 @@
 > **Current build path:** see [RELEASES.md](../RELEASES.md) "Current build path". In short: the worker image is
 > built by `thin-image.yml` on GitHub-hosted `ubuntu-latest`, from an existing base digest
 > (`toolchain_ref`). `release.yml`, `runtime-build.yml` and `seed-build.yml` are disabled and fail
-> closed. There is no bake box and no self-hosted runner. The text below describes the gate as designed around the `release.yml` build; the verify and promote half (`runpod-verify.yml`) is still the prod path, and promote now PATCHes the endpoint image.
+> closed. There is no bake box and no self-hosted runner. The text below describes the gate as designed around the `release.yml` build. It is HISTORY, and that includes the verify and promote half: `runpod-verify.yml` is NOT the prod path (backend#641). It gates on a Wan2.2 i2v clip, its default bundle runs keyframe, i2v and finish on a GPU pod, and RunPod serves SDXL keyframes only. The prod path is the standing repin procedure in [runpod-endpoint-config.md](runpod-endpoint-config.md) ("Repinning the backend endpoint"), after a `thin-image.yml` `smoke_ref` smoke of the pushed digest.
 
 > **STATUS (2026-07-02, truth-pass S7): the LIVE gate is WIRED (dispatch-gated).** Both prerequisites
 > landed -- RUNPOD_API_KEY + R2_* are CI secrets, and the pod-side @event emitter exists

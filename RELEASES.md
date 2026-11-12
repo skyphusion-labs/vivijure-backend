@@ -12,11 +12,14 @@
 - **Base images:** `runpod-bake.yml` (dispatch, type `bake`) builds the runtime base on a rented
   RunPod CPU pod and opens a repin PR. `release.yml`, `runtime-build.yml` and `seed-build.yml` are
   **disabled** and fail closed. There is no bake box (from 1.1.19) and no self-hosted runner.
-- **Promote:** `runpod-verify.yml` (dispatch) checks the image on a pod, then PATCHes the endpoint's
-  image by digest (RunPod REST v2, `PATCH /v2/serverless/{id}`; see `deploy/README.md`).
+- **Promote:** the standing repin procedure in `docs/runpod-endpoint-config.md` ("Repinning the
+  backend endpoint"): drain the pool to 0, repin the endpoint image by digest, restore the workers,
+  and wait 65 s. Before the repin, `thin-image.yml` with `smoke_ref` smokes the pushed digest. NOT
+  `runpod-verify.yml` (backend#641): it gates on a Wan2.2 i2v clip and its default bundle runs
+  keyframe, i2v and finish on a GPU pod, and RunPod serves SDXL keyframes only. It last ran 2026-08-20.
 - **Source changes** land by PR. A release is a PR; an org admin tags its merge commit.
-- **State on 2026-11-11:** `1.1.19` is built and pushed, not yet smoked or pinned (backend#636);
-  the operated endpoint runs `1.1.18` (`docs/runpod-endpoint-config.md`).
+- **State on 2026-11-12:** the operated endpoint runs `1.1.19`, smoked by digest (thin-image run
+  43178431220, backend#636) and pinned as release v46 (`docs/runpod-endpoint-config.md`).
 
 The rest of this file is the record of how releases ran before. Where it says a `backend-v*` tag
 runs `release.yml`, that path is disabled now.
