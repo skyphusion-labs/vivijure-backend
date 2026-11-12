@@ -205,7 +205,9 @@ test "$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "$
 `imagetools create` from one source manifest with no annotations pushes that manifest as it is. The last
 line is what proves it: if the digest read back is not `$D`, the tag points at a new manifest, so delete
 that tag and use `crane tag "$R@$D" "$T"` (the pinned crane of `stills-base.yml`), which tags the manifest
-bytes as they are. Then record the promotion here, with the digest read back.
+bytes as they are. With neither tool on the host, the registry API does the same: GET the manifest by digest, check its
+sha256, PUT those exact bytes under the new tag, and read `docker-content-digest` back (the 2026-11-12 promotion). Then
+record the promotion here, with the digest read back.
 
 ## Proof on the endpoint
 
@@ -233,7 +235,9 @@ The first job on a new worker must show, in its log and progress:
 
 **First Actions build, 2026-11-12 (`stills-t1-m1-rc1@sha256:9380cc424f8c76eeb1ac6d8ebfb15d98673b26fd0effdced528ddf76d4afd533`,
 on `toolchain-t1@sha256:456b417b...`).** `stills-base.yml` run 43299859408 at main `9f2505d` (#644), `crane mutate
---append` of 4 bin tars. Final name after promotion: `stills-t1-m1-b2` (the section above); not promoted as of this record.
+--append` of 4 bin tars. Promoted 2026-11-12 as `stills-t1-m1-b2` (the section above): by the lead through the GHCR registry API (no buildx or crane on the
+host). The rc1 manifest was fetched by digest and its sha256 checked, the final tag read 404 first, the same bytes were PUT as
+`stills-t1-m1-b2` (201), and the read-back `docker-content-digest` was `sha256:9380cc42...`, the rc1 digest. rc1 is kept.
 - **Layers added over the toolchain, compressed (GHCR manifest, read 2026-11-12):**
   - `beda3952af2d`, 5,020,773,145 bytes;
   - `638d992d951a`, 7,971,655,393 bytes;

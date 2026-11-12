@@ -11,12 +11,12 @@ See also `docs/configuration.md` (per-endpoint env + the i2v tier table) and
 **Do not pin `:1.0.1`** (t2 weight-digest rewrite; RunPod `unexpected EOF`). Incident:
 [`runpod-1.0.1-weight-digest-eof.md`](runpod-1.0.1-weight-digest-eof.md).
 
-## Current state (both read with `get-endpoint` on 2026-11-11; backend pools as changed by #625; backend image as repinned 2026-11-12, v46)
+## Current state (both read with `get-endpoint` on 2026-11-11; backend pools as changed by #625; backend image as repinned 2026-11-12, v47)
 
 | | `vivijure-backend-hosted` | `vivijure-upscale-hosted` |
 |---|---|---|
 | id | `xe5d1ivs40ohjo` | `0m7puc409hqw8a` |
-| Image | `vivijure-backend:1.1.19@sha256:9c560486fd11fb7c9d899489c3481a5feee0d2ab1813d61f925f1153282bc6ba` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
+| Image | `vivijure-backend:1.1.20@sha256:961ac67c96e0e971eb3ce90b9f5f9772a3592cf8c7fbdf7a6fd31cbdfa7c985d` | `vivijure-upscale:1.1.3@sha256:8b8b514688830b53c446b211052ddce962c1587b6df13bbefc45bda9833a3a94` |
 | Pools | `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141` | `BLACKWELL_96` |
 | `workers` min / max | 0 / 12 | 0 / 10 |
 | Idle timeout | 60 s | 10 s |
@@ -94,7 +94,7 @@ the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 1
 2. Wait 65 s after the release before submitting anything. Renders through the studio got `keyframe /run -> 409` in that window after the 1.1.7 repin.
 3. On a thin image built on the bare toolchain, after a repin, every worker is cold and pulls about 24 GB from R2 (on a code image built on the stills weights base, a stills job pulls nothing: [stills-weights-base.md](stills-weights-base.md), #564), and a warm-up batch does not change that: each NEW worker pulls again. So keep the number of concurrent cold workers small, about 4 to 6, by submitting in small batches, and budget one cold pull per worker. On 2026-11-06, 15 cold workers at once slowed pulls to 2.6 MiB/s and stretched cold jobs to about 20 minutes each; 6 at once pulled normally (cold delay about 2 to 3 minutes). Submitting 2 first and the rest once they ran did NOT help after a new image: the second batch started on new workers, cold.
 
-**Backend 1.1.20, built and GPU-proven 2026-11-12; NOT pinned as of this record.** The code is the same as 1.1.19; the stills base is new.
+**Backend 1.1.20, pinned 2026-11-12 (release v47, 23:07:15.566Z).** The code is the same as 1.1.19; the stills base is new.
 
 - **Code:** main `9f2505d` (thin-image run 43312194021, which pushed the image and then refused its smoke for disk, #645).
   Against 1.1.19 (main `dd3e7fc`) nothing under `src/` changed and `deploy/smoke_imports.py` did not change.
@@ -114,7 +114,15 @@ the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 1
   `preview` replay of `film-63bbaae3` (project `cf1281_hand_mug`, seed 130605): `mirror_skipped {"reason": "warm_stills"}`,
   `mirror_done {"pulled": false}`, no `mirror_complete`; COMPLETED with keyframe `shot_01.png`, no `reused`, plate count 2 of 2,
   LoRAs A and B trained in the job (`executionTime` 2,271,623 ms). The live endpoint was untouched (release v46 before and after).
-- **Repin:** the lead's, by the standing procedure above. The plan is on the release PR.
+- **Release:** PR #647, merge commit `93ee3d3`, tag `backend-v1.1.20` on it, GitHub Release published from the `[1.1.20]` section.
+- **Base promotion (lead):** `stills-t1-m1-rc1` was tagged `stills-t1-m1-b2` through the GHCR registry API, because neither
+  buildx nor crane was on the host. The rc1 manifest was fetched by digest and its sha256 checked as `9380cc42...`; the
+  `stills-t1-m1-b2` tag read 404 first; the same bytes were PUT as `stills-t1-m1-b2` (201); the read-back
+  `docker-content-digest` was `sha256:9380cc424f8c76eeb1ac6d8ebfb15d98673b26fd0effdced528ddf76d4afd533`. The rc1 tag is kept.
+- **Repin (lead, Conrad's go):** before the drain, 0 jobs in progress, 0 queued, 12 workers idle. The pool was drained to
+  max 0 (all zero at 23:07:12Z), repinned by digest to `1.1.20@sha256:961ac67c...`, and restored to min 0, max 12, idle 60 s.
+  Release v47 was created at 23:07:15.566Z and rolled out to 100% (1 of 1 worker on latest). Read back: `QUEUE_DELAY` 4,
+  disk 300 GB, pools `BLACKWELL_96`, `ADA_80_PRO`, `HOPPER_141` unchanged, FlashBoot on.
 
 **Backend rollback from 1.1.20:** image
 `vivijure-backend:1.1.19@sha256:9c560486fd11fb7c9d899489c3481a5feee0d2ab1813d61f925f1153282bc6ba` (base `stills-t1-m1`), idle timeout 60 s,
