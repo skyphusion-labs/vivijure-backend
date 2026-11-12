@@ -52,6 +52,15 @@ SUBCOMMANDS
   bins-needed  --src <staged-seed> [--ceiling-gb 9.0]
         Print the minimum bin count for the staged seed (capacity planning; the Dockerfile fixes a
         generous bin count and empty bins are harmless zero-byte layers).
+
+  layer-tar  --bin <bin-dir> --out <tar> --epoch <unix seconds> [--prefix opt/models]
+        Write one bin as a REPRODUCIBLE, uncompressed layer tar (sorted entries, every mtime the epoch,
+        uid/gid 0, fixed modes, no hardlink entries) and print its diff_id (the tar's sha256).
+        stills-base.yml appends these to the toolchain with a pinned `crane mutate --append`.
+
+  assert-appended  --base-config <json> --config <json> --diff-ids <file> [--label k=v ...]
+        Post-push gate: the candidate's config is the toolchain's with exactly the tars' diff_ids
+        appended and the labels added (entrypoint, cmd, env, user and every base label kept).
 """
 from __future__ import annotations
 
@@ -449,6 +458,135 @@ def write_manifest(bins_root: Path, out: Path, log=print) -> int:
     return len(entries)
 
 
+# ---------------------------------------------------------------------------------------------------
+# Reproducible layer tarballs (#564, fleet-chezmoi#2620, option B). stills-base.yml turns each bin into
+# ONE uncompressed tar and appends it to the toolchain with a pinned `crane mutate --append`, so no
+# BuildKit build and no second copy of the stage. The tar is a pure function of the bin's paths, file
+# bytes, symlink targets and the epoch: entries in sorted path order, every mtime the epoch, uid and gid
+# 0 with empty user and group names, modes fixed (dirs 0755, files 0644, or 0755 when any exec bit is
+# set, symlinks 0777), every file a regular entry (never a hardlink entry, though bin_pack hardlinks
+# bins to the stage). So an unchanged bin gives the same tar, the same diff_id (the tar's sha256), and,
+# with the same pinned crane compressing it, the same layer digest.
+
+LAYER_PREFIX = "opt/models"
+_DIR_MODE = 0o755
+_FILE_MODE = 0o644
+_EXEC_MODE = 0o755
+_LINK_MODE = 0o777
+
+
+class _HashingWriter:
+    """A write-only file object that sha256-hashes what passes through it (the layer's diff_id), so
+    the tar is never read back to hash it."""
+
+    def __init__(self, fh):
+        self._fh = fh
+        self.sha = hashlib.sha256()
+        self.size = 0
+
+    def write(self, data):
+        self.sha.update(data)
+        self.size += len(data)
+        return self._fh.write(data)
+
+    def close(self):  # tarfile's stream closes its fileobj only if it opened it; the caller owns _fh
+        pass
+
+
+def layer_tar(bin_dir: Path, out: Path, epoch: int, prefix: str = LAYER_PREFIX, log=print) -> dict:
+    """Write `bin_dir` as a reproducible layer tar at `out`, its contents under `prefix` (the image
+    path, VJ_MODELS_ROOT without the leading slash). Returns {"diff_id", "bytes", "entries"}; the
+    diff_id is the sha256 of the tar, which is exactly the layer's rootfs diff_id in the image."""
+    import tarfile
+
+    bin_dir = Path(bin_dir)
+    if not bin_dir.is_dir():
+        raise SystemExit(f"bake_layers: layer-tar FATAL -- bin {bin_dir} is not a directory.")
+    if epoch < 0:
+        raise SystemExit("bake_layers: layer-tar FATAL -- the epoch must be a non-negative integer.")
+    prefix = prefix.strip("/")
+
+    def entry(name: str, kind: bytes, mode: int, size: int = 0, linkname: str = ""):
+        ti = tarfile.TarInfo(name)
+        ti.type, ti.mode, ti.size, ti.linkname = kind, mode, size, linkname
+        ti.mtime, ti.uid, ti.gid, ti.uname, ti.gname = int(epoch), 0, 0, "", ""
+        return ti
+
+    paths = sorted((p.relative_to(bin_dir).as_posix(), p) for p in bin_dir.rglob("*"))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    parents = [prefix.split("/")[: i + 1] for i in range(len(prefix.split("/")))] if prefix else []
+    n = 0
+    with open(out, "wb") as fh:
+        w = _HashingWriter(fh)
+        with tarfile.open(fileobj=w, mode="w|", format=tarfile.PAX_FORMAT) as tar:
+            for parts in parents:
+                tar.addfile(entry("/".join(parts), tarfile.DIRTYPE, _DIR_MODE))
+                n += 1
+            for rel, p in paths:
+                name = f"{prefix}/{rel}" if prefix else rel
+                st = p.lstat()
+                if p.is_symlink():
+                    tar.addfile(entry(name, tarfile.SYMTYPE, _LINK_MODE, linkname=os.readlink(p)))
+                elif p.is_dir():
+                    tar.addfile(entry(name, tarfile.DIRTYPE, _DIR_MODE))
+                elif p.is_file():
+                    mode = _EXEC_MODE if st.st_mode & 0o111 else _FILE_MODE
+                    with open(p, "rb") as src:
+                        tar.addfile(entry(name, tarfile.REGTYPE, mode, size=st.st_size), src)
+                else:
+                    raise SystemExit(f"bake_layers: layer-tar FATAL -- {p} is not a file, directory or "
+                                     "symlink; a weight layer holds nothing else.")
+                n += 1
+        fh.flush()
+    result = {"diff_id": "sha256:" + w.sha.hexdigest(), "bytes": w.size, "entries": n}
+    if w.size >= GHCR_LAYER_LIMIT_BYTES:
+        raise SystemExit(f"bake_layers: layer-tar FATAL -- {out} is {w.size} bytes, at or over the GHCR "
+                         f"layer limit {GHCR_LAYER_LIMIT_BYTES}.")
+    log(f"bake_layers: layer-tar {bin_dir} -> {out}: {n} entries, {w.size} bytes, diff_id "
+        f"{result['diff_id']} (epoch {epoch}).")
+    return result
+
+
+# The parts of an image config that must survive the append unchanged.
+_KEPT_CONFIG_KEYS = ("Entrypoint", "Cmd", "Env", "WorkingDir", "User", "ExposedPorts", "Volumes",
+                     "StopSignal")
+
+
+def assert_appended(base_cfg: dict, cfg: dict, diff_ids: list[str], labels: dict, log=print) -> dict:
+    """Hard-fail unless `cfg` (the pushed candidate's image config) is `base_cfg` (the toolchain's)
+    with exactly `diff_ids` appended to its rootfs and `labels` added: the same entrypoint, cmd, env,
+    working dir and user, every base label kept, every new label at its value, and the base's layers
+    first and unchanged. diff_ids are the sha256s layer-tar printed, so this also ties what GHCR holds
+    to the tars this run wrote."""
+    bc, c = base_cfg.get("config") or {}, cfg.get("config") or {}
+    problems = []
+    for k in _KEPT_CONFIG_KEYS:
+        if bc.get(k) != c.get(k):
+            problems.append(f"config {k} changed: {bc.get(k)!r} -> {c.get(k)!r}")
+    got = c.get("Labels") or {}
+    for k, v in (bc.get("Labels") or {}).items():
+        if got.get(k) != v:
+            problems.append(f"base label {k} lost or changed")
+    for k, v in labels.items():
+        if got.get(k) != v:
+            problems.append(f"label {k} is {got.get(k)!r}, want {v!r}")
+    base_ids = (base_cfg.get("rootfs") or {}).get("diff_ids") or []
+    ids = (cfg.get("rootfs") or {}).get("diff_ids") or []
+    if not base_ids:
+        problems.append("the base config lists no rootfs diff_ids")
+    if ids != base_ids + list(diff_ids):
+        problems.append(f"rootfs is not the base's {len(base_ids)} layers plus the {len(diff_ids)} "
+                        f"tars, in order (got {len(ids)} layers)")
+    if problems:
+        for p in problems:
+            log("FATAL: " + p)
+        raise SystemExit(f"bake_layers: assert-appended FATAL -- {len(problems)} problem(s); the pushed "
+                         "candidate is not the toolchain plus the bin layers.")
+    log(f"bake_layers: assert-appended OK -- {len(base_ids)} toolchain layers kept, {len(diff_ids)} bin "
+        f"layers appended, config kept, {len(labels)} label(s) set.")
+    return {"base_layers": len(base_ids), "appended": len(diff_ids)}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Bake-image layer bin-packer + per-layer GHCR gate.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -515,6 +653,19 @@ def main() -> None:
                      help="the bins dir (deploy/seed-bins) holding bin-NN/ subtrees")
     p_m.add_argument("--out", required=True, type=Path, help="manifest output path")
 
+    p_lt = sub.add_parser("layer-tar", help="write one bin as a reproducible layer tar; print its diff_id")
+    p_lt.add_argument("--bin", required=True, type=Path)
+    p_lt.add_argument("--out", required=True, type=Path)
+    p_lt.add_argument("--epoch", required=True, type=int, help="every entry mtime (SOURCE_DATE_EPOCH)")
+    p_lt.add_argument("--prefix", default=LAYER_PREFIX, help="image path of the bin root, no leading /")
+
+    p_ap = sub.add_parser("assert-appended",
+                          help="assert a pushed config is the base plus the tars, labels added")
+    p_ap.add_argument("--base-config", required=True, type=Path)
+    p_ap.add_argument("--config", required=True, type=Path)
+    p_ap.add_argument("--diff-ids", required=True, type=Path, help="one sha256:<hex> per line, in order")
+    p_ap.add_argument("--label", action="append", default=[], help="k=v, repeatable")
+
     args = ap.parse_args()
     if args.cmd == "reconstruct-symlinks":
         reconstruct_symlinks(args.root)
@@ -540,6 +691,19 @@ def main() -> None:
               f"(add headroom; the Dockerfile fixes a generous bin count, empty bins are free).")
     elif args.cmd == "manifest":
         write_manifest(args.bins_root, args.out)
+    elif args.cmd == "layer-tar":
+        r = layer_tar(args.bin, args.out, args.epoch, args.prefix, log=lambda m: print(m, file=sys.stderr))
+        print(r["diff_id"])
+    elif args.cmd == "assert-appended":
+        labels = {}
+        for kv in args.label:
+            k, sep, v = kv.partition("=")
+            if not sep or not k:
+                raise SystemExit(f"bake_layers: --label must be k=v (got {kv!r})")
+            labels[k] = v
+        ids = [ln.strip() for ln in args.diff_ids.read_text().splitlines() if ln.strip()]
+        assert_appended(json.loads(args.base_config.read_text()), json.loads(args.config.read_text()),
+                        ids, labels)
 
 
 if __name__ == "__main__":
