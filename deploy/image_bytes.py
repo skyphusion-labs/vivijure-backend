@@ -4,9 +4,9 @@
 
 MODE=max-layer prints the largest compressed layer instead (stills-base.yml, the GHCR layer limit).
 
-thin-image.yml uses it before the CPU import smoke, to refuse a pull that the runner disk cannot
-hold instead of filling the disk and losing the runner. It reads the registry manifest only (the
-config blob plus every layer), never a layer.
+stills-base.yml uses MODE=max-layer. (thin-image.yml used the default mode to size its smoke pull until
+#645; it now sizes the smoke with deploy/smoke_image.py, which leaves the weight layers out.) It reads the
+registry manifest only (the config blob plus every layer), never a layer.
 
 INSPECT is the raw-manifest probe, default "docker buildx imagetools inspect --raw" (needs the
 GHCR login first); tests/test_image_bytes.py replaces it. An index picks its linux/amd64 entry.
