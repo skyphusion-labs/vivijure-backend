@@ -108,7 +108,8 @@ the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 1
 - **Repin (lead):** before the drain, 0 jobs were in progress and 0 queued.
   The pool was drained to 0, repinned by digest, and restored to min 0, max 12, idle 60 s, `QUEUE_DELAY` 4.
   The disk stayed at 300 GB and the three pools are unchanged. The image read back as `1.1.19@sha256:9c56...`.
-  With min 0, the rollout reads 0 of 0 workers until a job starts one.
+  With no traffic and min 0, RunPod pre-warmed workers on the release: at 08:05Z `list-endpoint-releases` read v46
+  at 100%, 4 of 4 workers on latest (`/health`: 2 idle, 2 ready). So the OCI index pulls and runs on RunPod.
 
 **Backend rollback from 1.1.19:** image
 `vivijure-backend:1.1.18@sha256:3ec3849279aa18e6c58ba0716bd768366162a70d8a6d61e9bdde2254ee4e049a` (same stills base), idle timeout 60 s,
