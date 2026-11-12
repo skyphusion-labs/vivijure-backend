@@ -150,14 +150,14 @@ def test_smoke_only_with_a_toolchain_ref_is_refused(tmp_path):
     assert r.returncode == 1 and "together" in r.stdout and o == {} and probed == []
 
 
-def test_the_workflow_smokes_on_the_scratch_disk_and_skips_the_build_in_smoke_mode():
+def test_the_workflow_moves_docker_to_mnt_checks_room_and_skips_the_build_in_smoke_mode():
     wf = (ROOT / ".github" / "workflows" / "thin-image.yml").read_text()
     assert "smoke_ref:" in wf and "SMOKE: ${{ inputs.smoke_ref }}" in wf
     thin = wf.split("- name: Build and push thin worker", 1)[1].split("- name:", 1)[0]
     assert "if: steps.cfg.outputs.mode != 'smoke'" in thin
     pushed = wf.split("- name: Pushed digest", 1)[1].split("- name:", 1)[0]
     assert "if: steps.cfg.outputs.mode != 'smoke'" in pushed
-    room = wf.split("- name: Move Docker storage to the scratch disk", 1)[1].split("- name: CPU import smoke", 1)[0]
+    room = wf.split("- name: Move Docker storage to /mnt", 1)[1].split("- name: CPU import smoke", 1)[0]
     assert '"data-root"]="/mnt/docker"' in room
     assert "deploy/image_bytes.py" in room
     assert "cannot hold the image" in room
@@ -165,4 +165,4 @@ def test_the_workflow_smokes_on_the_scratch_disk_and_skips_the_build_in_smoke_mo
     assert "${{ steps.room.outputs.img }}" in smoke
     assert 'docker pull "${IMG}"' in smoke
     # The smoke must come after the move, never before it.
-    assert wf.index("Move Docker storage to the scratch disk") < wf.index("- name: CPU import smoke")
+    assert wf.index("- name: Move Docker storage to /mnt") < wf.index("- name: CPU import smoke")
