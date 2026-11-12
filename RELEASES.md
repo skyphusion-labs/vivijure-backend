@@ -19,7 +19,12 @@
   keyframe, i2v and finish on a GPU pod, and RunPod serves SDXL keyframes only. It last ran 2026-08-20.
 - **Source changes** land by PR. A release is a PR; an org admin tags its merge commit.
 - **State on 2026-11-12:** the operated endpoint runs `1.1.19`, smoked by digest (thin-image run
-  43178431220, backend#636) and pinned as release v46 (`docs/runpod-endpoint-config.md`).
+  43178431220, backend#636) and pinned as release v46 (`docs/runpod-endpoint-config.md`). `1.1.20` is
+  built (`9f2505d`, run 43312194021), smoked (run 43319368393) and GPU-proven on a scratch endpoint; it is
+  the same code on the first Actions-built stills base, and is not pinned yet.
+- **Release tag:** a release is a PR, and an org admin tags its merge commit `backend-v<X.Y.Z>`
+  (fleet-chezmoi#1766). The tag builds nothing: `release.yml` still runs on a `backend-v*` push and fails on its
+  first step (`Disabled -- no GPU builder`), so expect one red run. The image is the one `thin-image.yml` pushed.
 
 The rest of this file is the record of how releases ran before. Where it says a `backend-v*` tag
 runs `release.yml`, that path is disabled now.
@@ -99,11 +104,11 @@ weight-digest miss). Superseded by the 2026-07-22 line above.
 next release tag is `backend-v0.4.8`, NOT `backend-v0.4.5` (0.4.5 / 0.4.6 / 0.4.7 are taken).
 (Historical; superseded by the 2026-07-15 line above.)
 
-**The 1.1.x line is GHCR tags only, with no git tag (2026-11-04 to 2026-11-11, 1.1.5 through 1.1.19).** 1.1.19 is the first of the line with an assembled CHANGELOG section (`[1.1.19]`, which covers everything since 1.0.16). Like the others it gets no `backend-v1.1.19` tag: `release.yml` is disabled and fails closed (it needs a GPU runner), so a tag push builds nothing. 1.1.5 through 1.1.18 are thin builds made
+**The 1.1.x line is GHCR tags only, with no git tag (2026-11-04 to 2026-11-11, 1.1.5 through 1.1.19).** 1.1.19 is the first of the line with an assembled CHANGELOG section (`[1.1.19]`, which covers everything since 1.0.16). Like the others it has no `backend-v1.1.19` tag: `release.yml` is disabled and fails closed (it needs a GPU runner), so a tag push builds nothing. **From 1.1.20 the release PR merge commit is tagged** (`backend-v1.1.20`), per the bump-at-release convention (fleet-chezmoi#1766); the tag records the release and builds nothing. 1.1.5 through 1.1.18 are thin builds made
 on the Vultr bake box ([docs/bake-box.md](docs/bake-box.md)), when Actions did not start jobs on this account. Each pushed
 `vivijure-backend:<X.Y.Z>` from the box and is pinned by digest. **From 1.1.19 there is no bake box:** the image is built on
 GitHub-hosted `ubuntu-latest` by `thin-image.yml`, dispatched from main with `toolchain_ref` set to the full digest of an
-existing base (for 1.1.19, `vivijure-backend:stills-t1-m1@sha256:6d0e19bd...`). With `toolchain_ref`, the workflow builds no
+existing base (for 1.1.19, `vivijure-backend:stills-t1-m1@sha256:6d0e19bd...`; for 1.1.20, the Actions-built `stills-t1-m1-rc1@sha256:9380cc42...`, promoted as `stills-t1-m1-b2`). With `toolchain_ref`, the workflow builds no
 toolchain and pushes no toolchain tag, refuses a version tag that already exists on GHCR, and prints the pushed digest. The
 digest is recorded in `docs/runpod-endpoint-config.md`, and the endpoint is repinned by that digest.
 
