@@ -18,12 +18,11 @@
   `runpod-verify.yml` (backend#641): it gates on a Wan2.2 i2v clip and its default bundle runs
   keyframe, i2v and finish on a GPU pod, and RunPod serves SDXL keyframes only. It last ran 2026-08-20.
 - **Source changes** land by PR. A release is a PR; an org admin tags its merge commit.
-- **State on 2026-11-12:** the operated endpoint runs `1.1.20` (`backend-v1.1.20`, PR #647), pinned as
-  release v47 at 23:07:15Z (`docs/runpod-endpoint-config.md`). It is the code of `1.1.19` on the first
-  Actions-built stills base, `stills-t1-m1-b2` (= `stills-t1-m1-rc1`, `sha256:9380cc42...`). Built at `9f2505d`
-  (run 43312194021), smoked (run 43319368393), GPU-proven on a scratch endpoint. Rollback: `1.1.19` (v46).
-  `1.1.21` is built (`27de2b6`, run 43334099190, smoked in the same run) on the same base: 1.1.20 plus
-  `multi_char.pose_template` (#649). It is not pinned yet.
+- **State on 2026-11-13:** the operated endpoint runs `1.1.21` (`backend-v1.1.21`, PR #650), pinned as
+  release v48 at 2026-11-13T00:21:28Z (`docs/runpod-endpoint-config.md`). It is 1.1.20 plus
+  `multi_char.pose_template` (#649) on the same Actions-built stills base, `stills-t1-m1-b2` (`sha256:9380cc42...`).
+  Rollback: `1.1.20` (v47). `1.1.22` is built (`0905b93`, run 43399018177, smoked in the same run) on the same base:
+  1.1.21 plus `keyframe.pass_b_gaze` (#651). It is not pinned yet.
 - **Release tag:** a release is a PR, and an org admin tags its merge commit `backend-v<X.Y.Z>`
   (fleet-chezmoi#1766). The tag builds nothing: `release.yml` still runs on a `backend-v*` push and fails on its
   first step (`Disabled -- no GPU builder`), so expect one red run. The image is the one `thin-image.yml` pushed.
