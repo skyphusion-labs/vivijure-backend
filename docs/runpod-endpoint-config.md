@@ -94,7 +94,26 @@ the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 1
 2. Wait 65 s after the release before submitting anything. Renders through the studio got `keyframe /run -> 409` in that window after the 1.1.7 repin.
 3. On a thin image built on the bare toolchain, after a repin, every worker is cold and pulls about 24 GB from R2 (on a code image built on the stills weights base, a stills job pulls nothing: [stills-weights-base.md](stills-weights-base.md), #564), and a warm-up batch does not change that: each NEW worker pulls again. So keep the number of concurrent cold workers small, about 4 to 6, by submitting in small batches, and budget one cold pull per worker. On 2026-11-06, 15 cold workers at once slowed pulls to 2.6 MiB/s and stretched cold jobs to about 20 minutes each; 6 at once pulled normally (cold delay about 2 to 3 minutes). Submitting 2 first and the rest once they ran did NOT help after a new image: the second batch started on new workers, cold.
 
-**Backend 1.1.22, built 2026-11-13 UTC (smoke 09:21Z); NOT pinned as of this record.** A code-only release on the 1.1.21 stills base.
+**Backend 1.1.23, built 2026-11-13 UTC; NOT pinned as of this record.** A code-only release on the 1.1.22 stills base.
+
+- **Code:** main `c248dd2` (thin-image run 43402869698), which adds `keyframe.plate_gaze` (#653, vivijure-cf#1442).
+  Its default `off` draws what 1.1.22 drew and keeps every reuse hash. Built from `deploy/Dockerfile.thin` with
+  `toolchain_ref` = `stills-t1-m1-b2@sha256:9380cc424f8c76eeb1ac6d8ebfb15d98673b26fd0effdced528ddf76d4afd533`, the base 1.1.22 uses.
+- **Image:** `vivijure-backend:1.1.23@sha256:2153bf788d0224afd7f0c2d9ca33a966e50b6bb36247cd7032e01b5d37c8f726`
+  (the run's "Pushed digest" step; the `1.1.23` tag reads back the same from GHCR). An OCI index: the amd64 manifest
+  `sha256:e3f3210876c9722ca51a1bb6639d404d95fef65707fd634ebcf5649486b88488` plus a buildx attestation manifest. Pin the index digest.
+- **Cold pull:** against 1.1.22 (GHCR manifests, read 2026-11-13 UTC), 29 layers each, 27 shared, 2 new: 204,179 bytes (the code).
+  No weight layer is new, so a worker that ran 1.1.22 starts after about 0.2 MB.
+- **Checks on the image:** the same run's CPU import smoke passed on the pushed digest, with the base's weight layers left out
+  (`Smoked ...@sha256:2153bf78... (thin; weight layers left out: base stills-t1-m1-b2@sha256:9380cc42...)`). The CUDA EP
+  check was skipped (no GPU), as on every hosted-runner smoke.
+- **Release:** the release PR for 1.1.23; an org admin tags its merge commit `backend-v1.1.23`.
+
+**Backend rollback from 1.1.23:** image `vivijure-backend:1.1.22@sha256:6144a82824bbe311bb669bde68038147cee910432c4375bcc88199d9bcca96c4`
+(same base, so no weight pull), idle timeout 60 s, max 12, `QUEUE_DELAY` 4, disk 300 GB. Follow the repinning procedure above.
+
+**Backend 1.1.22, pinned 2026-11-13 at about 09:27Z (the lead's report: drain to 0, image, max 12; the RunPod release record was not read from the seat that wrote this).** Built 2026-11-13 UTC (smoke 09:21Z). A code-only release on the 1.1.21 stills base.
+(This heading first said "NOT pinned as of this record"; corrected 2026-11-13. It supersedes that line.)
 
 - **Code:** main `0905b93` (thin-image run 43399018177), which adds `keyframe.pass_b_gaze` (#651, vivijure-cf#1442).
   Its default `off` draws what 1.1.21 drew and keeps every reuse hash. Built from `deploy/Dockerfile.thin` with

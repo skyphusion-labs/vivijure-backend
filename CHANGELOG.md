@@ -11,6 +11,14 @@ folded into a release section by `scripts/changelog-assemble.py` when the releas
 
 ## Unreleased
 
+## [1.1.23] -- 2026-11-13
+
+**What is new in the 1.1.23 image against 1.1.22: one feature, `keyframe.plate_gaze` (#653), on the same stills base.** 1.1.23 is built at main `c248dd2` (thin-image run 43402869698) FROM `stills-t1-m1-b2@sha256:9380cc42...`, the base 1.1.22 uses. Between `cca5a58` and `c248dd2` the only `src/` changes are #653's (`config.py`, `keyframe.py`, `orchestrator.py`, `pipeline.py`); `deploy/Dockerfile.thin` and `deploy/smoke_imports.py` did not change (`git diff --stat cca5a58 c248dd2 -- src deploy/Dockerfile.thin deploy/smoke_imports.py`). Against 1.1.22 the image shares 27 of 29 layers; the 2 new layers are the code, 204,179 bytes compressed (GHCR manifests, read 2026-11-13 UTC). So a worker that ran 1.1.22 pulls about 0.2 MB, and no weight layer.
+
+**Feat: `keyframe.plate_gaze` asks the plate to turn each head toward what the shot names (vivijure-cf#1442)**
+
+The plate-side twin of `pass_b_gaze`. Under `plate_regional_text`, `auto` adds "head turned down toward the <X>, three-quarter view, eyes on the <X>" to each person's own region prompt in Pass A, where <X> is the object of the shot text's own "looking at <X>" (the same reader as `pass_b_gaze`, now `keyframe.gaze_object`). The shared prompt, the background band and Pass B are never changed. `off` (default) is the plate as before, byte for byte, and keeps every reuse hash (pinned against main cca5a58). Measured first on the live endpoint: no Pass B knob (text, cast LoRA, canny, identity scale) moved the lens gaze on the workbench board, which follows the plate's head-on outline. A knob to measure that, not a default change.
+
 ## [1.1.22] -- 2026-11-13
 
 **What is new in the 1.1.22 image against 1.1.21: one feature, `keyframe.pass_b_gaze` (#651), on the same stills base.** 1.1.22 is built at main `0905b93` (thin-image run 43399018177) FROM `stills-t1-m1-b2@sha256:9380cc42...`, the base 1.1.21 uses. Between `27de2b6` and `0905b93` the only `src/` changes are #651's (`config.py`, `keyframe.py`, `orchestrator.py`, `pipeline.py`); `deploy/Dockerfile.thin` and `deploy/smoke_imports.py` did not change (`git diff --stat 27de2b6 0905b93 -- src deploy/Dockerfile.thin deploy/smoke_imports.py`). Against 1.1.21 the image shares 27 of 29 layers; the 2 new layers are the code, 203,514 bytes compressed (GHCR manifests, read 2026-11-13 UTC). So a worker that ran 1.1.21 pulls about 0.2 MB, and no weight layer.
