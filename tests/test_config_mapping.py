@@ -115,6 +115,13 @@ def test_keyframe_pass_b_gaze_reaches_params():
     assert keyframe_params_from(_rcfg()).pass_b_gaze == "off"
 
 
+def test_keyframe_plate_gaze_reaches_params():
+    """vivijure-cf#1442: off | auto; unknown values read as off."""
+    assert keyframe_params_from(_rcfg(kf={"plate_gaze": "auto"})).plate_gaze == "auto"
+    assert keyframe_params_from(_rcfg(kf={"plate_gaze": "on"})).plate_gaze == "off"
+    assert keyframe_params_from(_rcfg()).plate_gaze == "off"
+
+
 def test_keyframe_plate_people_free_background_reaches_params():
     # vivijure-cf#1143 option c: off by default; only an exact true turns it on.
     assert keyframe_params_from(_rcfg(kf={"plate_people_free_background": True})).plate_people_free_background is True
@@ -298,6 +305,7 @@ KEYFRAME_ASSERTED = {
     "plate_people_free_background",
     "plate_count_retries",
     "pass_b_gaze",
+    "plate_gaze",
     "multi_char",
 }
 

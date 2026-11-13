@@ -238,6 +238,10 @@ def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard
     # says so here; on a shot the built Pass B prompt below carries the clause itself.
     if kc.pass_b_gaze != "off":
         payload["pass_b_gaze"] = kc.pass_b_gaze
+    # Same rule (vivijure-cf#1442): "off" is the plate as before, byte for byte. The per-region plate prompts are not
+    # in the hash below (only the flag that turns them on is), so a set mode says so here.
+    if kc.plate_gaze != "off":
+        payload["plate_gaze"] = kc.plate_gaze
     # Same rule: off draws exactly what it drew before, so the hash stays. And only on a shot the guard can run on
     # (2..max_slots people, keyframe.engine_for): a one-person or empty shot draws the same with it on, so turning
     # the default on must not redraw those stills. With no scene (a config-only hash) it is included when set.
