@@ -76,6 +76,7 @@ def keyframe_params_from(config: RenderConfig) -> KeyframeParams:
         plate_regional_text=kc.plate_regional_text,
         plate_people_free_background=kc.plate_people_free_background,
         plate_count_retries=kc.plate_count_retries,
+        pass_b_gaze=kc.pass_b_gaze,
     )
 
 

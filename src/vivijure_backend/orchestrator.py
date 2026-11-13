@@ -234,6 +234,10 @@ def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard
     # nothing and every stored still keeps its hash. "reach" and "auto" draw a different control, so they say so.
     if mc.pose_template != "stand":
         payload["pose_template"] = mc.pose_template
+    # Same rule (vivijure-cf#1442): "off" is the Pass B prompt as before, byte for byte, so it adds nothing. A set mode
+    # says so here; on a shot the built Pass B prompt below carries the clause itself.
+    if kc.pass_b_gaze != "off":
+        payload["pass_b_gaze"] = kc.pass_b_gaze
     # Same rule: off draws exactly what it drew before, so the hash stays. And only on a shot the guard can run on
     # (2..max_slots people, keyframe.engine_for): a one-person or empty shot draws the same with it on, so turning
     # the default on must not redraw those stills. With no scene (a config-only hash) it is included when set.
@@ -258,12 +262,13 @@ def kf_hash(kc, scene: Scene | None = None, cast: Cast | None = None, storyboard
         if bound:
             payload["bound_loras"] = bound
     if scene is not None and storyboard is not None:
-        from .keyframe import DEFAULT_NEGATIVE, build_prompt, scene_lock_negative
+        from .keyframe import DEFAULT_NEGATIVE, build_prompt, pass_b_gaze_clause, scene_lock_negative
 
         c = cast if cast is not None else Cast(characters={})
         payload["prompts"] = [
             build_prompt(scene, c, storyboard, include_triggers=False),
-            build_prompt(scene, c, storyboard, include_triggers=True, lock_clause=True),
+            build_prompt(scene, c, storyboard, include_triggers=True, lock_clause=True,
+                         gaze=pass_b_gaze_clause(scene, kc.pass_b_gaze, mc.max_slots, c) if kc.scene_lock else ""),
             build_prompt(scene, c, storyboard),
             scene_lock_negative(scene, DEFAULT_NEGATIVE),
         ]

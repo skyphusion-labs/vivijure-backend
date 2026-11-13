@@ -91,6 +91,7 @@ class KeyframeParams:
     plate_regional_text: bool = False  # Pass A per-region descriptions on a two-person shot; off = one prompt (cf#1143)
     plate_people_free_background: bool = False  # with regional text: the band names no one (cf#1143 option c)
     plate_count_retries: int = 3     # 0..3 plate redraws while it has too many faces; 0 = off (cf#1143)
+    pass_b_gaze: str = "off"         # off | auto: Pass B says where the eyes go, from the shot text (cf#1442)
     # Identity method for the SINGLE-character path. InstantID is the default: insightface
     # face-embed through InstantID's image projection. "ip_adapter" is the h94 fallback.
     # Two-person shots ignore this and stay on the masked IP-Adapter regional path.
@@ -437,7 +438,7 @@ def _join_prompt(parts: list[str]) -> str:
 
 
 def build_prompt(scene: Scene, cast: Cast, storyboard: Storyboard, *,
-                 include_triggers: bool = True, lock_clause: bool = False) -> str:
+                 include_triggers: bool = True, lock_clause: bool = False, gaze: str = "") -> str:
     """Compose the SDXL prompt: the storyboard style prefix, the scene's own prompt, optionally the
     LoRA trigger tokens and the Pass B location-lock clause, and each slot's character description.
     Pass A has no triggers and no lock, but it draws the person whose outline Pass B then keeps
@@ -477,6 +478,9 @@ def build_prompt(scene: Scene, cast: Cast, storyboard: Storyboard, *,
         tail.append(storyboard.style_preset)
     if lock_clause:
         tail.append(PASS_B_LOCK_CLAUSE)
+    # vivijure-cf#1442: the Pass B gaze clause (pass_b_gaze_clause) follows the lock clause. Empty adds nothing.
+    if gaze:
+        tail.append(gaze)
     if not include_triggers and len(scene.character_slots) == 1:
         tail.append(PLATE_SOLO)
     setting = setting_for(scene, storyboard)
@@ -553,12 +557,49 @@ def plan_keyframe_passes(scene: Scene, cast: Cast, storyboard: Storyboard,
     ident_scale = cfg.lora_scale_per_slot if engine == "regional" else cfg.lora_scale
     identity = KeyframePass(
         name="identity",
-        prompt=build_prompt(scene, cast, storyboard, include_triggers=True, lock_clause=True),
+        prompt=build_prompt(scene, cast, storyboard, include_triggers=True, lock_clause=True,
+                            gaze=pass_b_gaze_clause(scene, cfg.pass_b_gaze, cfg.max_slots, cast)),
         negative_prompt=negative,
         bind_loras=True, lora_scale=ident_scale, use_ip_adapter=True, face_crop=True,
         controlnet="canny", canny_from_plate=True,
     )
     return [plate, identity]
+
+
+# vivijure-cf#1442: the object of the shot's own gaze phrase: "looking at a laptop", "looking down at the map",
+# "looking over at their notes". It ends at punctuation or a joining word, and is at most four words.
+_GAZE_OBJECT = re.compile(
+    r"\blooking\s+(?:down\s+|over\s+)?at\s+(?:(?:an?|the|his|her|their|its)\s+)?"
+    r"([a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,3}?)\s*(?=[,.;:!?]|\s+(?:and|while|as|with|on|in|at)\b|$)",
+    re.IGNORECASE)
+# What a gaze can be at that is not a thing at the shared surface: a person, or the lens itself.
+_GAZE_NOT_A_THING = frozenset({"each other", "one another", "him", "her", "them", "me", "us", "camera",
+                               "the camera", "viewer", "lens"})
+
+
+def pass_b_gaze_clause(scene: Scene, mode: str, max_slots: int, cast: Cast | None = None) -> str:
+    """The Pass B gaze clause for this shot, or "" (vivijure-cf#1442).
+
+    Under per-region plate text the plate draws the faces head-on with only the eyes lowered, and Pass B, drawing
+    each face through an identity adapter and cast LoRA trained on portraits that look at the camera, opens the eyes
+    to the lens (cf#1281, the 2026-11-06 diagnostic). Pass B's prompt says nothing about the eyes. With `auto`, on a
+    two-person shot within the slot cap, this names what the shot's own text says they look at. Off, a one-person
+    shot, a shot with no "looking at <X>", or a gaze at a person (a pronoun, or a cast member's name or its first
+    word) or the camera: "". Pure."""
+    if mode != "auto" or not (2 <= len(scene.character_slots) <= max_slots):
+        return ""
+    m = _GAZE_OBJECT.search(scene.prompt or "")
+    if not m:
+        return ""
+    thing = m.group(1).strip().lower()
+    people = set()
+    for s in scene.character_slots:
+        name = (slot_trigger(cast, s) if cast is not None else "").strip().lower()
+        if name:
+            people.update({name, name.split()[0]})
+    if not thing or thing in _GAZE_NOT_A_THING or thing in people or thing.split()[0] in people:
+        return ""
+    return f"looking down at the {thing}, eyes on the {thing}, not at the camera"
 
 
 def regional_ip_adapter_scale(cfg: KeyframeParams) -> float:
