@@ -1,3 +1,0 @@
-**Feat: `keyframe.multi_char.pose_template` picks the figure the two-person pose skeleton draws (vivijure-cf#1281).**
-
-`stand` (the default) is the upright, full-length, head-on figure drawn before; it is byte-identical and keeps every reuse hash. `reach` draws a waist-up figure with the arm nearer the partner forward and the head turned toward the partner (the far eye and far ear dropped), and mirrors the figure on the right so both face the frame centre. It is for two people at a shared surface, where the head-on figure cannot turn a head toward the work. `auto` picks `reach` from the shot text. A knob, not a default change: a sweep on the studio decides that.
