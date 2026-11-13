@@ -94,7 +94,10 @@ the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 1
 2. Wait 65 s after the release before submitting anything. Renders through the studio got `keyframe /run -> 409` in that window after the 1.1.7 repin.
 3. On a thin image built on the bare toolchain, after a repin, every worker is cold and pulls about 24 GB from R2 (on a code image built on the stills weights base, a stills job pulls nothing: [stills-weights-base.md](stills-weights-base.md), #564), and a warm-up batch does not change that: each NEW worker pulls again. So keep the number of concurrent cold workers small, about 4 to 6, by submitting in small batches, and budget one cold pull per worker. On 2026-11-06, 15 cold workers at once slowed pulls to 2.6 MiB/s and stretched cold jobs to about 20 minutes each; 6 at once pulled normally (cold delay about 2 to 3 minutes). Submitting 2 first and the rest once they ran did NOT help after a new image: the second batch started on new workers, cold.
 
-**Backend 1.1.23, built 2026-11-13 UTC; NOT pinned as of this record.** A code-only release on the 1.1.22 stills base.
+**Backend 1.1.23, pinned 2026-11-13 (release v50, 10:07:56.44Z).** Built 2026-11-13 UTC. A code-only release on the 1.1.22 stills base.
+Pin record, read from the RunPod API by the lead (`list-endpoint-releases`, endpoint `xe5d1ivs40ohjo`): release id `cmwetcs2f002nhrj5ac35ka7x`,
+version 50, `template.imageName` 1.1.22@sha256:6144a828... to 1.1.23@sha256:2153bf78..., rollout 100%.
+(This heading first said "NOT pinned as of this record"; corrected 2026-11-13 from that read. It supersedes that line.)
 
 - **Code:** main `c248dd2` (thin-image run 43402869698), which adds `keyframe.plate_gaze` (#653, vivijure-cf#1442).
   Its default `off` draws what 1.1.22 drew and keeps every reuse hash. Built from `deploy/Dockerfile.thin` with
@@ -112,8 +115,10 @@ the target. Tested on a separate endpoint in R2 mode: 1344x768 to 1890x1080 in 1
 **Backend rollback from 1.1.23:** image `vivijure-backend:1.1.22@sha256:6144a82824bbe311bb669bde68038147cee910432c4375bcc88199d9bcca96c4`
 (same base, so no weight pull), idle timeout 60 s, max 12, `QUEUE_DELAY` 4, disk 300 GB. Follow the repinning procedure above.
 
-**Backend 1.1.22, pinned 2026-11-13 at about 09:27Z (the lead's report: drain to 0, image, max 12; the RunPod release record was not read from the seat that wrote this).** Built 2026-11-13 UTC (smoke 09:21Z). A code-only release on the 1.1.21 stills base.
-(This heading first said "NOT pinned as of this record"; corrected 2026-11-13. It supersedes that line.)
+**Backend 1.1.22, pinned 2026-11-13 (release v49, 09:24:46.541Z).** Built 2026-11-13 UTC (smoke 09:21Z). A code-only release on the 1.1.21 stills base.
+Pin record, read from the RunPod API by the lead (`list-endpoint-releases`, endpoint `xe5d1ivs40ohjo`): release id `cmwert9os0017cl9c80nrxccu`,
+version 49, `template.imageName` 1.1.21@sha256:dbc917d4... to 1.1.22@sha256:6144a828....
+(Corrected 2026-11-13 from that read. It supersedes two earlier lines of this record: "NOT pinned as of this record", then "about 09:27Z", which was the lead's estimate.)
 
 - **Code:** main `0905b93` (thin-image run 43399018177), which adds `keyframe.pass_b_gaze` (#651, vivijure-cf#1442).
   Its default `off` draws what 1.1.21 drew and keeps every reuse hash. Built from `deploy/Dockerfile.thin` with
