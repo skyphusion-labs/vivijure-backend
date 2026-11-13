@@ -128,6 +128,9 @@ class FeatureCache(str, Enum):
 
 # ------------------------------------------------------------------ multi-character block
 
+POSE_TEMPLATES = ("stand", "reach", "auto")  # multi_char.pose_template (vivijure-cf#1281)
+
+
 @dataclass
 class MultiCharConfig:
     """Anti-bleed config for the **regional multi-character path only** (2+ characters in one
@@ -158,6 +161,10 @@ class MultiCharConfig:
     # fraction of the width apart around the frame centre, so no empty band is left between two people
     # (vivijure-cf#1143: the plate drew a third person in that band). Clamped so a figure stays in its region.
     pose_spread: float = 0.0
+    # vivijure-cf#1281: the figure the pose skeleton draws. "stand" (default) is the upright, full-length, head-on
+    # figure drawn since the skeleton existed. "reach" is waist-up, the arm nearer the partner forward and the head
+    # turned toward the partner, for two people at a shared surface. "auto" picks reach from the shot text.
+    pose_template: str = "stand"
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "MultiCharConfig":
@@ -173,6 +180,7 @@ class MultiCharConfig:
             controlnet_pose_scale=_clamp(d.get("controlnet_pose_scale"), 0.0, 1.5, base.controlnet_pose_scale),
             region_gutter=_clamp_int(d.get("region_gutter"), 0, 256, base.region_gutter),
             pose_spread=_clamp(d.get("pose_spread"), 0.0, 0.9, base.pose_spread),
+            pose_template=(d["pose_template"] if d.get("pose_template") in POSE_TEMPLATES else base.pose_template),
         )
 
 

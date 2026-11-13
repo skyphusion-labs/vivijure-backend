@@ -134,7 +134,7 @@ def test_the_plate_pose_control_carries_the_spread(tmp_path, gpu_fakes):  # noqa
 def test_the_no_plate_regional_path_carries_it_too(tmp_path, gpu_fakes, monkeypatch):  # noqa: F811
     seen = []
     real = kf._pose_skeleton
-    monkeypatch.setattr(kf, "_pose_skeleton", lambda w, h, boxes, *, spread=0.0: seen.append(spread) or real(w, h, boxes, spread=spread))
+    monkeypatch.setattr(kf, "_pose_skeleton", lambda w, h, boxes, *, spread=0.0, **kw: seen.append(spread) or real(w, h, boxes, spread=spread, **kw))
     monkeypatch.setattr(kf, "_ref_images", lambda cast, slot, count: [Image.new("RGB", (8, 8))])
     params = kf.KeyframeParams(width=SW, height=SH, identity_method="ip_adapter", scene_lock=False, pose_spread=0.4)
     from test_debug_intermediates_1143 import CAST, SB, _Pipe, _scene, _Server
