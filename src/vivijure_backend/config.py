@@ -129,6 +129,7 @@ class FeatureCache(str, Enum):
 # ------------------------------------------------------------------ multi-character block
 
 POSE_TEMPLATES = ("stand", "reach", "auto")  # multi_char.pose_template (vivijure-cf#1281)
+PASS_B_GAZE_MODES = ("off", "auto")  # keyframe.pass_b_gaze (vivijure-cf#1442)
 
 
 @dataclass
@@ -240,6 +241,11 @@ class KeyframeConfig:
     # Default 3 (ruled 2026-11-06 on the live 1.1.13 check: clean two-person stills 2 of 6 -> 5 of 6, no false
     # clean, about +23 s per two-person keyframe on average, at most 3 extra plates).
     plate_count_retries: int = 3
+    # vivijure-cf#1442: on a two-person scene-lock shot, Pass B (the identity pass) says where the eyes go. "auto"
+    # reads the object of the shot text's own "looking at <X>" and adds "looking down at the <X>, eyes on the <X>,
+    # not at the camera" after the lock clause. "off" (default) is the prompt as before, byte for byte, so no
+    # stored still redraws. Pass A never changes: it already holds the action (cf#1281, 2026-11-06 diagnostic).
+    pass_b_gaze: str = "off"
     multi_char: MultiCharConfig = field(default_factory=MultiCharConfig)
 
     @classmethod
@@ -295,6 +301,7 @@ class KeyframeConfig:
             plate_regional_text=d.get("plate_regional_text") is True if "plate_regional_text" in d else base.plate_regional_text,
             plate_people_free_background=d.get("plate_people_free_background") is True if "plate_people_free_background" in d else base.plate_people_free_background,
             plate_count_retries=_clamp_int(d.get("plate_count_retries"), 0, 3, base.plate_count_retries),
+            pass_b_gaze=(d["pass_b_gaze"] if d.get("pass_b_gaze") in PASS_B_GAZE_MODES else base.pass_b_gaze),
             multi_char=MultiCharConfig.from_dict(d.get("multi_char")),
         )
 

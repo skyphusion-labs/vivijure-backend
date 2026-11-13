@@ -1,0 +1,3 @@
+**Feat: `keyframe.pass_b_gaze` says where the eyes go in Pass B (vivijure-cf#1442)**
+
+On a two-person scene-lock shot, `auto` reads the object of the shot text's own "looking at <X>" and adds "looking down at the <X>, eyes on the <X>, not at the camera" to the Pass B (identity) prompt after the lock clause. Pass A never changes. There is no clause on a one-person shot, a shot with no gaze phrase, or a gaze at a person or the camera. `off` (default) is the prompt as before, byte for byte, and keeps every reuse hash (pinned against main 852eac6). This is a knob to measure the workbench gaze class (under per-region plate text, Pass B turns side-by-side faces to the lens), not a default change.
