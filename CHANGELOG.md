@@ -11,6 +11,14 @@ folded into a release section by `scripts/changelog-assemble.py` when the releas
 
 ## Unreleased
 
+## [1.1.21] -- 2026-11-12
+
+**What is new in the 1.1.21 image against 1.1.20: one feature, `multi_char.pose_template` (#649), on the same stills base.** 1.1.21 is built at main `27de2b6` (thin-image run 43334099190) FROM `stills-t1-m1-b2@sha256:9380cc42...`, the base 1.1.20 uses. Between `c7a6f02` and `27de2b6` the only `src/` changes are #649's (`config.py`, `keyframe.py`, `orchestrator.py`, `pipeline.py`); `deploy/Dockerfile.thin` and `deploy/smoke_imports.py` did not change. Against 1.1.20 the image shares 27 of 29 layers; the 2 new layers are the code, 202,145 bytes compressed (GHCR manifests, read 2026-11-13 UTC). So a worker that ran 1.1.20 pulls about 0.2 MB, and no weight layer. The version is a PATCH number on a feature because the thin-image tag was pushed as 1.1.21 before the release, and the workflow refuses to overwrite a GHCR tag.
+
+**Feat: `keyframe.multi_char.pose_template` picks the figure the two-person pose skeleton draws (vivijure-cf#1281).**
+
+`stand` (the default) is the upright, full-length, head-on figure drawn before; it is byte-identical and keeps every reuse hash. `reach` draws a waist-up figure with the arm nearer the partner forward and the head turned toward the partner (the far eye and far ear dropped), and mirrors the figure on the right so both face the frame centre. It is for two people at a shared surface, where the head-on figure cannot turn a head toward the work. `auto` picks `reach` from the shot text. A knob, not a default change: a sweep on the studio decides that.
+
 ## [1.1.20] -- 2026-11-12
 
 **What is new in the 1.1.20 image against 1.1.19: the stills weights base, not the code.** 1.1.20 is built at main `9f2505d` (thin-image run 43312194021); 1.1.19 at main `dd3e7fc` (thin-image run 43070289187). Between them nothing under `src/` changed and `deploy/smoke_imports.py` did not change; `deploy/Dockerfile.thin` changed one comment line (`git diff --stat dd3e7fc 9f2505d -- src deploy/Dockerfile.thin deploy/smoke_imports.py`). The code layers rebuild to new digests (198,038 and 2,411 bytes, against 198,029 and 2,412) with the same sources.
