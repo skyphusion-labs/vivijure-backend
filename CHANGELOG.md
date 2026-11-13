@@ -11,6 +11,14 @@ folded into a release section by `scripts/changelog-assemble.py` when the releas
 
 ## Unreleased
 
+## [1.1.22] -- 2026-11-13
+
+**What is new in the 1.1.22 image against 1.1.21: one feature, `keyframe.pass_b_gaze` (#651), on the same stills base.** 1.1.22 is built at main `0905b93` (thin-image run 43399018177) FROM `stills-t1-m1-b2@sha256:9380cc42...`, the base 1.1.21 uses. Between `27de2b6` and `0905b93` the only `src/` changes are #651's (`config.py`, `keyframe.py`, `orchestrator.py`, `pipeline.py`); `deploy/Dockerfile.thin` and `deploy/smoke_imports.py` did not change (`git diff --stat 27de2b6 0905b93 -- src deploy/Dockerfile.thin deploy/smoke_imports.py`). Against 1.1.21 the image shares 27 of 29 layers; the 2 new layers are the code, 203,514 bytes compressed (GHCR manifests, read 2026-11-13 UTC). So a worker that ran 1.1.21 pulls about 0.2 MB, and no weight layer.
+
+**Feat: `keyframe.pass_b_gaze` says where the eyes go in Pass B (vivijure-cf#1442)**
+
+On a two-person scene-lock shot, `auto` reads the object of the shot text's own "looking at <X>" and adds "looking down at the <X>, eyes on the <X>, not at the camera" to the Pass B (identity) prompt after the lock clause. Pass A never changes. There is no clause on a one-person shot, a shot with no gaze phrase, or a gaze at a person or the camera. `off` (default) is the prompt as before, byte for byte, and keeps every reuse hash (pinned against main 852eac6). This is a knob to measure the workbench gaze class (under per-region plate text, Pass B turns side-by-side faces to the lens), not a default change.
+
 ## [1.1.21] -- 2026-11-12
 
 **What is new in the 1.1.21 image against 1.1.20: one feature, `multi_char.pose_template` (#649), on the same stills base.** 1.1.21 is built at main `27de2b6` (thin-image run 43334099190) FROM `stills-t1-m1-b2@sha256:9380cc42...`, the base 1.1.20 uses. Between `c7a6f02` and `27de2b6` the only `src/` changes are #649's (`config.py`, `keyframe.py`, `orchestrator.py`, `pipeline.py`); `deploy/Dockerfile.thin` and `deploy/smoke_imports.py` did not change. Against 1.1.20 the image shares 27 of 29 layers; the 2 new layers are the code, 202,145 bytes compressed (GHCR manifests, read 2026-11-13 UTC). So a worker that ran 1.1.20 pulls about 0.2 MB, and no weight layer. The version is a PATCH number on a feature because the thin-image tag was pushed as 1.1.21 before the release, and the workflow refuses to overwrite a GHCR tag.
