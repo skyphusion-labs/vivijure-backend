@@ -35,7 +35,7 @@ backstop -- a kernel built only against an `sm_*a` variant -- is caught by the r
 
 ## Per-pod procedure (repeat for each of the three gpuTypeIds)
 
-Every op runs in your own login shell: `sudo -u rollins bash -lc '<op>'`.
+Run each op in your own login shell.
 
 1. **Scoped exfil creds** -- the read path uses a dedicated `R2_S3_*` exfil key, read-write only to the
    `derisk/` prefix, NEVER the backend's `R2_*` model-pull names and never a reused identity key.
@@ -152,7 +152,7 @@ PUBLIC GHCR package. Verified against the artifact, not records:
 Still pending to fully close #14: the `get_arch_list()` {sm_90, sm_100, sm_120} STOP-gate, which runs as
 the first command (`arch-gate`) on the canary.
 
-## Per-card deploy commands (Strummer, infra -- locked + reproducible)
+## Per-card deploy commands (infra -- locked and reproducible)
 
 **Status note (2026-07-31):** this procedure predates the `templateId` + `stream-pod-logs` path
 described in "Canonical start command + read path" above and is kept here as a FALLBACK, not the
@@ -162,12 +162,11 @@ this `runpodctl` flow), and none of that has been re-verified against the newer 
 migrating it is separate work, not done here. If you are starting a NEW de-risk run and do not need
 everything this section already proves out, start with the canonical section above instead.
 
-Driven from a checkout of this repo (`~/vivijure-backend`) via `runpodctl`; this section, unlike the MCP
+Driven from a checkout of this repo via `runpodctl`; this section, unlike the MCP
 path above, still needs `runpodctl` because it drives DC-placement probing and TTL flags this doc has not
-re-verified through the MCP (see the status note above). Every op runs in Strummer's own **login**
-shell (`sudo -u strummer bash -l ...`) so
-the per-identity `RUNPOD_API_KEY` loads -- `runpodctl pod create` errors `api key not found` from a
-non-login shell. The start command is the committed `deploy/derisk_pod_start.sh` wrapped in the committed
+re-verified through the MCP (see the status note above). Run each op in a login shell.
+A login shell loads the per-identity `RUNPOD_API_KEY`.
+`runpodctl pod create` errors `api key not found` from a non-login shell. The start command is the committed `deploy/derisk_pod_start.sh` wrapped in the committed
 boto3->R2 read-path outer `deploy/derisk_read_wrapper.sh`, base64-transported so it survives the shell ->
 runpodctl -> RunPod -> container quoting layers byte-identical.
 
@@ -224,7 +223,7 @@ and the boto3->R2 read-path outer (`deploy/derisk_read_wrapper.sh`). The deploy 
 them, so what fires is exactly the reviewed files (no hand-pasted heredoc).
 
 ```
-cd ~/vivijure-backend && git checkout main && git pull --ff-only
+cd /path/to/vivijure-backend && git checkout main && git pull --ff-only
 
 # R2_S3_* exfil creds loaded in YOUR login shell (presence-check only, NEVER echo a value):
 for v in R2_S3_ENDPOINT R2_S3_ACCESS_KEY_ID R2_S3_SECRET_ACCESS_KEY R2_S3_BUCKET; do
@@ -306,10 +305,10 @@ Held at the clean pre-fire boundary (no GPU pods running; nothing to revert; pro
 To resume the #15 3-arch de-risk:
 
 1. The lead mints a DEDICATED bucket-level Object-R+W-on-`vivijure` token and drops the four `R2_S3_*`
-   into Strummer's shell (600 file). Strummer FIRES the **RTX PRO 6000 Blackwell Server Edition (sm_120)
+   into the operator shell (600 file). The operator fires the **RTX PRO 6000 Blackwell Server Edition (sm_120)
    canary** via `runpodctl pod create` (login shell; JSON `--env`; `--docker-args`; `--gpu-id`;
    `--cloud-type SECURE`; `--container-disk-in-gb 220`; native `--terminate-after`=fire+60min; probe
-   `--data-center-ids` until one places), image `:0.3.1`, NO volume. Strummer sends the pod ID + fire
+   `--data-center-ids` until one places), image `:0.3.1`, NO volume. The operator sends the pod ID + fire
    timestamp to the lead, then shreds the creds file (post-confirm).
 2. Watch for `@event arch_gate {... "missing": [], "passed": true}` -- report the raw `arch_list`
    verbatim (closes #14). A missing base arch = hard STOP, do-not-promote, flag.
