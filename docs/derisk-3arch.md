@@ -35,7 +35,7 @@ backstop -- a kernel built only against an `sm_*a` variant -- is caught by the r
 
 ## Per-pod procedure (repeat for each of the three gpuTypeIds)
 
-Every op runs in your own login shell: `sudo -u rollins bash -lc '<op>'`.
+Run each op in your own login shell.
 
 1. **Scoped exfil creds** -- the read path uses a dedicated `R2_S3_*` exfil key, read-write only to the
    `derisk/` prefix, NEVER the backend's `R2_*` model-pull names and never a reused identity key.
@@ -164,10 +164,9 @@ everything this section already proves out, start with the canonical section abo
 
 Driven from a checkout of this repo (`~/vivijure-backend`) via `runpodctl`; this section, unlike the MCP
 path above, still needs `runpodctl` because it drives DC-placement probing and TTL flags this doc has not
-re-verified through the MCP (see the status note above). Every op runs in Strummer's own **login**
-shell (`sudo -u strummer bash -l ...`) so
-the per-identity `RUNPOD_API_KEY` loads -- `runpodctl pod create` errors `api key not found` from a
-non-login shell. The start command is the committed `deploy/derisk_pod_start.sh` wrapped in the committed
+re-verified through the MCP (see the status note above). Run each op in a login shell.
+A login shell loads the per-identity `RUNPOD_API_KEY`.
+`runpodctl pod create` errors `api key not found` from a non-login shell. The start command is the committed `deploy/derisk_pod_start.sh` wrapped in the committed
 boto3->R2 read-path outer `deploy/derisk_read_wrapper.sh`, base64-transported so it survives the shell ->
 runpodctl -> RunPod -> container quoting layers byte-identical.
 
