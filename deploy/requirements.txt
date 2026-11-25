@@ -9,8 +9,8 @@
 # torch 2.7.1+cu128.
 
 # --- render engines (SDXL keyframe + Wan 2.2 i2v) : exact, pod-validated ---
-diffusers==0.42.1
-transformers==5.22.2
+diffusers==0.43.0
+transformers==5.24.0
 # huggingface_hub: PINNED (#206). Was unpinned (transitive via transformers/diffusers) and
 # drifted up to 1.x, which added an offline snapshot-completeness check
 # (_raise_if_incomplete_snapshot): it hard-fails when a baked tree listing names a curated-out
@@ -26,8 +26,8 @@ huggingface_hub==1.33.0
 # land with a transformers release that allows it. This restores pip
 # resolution only. The runtime image has not been rebuilt on this pin.
 tokenizers==0.23.3
-accelerate==1.15.0
-peft==0.21.2
+accelerate==1.16.0
+peft==0.22.0
 # diffusers 0.39.0 requires the stable safetensors 0.8.0 release; its 0.8.0rc1
 # predecessor does not satisfy >=0.8.0 and makes the runtime image unbuildable.
 safetensors==0.8.0
@@ -37,9 +37,9 @@ torchao==0.17.0           # fp8 quant for the keyframe + i2v paths. 0.18.0 impor
                           # (1.0.15 H200 smoke s1-41aa1926802e). 0.17 logs "skipping cpp
                           # extensions (needs torch>=2.11)" on this cu128 line; fp8 still runs
                           # via the Python path. Do not bump past 0.17 while torch stays 2.7.1.
-imageio==2.38.1
+imageio==2.38.2
 imageio-ffmpeg==0.8.1     # Wan frame export (diffusers.utils.export_to_video)
-av==18.1.0                # PyAV: the imageio plugin="pyav" backend finish.py uses for frame-
+av==18.1.1                # PyAV: the imageio plugin="pyav" backend finish.py uses for frame-
                           # accurate clip read/write (immeta/imiter/imwrite). Without it the
                           # finishing stage imports fine (imageio is present) but raises at
                           # runtime: "The `pyav` plugin is not installed". ships manylinux wheels
@@ -90,7 +90,7 @@ boto3>=1.44.3
 
 # --- finishing stage (RIFE interpolation + face restore) ---
 # av / PyAV: the imageio pyav plugin that finish_clip uses to decode/encode video clips.
-av==18.1.0
+av==18.1.1
 # gfpgan: blind face restorer (GFPGAN path, the default). Pulls basicsr + facexlib as transitive deps.
 gfpgan==1.3.8
 # facexlib: face detection for gfpgan (and the optional codeformer path). Pinned explicitly
